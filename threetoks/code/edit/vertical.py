@@ -35,10 +35,11 @@ from threetoks.code.edit.index import Symbol, SymbolIndex
 from threetoks.nodes import MenuNode
 from threetoks.render import Episode
 
-MAX_REPAIRS = 3
+MAX_REPAIRS_TOTAL = 5     # hard cap on failed checks across the episode
+NAV_BACKTRACKS_MAX = 2    # escapes tolerated while navigating
 FORCE_DONE_AT_STEPS_LEFT = 2
 REPAIR_TEMPERATURE = 0.4
-LABEL_CLIP = 60
+LABEL_CLIP = 72
 _IDENT = re.compile(r"[a-z_][a-z0-9_]*")
 _TOKEN_SPLIT = re.compile(r"[^a-z0-9]+")
 
@@ -84,13 +85,17 @@ class EditVertical:
         self.phase = "start"
         self.outcome = EditOutcome()
 
+        self._req_tokens = set(_IDENT.findall(request.lower()))
         self._locate_pool: list[Symbol] = []   # ranked runners-up
         self._locate_choice: nav.LevelChoice | None = None
         self._nav: nav.LevelChoice | None = None
+        self._nav_values: dict[str, object] = {}   # menu label -> value
         self._nav_folder = ""
         self._nav_file = ""
         self._nav_class = ""
-        self._nav_defs: list[tuple[str, str]] = []
+        self._excluded: dict[str, set] = {"folder": set(), "file": set(),
+                                          "def": set()}
+        self._backtracks = 0
         self.target: Symbol | None = None
         self._original_source = ""
         self._target_indent = ""
@@ -99,7 +104,8 @@ class EditVertical:
         self._delete_choice: nav.LevelChoice | None = None
         self._delete_spans: list[tuple[int, int]] = []
         self._generate_node: ops.GenerateSpanNode | None = None
-        self._repairs = 0
+        self._repairs = 0       # total failed checks, capped for the episode
+        self._stage = 0         # escalation stage for the CURRENT target
 
     # ------------------------------------------------------------ engine API
 
@@ -150,9 +156,7 @@ class EditVertical:
         hits = self._name_hits()
         if not hits:
             self.outcome.path_taken = "navigate"
-            self._nav = nav.LevelChoice("Which folder holds the code to fix?",
-                                        nav.list_folders(self.root))
-            self.phase = "nav_folder"
+            self._enter_folder_level()
             return
         ranked = self._rank(hits)
         if len(hits) == 1 or self._clear_winner(ranked):
@@ -185,11 +189,10 @@ class EditVertical:
         it); path segments, qualname parts, and the docstring first line
         all count — the free pre-ranking E8's scenario 5 was missing.
         """
-        request_tokens = set(_IDENT.findall(self.request.lower()))
         scored = []
         for symbol in hits:
             own = _symbol_tokens(symbol) - {symbol.name.lower()}
-            scored.append((len(request_tokens & own), symbol))
+            scored.append((_overlap(self._req_tokens, own), symbol))
         scored.sort(key=lambda pair: -pair[0])
         return scored
 
@@ -215,12 +218,13 @@ class EditVertical:
                              symbol.end_lineno)
         self._seen_hashes = {hash(_dedent(span, self._target_indent))}
         self._tried_deletes = set()
+        self._stage = 0        # each target gets its own escalation ladder
         self.outcome.target = symbol.qualname
         self.outcome.target_file = symbol.file
         self.episode.log_session(f"> target: {symbol.qualname} in {symbol.file}")
 
     def _node_locate_menu(self):
-        return self._level(self._locate_choice, self._picked_candidate)
+        return self._menu_or_free(self._locate_choice, self._picked_candidate)
 
     def _apply_locate_menu(self, node, decision) -> None:
         picked = self._locate_choice.apply(decision)
@@ -235,88 +239,180 @@ class EditVertical:
         self._set_target(symbol)
         self.phase = "operation"
 
-    # ------------------------------------------------------------ navigate
-
-    def _level(self, choice: nav.LevelChoice, on_pick):
-        """Emit the level's menu, or resolve a 0/1-option level for free."""
+    def _menu_or_free(self, choice: nav.LevelChoice, on_pick):
+        """A LevelChoice's menu, or its single remaining item for free."""
         node = choice.node()
         if node is not None:
             return node
-        item = choice.free_take()
-        if item is None:
-            self._finish(False, f"nothing to pick: {choice.question}")
-            return None
-        on_pick(item)
+        on_pick(choice.free_take())
         return None
 
-    def _node_nav_folder(self):
-        return self._level(self._nav, self._picked_folder)
+    # ------------------------------------------------------------ navigate
 
-    def _apply_nav_folder(self, node, decision) -> None:
-        self._apply_level(decision, "no folder chosen", self._picked_folder)
+    def _enter_level(self, phase: str, question: str,
+                     entries: list[tuple[object, str, set]], on_pick) -> None:
+        """Rank a level's (value, label, tokens) entries by request-keyword
+        overlap: a lone entry or a strictly best-scoring one is taken for
+        FREE; otherwise a paged menu is shown, best candidates first."""
+        if not entries:
+            self._backtrack_from(phase)
+            return
+        scored = sorted(entries,
+                        key=lambda e: -_overlap(self._req_tokens, e[2]))
+        top = _overlap(self._req_tokens, scored[0][2])
+        second = _overlap(self._req_tokens, scored[1][2]) \
+            if len(scored) > 1 else -1
+        if len(scored) == 1 or (top > 0 and top > second):
+            on_pick(scored[0][0])
+            return
+        self._nav_values = {_clip(label): value for value, label, _ in scored}
+        self._nav = nav.LevelChoice(question,
+                                    [_clip(label) for _, label, _ in scored])
+        self._nav_on_pick = on_pick
+        self.phase = phase
+
+    def _apply_nav(self, decision, fail_reason: str) -> None:
+        """Shared decision handling: pick, page, or backtrack on escape."""
+        picked = self._nav.apply(decision)
+        if picked is None:
+            self._backtrack_from(self.phase, fail_reason)
+        elif picked != nav.MORE_LABEL:
+            self._nav_on_pick(self._nav_values[picked])
+
+    def _backtrack_from(self, phase: str, why: str = "nothing fits") -> None:
+        """An escape mid-navigation goes UP one level (the escaped choice
+        struck out), instead of abandoning the episode (E8 live runs died
+        exactly here). Bounded by NAV_BACKTRACKS_MAX."""
+        self._backtracks += 1
+        if phase == "nav_folder" or self._backtracks > NAV_BACKTRACKS_MAX:
+            self._finish(False, f"navigation abandoned: {why}")
+        elif phase == "nav_file":
+            self._excluded["folder"].add(self._nav_folder)
+            self._enter_folder_level()
+        else:
+            self._excluded["file"].add(self._rel_path())
+            self._enter_file_level()
+
+    def _enter_folder_level(self) -> None:
+        entries = []
+        for folder in self._candidate_folders():
+            files = [f"{folder}/{name}" if folder != "." else name
+                     for name in nav.list_files(self._folder_path(folder))]
+            tokens = set().union(*(self._file_tokens(rel) for rel in files),
+                                 _words(folder))
+            label = f"{folder} — {', '.join(Path(f).name for f in files)}"
+            entries.append((folder, label, tokens))
+        self._enter_level("nav_folder", "Which folder holds the code to fix?",
+                          entries, self._picked_folder)
+
+    def _candidate_folders(self) -> list[str]:
+        folders = [f for f in nav.list_folders(self.root)
+                   if f not in self._excluded["folder"]]
+        if nav.list_files(self.root) and "." not in self._excluded["folder"]:
+            folders.append(".")            # corpus files at the root itself
+        return folders
+
+    def _folder_path(self, folder: str) -> Path:
+        return self.root if folder == "." else self.root / folder
 
     def _picked_folder(self, folder: str) -> None:
         self._nav_folder = folder
-        self._nav = nav.LevelChoice(
-            f"Which file in '{folder}' holds the code to fix?",
-            nav.list_files(self.root / folder))
-        self.phase = "nav_file"
+        self._enter_file_level()
 
-    def _node_nav_file(self):
-        return self._level(self._nav, self._picked_file)
+    def _enter_file_level(self) -> None:
+        folder = self._nav_folder
+        entries = []
+        for name in nav.list_files(self._folder_path(folder)):
+            rel = f"{folder}/{name}" if folder != "." else name
+            if rel in self._excluded["file"]:
+                continue
+            defs = [d for d, _ in self.index.top_level_names(rel)]
+            label = f"{name} — {', '.join(defs)}" if defs else name
+            entries.append((name, label, self._file_tokens(rel)))
+        self._enter_level("nav_file",
+                          f"Which file in '{folder}' holds the code to fix?",
+                          entries, self._picked_file)
 
-    def _apply_nav_file(self, node, decision) -> None:
-        self._apply_level(decision, "no file chosen", self._picked_file)
+    def _file_tokens(self, rel: str) -> set:
+        """Rankable words of one file: stem, symbols, and body text (body
+        identifiers are free signal — a request often names a variable the
+        docstring never mentions)."""
+        return _words(Path(rel).stem) | _words(self.index.source_of(rel))
 
     def _picked_file(self, filename: str) -> None:
         self._nav_file = filename
         rel = self._rel_path()
-        self._nav_defs = self.index.top_level_names(rel)
-        self._nav = nav.LevelChoice(
-            f"Which definition in '{filename}' holds the code to fix?",
-            [name for name, _ in self._nav_defs])
-        self.phase = "nav_def"
+        source = self.index.source_of(rel)
+        entries = []
+        for name, kind in self.index.top_level_names(rel):
+            symbol = self.index.symbol_at(rel, name)
+            hint = symbol.doc or (", ".join(self.index.methods_of(rel, name))
+                                  if kind == "class" else "")
+            label = f"{name} ({kind}) — {hint}" if hint else f"{name} ({kind})"
+            entries.append(((name, kind), label,
+                            _def_tokens(symbol) | self._body_words(source,
+                                                                   symbol)))
+        self._enter_level("nav_def",
+                          f"Which definition in '{filename}' is it?",
+                          entries, self._picked_def)
 
-    def _node_nav_def(self):
-        return self._level(self._nav, self._picked_def)
+    @staticmethod
+    def _body_words(source: str, symbol: Symbol) -> set:
+        """The def's own body text as ranking signal."""
+        return _words(ops.span_text(source, symbol.lineno, symbol.end_lineno))
 
-    def _apply_nav_def(self, node, decision) -> None:
-        self._apply_level(decision, "no definition chosen", self._picked_def)
-
-    def _picked_def(self, name: str) -> None:
+    def _picked_def(self, value: tuple[str, str]) -> None:
+        name, kind = value
         rel = self._rel_path()
-        if dict(self._nav_defs)[name] == "class":
+        if kind == "class":
             self._nav_class = name
-            self._nav = nav.LevelChoice(
-                f"Which method of '{name}' holds the code to fix?",
-                self.index.methods_of(rel, name))
-            self.phase = "nav_method"
+            source = self.index.source_of(rel)
+            entries = []
+            for method in self.index.methods_of(rel, name):
+                symbol = self.index.symbol_at(rel, f"{name}.{method}")
+                label = f"{method} — {symbol.doc}" if symbol.doc else method
+                entries.append((method, label,
+                                _def_tokens(symbol)
+                                | self._body_words(source, symbol)))
+            self._enter_level("nav_method",
+                              f"Which method of '{name}' is it?",
+                              entries, self._picked_method)
             return
         self._set_target(self.index.symbol_at(rel, name))
         self.phase = "operation"
 
-    def _node_nav_method(self):
-        return self._level(self._nav, self._picked_method)
-
-    def _apply_nav_method(self, node, decision) -> None:
-        self._apply_level(decision, "no method chosen", self._picked_method)
-
-    def _picked_method(self, name: str) -> None:
-        qual = f"{self._nav_class}.{name}"
+    def _picked_method(self, method: str) -> None:
+        qual = f"{self._nav_class}.{method}"
         self._set_target(self.index.symbol_at(self._rel_path(), qual))
         self.phase = "operation"
 
-    def _apply_level(self, decision, fail_reason: str, on_pick) -> None:
-        """Shared LevelChoice decision handling for every nav phase."""
-        picked = self._nav.apply(decision)
-        if picked is None:
-            self._finish(False, fail_reason)
-        elif picked != nav.MORE_LABEL:
-            on_pick(picked)
+    def _node_nav_folder(self):
+        return self._nav.node()
+
+    def _apply_nav_folder(self, node, decision) -> None:
+        self._apply_nav(decision, "no folder chosen")
+
+    def _node_nav_file(self):
+        return self._nav.node()
+
+    def _apply_nav_file(self, node, decision) -> None:
+        self._apply_nav(decision, "no file chosen")
+
+    def _node_nav_def(self):
+        return self._nav.node()
+
+    def _apply_nav_def(self, node, decision) -> None:
+        self._apply_nav(decision, "no definition chosen")
+
+    def _node_nav_method(self):
+        return self._nav.node()
+
+    def _apply_nav_method(self, node, decision) -> None:
+        self._apply_nav(decision, "no method chosen")
 
     def _rel_path(self) -> str:
-        return f"{self._nav_folder}/{self._nav_file}" if self._nav_folder \
-            else self._nav_file
+        return f"{self._nav_folder}/{self._nav_file}" \
+            if self._nav_folder and self._nav_folder != "." else self._nav_file
 
     # ------------------------------------------------------------ operation
 
@@ -375,7 +471,9 @@ class EditVertical:
 
     def _start_delete(self) -> None:
         """Offer the target's statements, minus spans already tried and
-        minus any whose deletion would break the file (checked free)."""
+        minus any whose deletion would break the file (checked free).
+        A statement whose text strictly out-matches every sibling on
+        request keywords is deleted for free, no menu."""
         source = self.index.source_of(self.target.file)
         spans = [s for s in ops.statement_spans(source, self.target.qualname)
                  if s not in self._tried_deletes
@@ -383,14 +481,23 @@ class EditVertical:
         if not spans:
             self._escalate("every deletable line was already tried")
             return
-        self._delete_spans = spans
+        scores = [_overlap(self._req_tokens,
+                           _words(ops.span_text(source, start, end)))
+                  for start, end in spans]
+        ranked = sorted(zip(scores, spans), key=lambda pair: -pair[0])
+        if len(ranked) == 1 or (ranked[0][0] > 0
+                                and ranked[0][0] > ranked[1][0]):
+            self._tried_deletes.add(ranked[0][1])
+            self._check_candidate(ops.delete_span(source, *ranked[0][1]))
+            return
+        self._delete_spans = [span for _, span in ranked]
         self._delete_choice = nav.LevelChoice(
             f"Which line inside {self.target.name}() is wrong?",
-            [_clip(ops.span_text(source, s, e)) for s, e in spans])
+            [_clip(ops.span_text(source, s, e)) for _, (s, e) in ranked])
         self.phase = "delete_menu"
 
     def _node_delete_menu(self):
-        return self._level(self._delete_choice, self._picked_delete)
+        return self._menu_or_free(self._delete_choice, self._picked_delete)
 
     def _apply_delete_menu(self, node, decision) -> None:
         picked = self._delete_choice.apply(decision)
@@ -498,21 +605,28 @@ class EditVertical:
         return oracle.run_test(self.root, f"import {module}\n")
 
     def _escalate(self, why: str) -> None:
-        """Widen the repair scope instead of looping on one wrong choice."""
+        """Widen the repair scope instead of looping on one wrong choice.
+
+        Per target: regenerate once, then re-ask the operation, then move
+        to the next locate candidate (which resets the ladder for the new
+        target). MAX_REPAIRS_TOTAL bounds the whole episode.
+        """
         self.episode.log_session(f"> {why}")
         self._repairs += 1
         self.outcome.repairs = self._repairs
-        if self._repairs > MAX_REPAIRS \
+        if self._repairs > MAX_REPAIRS_TOTAL \
                 or self.steps_left <= FORCE_DONE_AT_STEPS_LEFT:
             self._finish(False, why)
             return
-        stage = ("regenerate", "operation", "locate")[self._repairs - 1]
-        if stage == "regenerate" and self.outcome.operation:
+        stage, self._stage = self._stage, self._stage + 1
+        if stage == 0 and self.outcome.operation:
             self._retry_same_operation()
-        elif stage == "operation" or not self._locate_pool:
+        elif stage <= 1:
             self.phase = "operation"
-        else:
+        elif self._locate_pool:
             self._relocate()
+        else:
+            self._finish(False, why)
 
     def _retry_same_operation(self) -> None:
         """Stage 1: same operation again (delete re-menus, others resample)."""
@@ -548,10 +662,48 @@ def _replace_instruction(request: str, span: str, before: str,
     return "\n".join(lines)
 
 
+# Words too generic to carry ranking signal in Python source.
+_STOPWORDS = frozenset(
+    "return self def class import from if elif else for while in not and or "
+    "none true false pass raise with as try except finally print len int str "
+    "float list dict set range the a an it its is are was to of on this that "
+    "py".split())
+_PREFIX_MATCH_MIN = 5
+
+
+def _words(text: str) -> set[str]:
+    """Lowercased signal tokens of any text (identifier parts split too)."""
+    return {token for token in _TOKEN_SPLIT.split(text.lower())
+            if token and token not in _STOPWORDS}
+
+
+def _overlap(request_tokens: set[str], tokens: set[str]) -> int:
+    """Keyword overlap, counting long-prefix pairs too.
+
+    Exact matches count; so does a pair like "uppercase"/"upper" where one
+    token is a >=5-char prefix of the other — request prose rarely uses
+    the exact identifier morphology (E8 live: "UPPERCASE" vs .upper()).
+    """
+    score = 0
+    for token in tokens:
+        if token in request_tokens:
+            score += 1
+        elif len(token) >= _PREFIX_MATCH_MIN and any(
+                len(req) >= _PREFIX_MATCH_MIN
+                and (req.startswith(token) or token.startswith(req))
+                for req in request_tokens):
+            score += 1
+    return score
+
+
 def _symbol_tokens(symbol: Symbol) -> set[str]:
     """Rankable words of one candidate: path parts, qualname parts, doc."""
-    raw = f"{symbol.file} {symbol.qualname} {symbol.doc}".lower()
-    return {token for token in _TOKEN_SPLIT.split(raw) if token} - {"py"}
+    return _words(f"{symbol.file} {symbol.qualname} {symbol.doc}") - {"py"}
+
+
+def _def_tokens(symbol: Symbol) -> set[str]:
+    """Rankable words of one def inside an already-chosen file."""
+    return _words(f"{symbol.qualname} {symbol.doc}")
 
 
 def _dedent(text: str, indent: str) -> str:

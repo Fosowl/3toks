@@ -108,7 +108,9 @@ class OperationInferenceTest(unittest.TestCase):
 
 
 class DeleteStrikeOutTest(unittest.TestCase):
-    def test_failed_delete_is_struck_from_the_retry_menu(self):
+    def test_keyword_matched_line_is_deleted_free(self):
+        # "lowercase" prefix-matches the .lower() statement and nothing
+        # else scores, so the harness deletes the right line with no menu.
         holder, root = _corpus({"mod.py": (
             "def shout(s):\n    s = s.upper()\n    s = s.lower()\n"
             "    return s\n")})
@@ -116,18 +118,36 @@ class DeleteStrikeOutTest(unittest.TestCase):
         vertical = EditVertical("shout returns lowercase, remove the bad line",
                                 root, "from mod import shout\n"
                                 "assert shout('a') == 'A'\n")
-        # First delete round: "upper" matches and is deleted (wrong, test
-        # still fails). Second round: upper is struck out, "lower" matches.
-        backend = ScriptedBackend(["delete the offending", "upper()",
-                                   "lower()"], [])
+        backend = ScriptedBackend(["delete the offending"], [])
+        outcome = _run(vertical, backend)
+        self.assertTrue(outcome["success"], outcome)
+        self.assertEqual(outcome["operation"], "delete")
+        self.assertEqual(outcome["repairs"], 0)
+        self.assertEqual(backend.generations, 0)
+        self.assertEqual(len(backend.menus_seen), 1)   # only the op menu
+        self.assertNotIn("lower", (root / "mod.py").read_text())
+
+    def test_failed_delete_is_struck_from_the_retry_menu(self):
+        # No statement out-scores the others, so the menu shows; the first
+        # (wrong) pick is struck out of the retry menu.
+        holder, root = _corpus({"mod.py": (
+            "def tidy(s):\n    s = s.strip()\n    s = s.swapcase()\n"
+            "    return s\n")})
+        self.addCleanup(holder.cleanup)
+        vertical = EditVertical("tidy mangles what it is given, one of its "
+                                "steps has to go", root,
+                                "from mod import tidy\n"
+                                "assert tidy(' abc ') == 'abc'\n")
+        backend = ScriptedBackend(["delete the offending", "strip()",
+                                   "swapcase()"], [])
         outcome = _run(vertical, backend)
         self.assertTrue(outcome["success"], outcome)
         self.assertEqual(outcome["operation"], "delete")
         self.assertEqual(outcome["repairs"], 1)
         self.assertEqual(backend.generations, 0)
         final = (root / "mod.py").read_text()
-        self.assertIn("upper", final)
-        self.assertNotIn("lower", final)
+        self.assertIn("strip", final)
+        self.assertNotIn("swapcase", final)
 
 
 class OscillationEscalationTest(unittest.TestCase):
@@ -217,6 +237,73 @@ class NavigationTest(unittest.TestCase):
         self.assertEqual(outcome["path_taken"], "navigate")
         # navigation was all free-takes; only the operation menu was shown
         self.assertEqual(len(backend.menus_seen), 1)
+
+
+class RankedNavigationTest(unittest.TestCase):
+    def test_keyword_overlap_navigates_with_zero_menus(self):
+        # Request words match one file's def names/docstrings at every
+        # level, so folder, file, and def all resolve free (E8 scenario 4
+        # died on a bare-filename menu; enriched ranking removes the menu).
+        holder, root = _corpus({
+            "textutils/strings.py": (
+                'def normalize_whitespace(text):\n'
+                '    """Collapse runs of whitespace into single spaces."""\n'
+                '    return text.replace("\\t", " ").strip()\n'),
+            "textutils/wordcount.py": (
+                'def unique_words(text):\n'
+                '    """Count distinct words."""\n'
+                '    return len(set(text.split()))\n'),
+            "mathutils/rounding.py": (
+                'def round_half_up(value):\n'
+                '    """Round to nearest int."""\n'
+                '    return int(value + 0.5)\n'),
+        })
+        self.addCleanup(holder.cleanup)
+        vertical = EditVertical(
+            "the whitespace cleanup keeps double spaces instead of "
+            "collapsing them", root,
+            "from textutils.strings import normalize_whitespace\n"
+            "assert normalize_whitespace('a   b') == 'a b'\n")
+        backend = ScriptedBackend(["replace the target"],
+                                  ["import re\n    return re.sub(r'\\s+', "
+                                   "' ', text).strip()"])
+        outcome = _run(vertical, backend)
+        self.assertTrue(outcome["success"], outcome)
+        self.assertEqual(outcome["path_taken"], "navigate")
+        self.assertEqual(len(backend.menus_seen), 1)   # only the op menu
+
+    def test_escape_mid_navigation_fails_bounded_not_hanging(self):
+        holder, root = _corpus({
+            "pkg/alpha.py": "def one(x):\n    return x\n",
+            "pkg/beta.py": "def two(y):\n    return y\n",
+        })
+        self.addCleanup(holder.cleanup)
+        vertical = EditVertical("something is off", root,
+                                "from pkg.alpha import one\n"
+                                "assert one(1) == 2\n")
+        backend = ScriptedBackend(["none of these fit"], [])
+        outcome = _run(vertical, backend)
+        self.assertFalse(outcome["success"])
+        self.assertIn("navigation abandoned", outcome["reason"])
+        self.assertLessEqual(len(backend.menus_seen), 3)
+
+    def test_corpus_with_root_level_files_is_navigable(self):
+        holder, root = _corpus({
+            "parsing.py": ('def parse_num(s):\n'
+                           '    """Parse a decimal number."""\n'
+                           '    return int(s) + 1\n'),
+            "printing.py": ('def show(v):\n'
+                            '    """Print a value."""\n'
+                            '    return str(v)\n'),
+        })
+        self.addCleanup(holder.cleanup)
+        vertical = EditVertical("number parsing is off by one", root,
+                                "from parsing import parse_num\n"
+                                "assert parse_num('4') == 4\n")
+        backend = ScriptedBackend(["replace the target"], ["return int(s)"])
+        outcome = _run(vertical, backend)
+        self.assertTrue(outcome["success"], outcome)
+        self.assertEqual(outcome["target_file"], "parsing.py")
 
 
 class NoTestModeTest(unittest.TestCase):
