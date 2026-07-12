@@ -12,6 +12,8 @@ build/
 develop-eggs/
 dist/
 downloads/
+*.json
+uv.lock
 eggs/
 .eggs/
 lib/
