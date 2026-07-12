@@ -66,11 +66,17 @@ class SymbolIndex:
             self._collect_calls(tree, rel)
 
     def _python_files(self):
-        """Every .py under root, junk and hidden directories pruned."""
+        """Every .py under root, junk/hidden directories and symlinks
+        pruned (a symlink could point outside the corpus root)."""
         for path in sorted(self.root.rglob("*.py")):
             parts = path.relative_to(self.root).parts[:-1]
             if any(p.startswith(".") or p in SKIP_DIRS
                    or p.endswith(".egg-info") for p in parts):
+                continue
+            if path.is_symlink() or any(parent.is_symlink() for parent in
+                                        path.parents
+                                        if parent != self.root
+                                        and self.root in parent.parents):
                 continue
             yield path
 

@@ -89,6 +89,46 @@ class DirectReplaceTest(unittest.TestCase):
 
 
 class OperationInferenceTest(unittest.TestCase):
+    def test_imported_names_are_never_inferred_as_missing_helpers(self):
+        # Panel finding: a call to a `from helpers import ...` name must
+        # not trigger insert-after inference (it would shadow the import);
+        # the real fix here is a replace on the target's own bug.
+        holder, root = _corpus({
+            "helpers.py": "def normalize(text):\n    return text.strip()\n",
+            "mod.py": ("from helpers import normalize\n\n\n"
+                       "def clean(text):\n"
+                       "    total = normalize(text)\n"
+                       "    return total.upper()\n"),
+        })
+        self.addCleanup(holder.cleanup)
+        vertical = EditVertical("clean should lowercase, fix clean", root,
+                                "from mod import clean\n"
+                                "assert clean(' A ') == 'a'\n")
+        backend = ScriptedBackend(["replace the target"],
+                                  ["return normalize(text).lower()"])
+        outcome = _run(vertical, backend)
+        self.assertTrue(outcome["success"], outcome)
+        self.assertEqual(outcome["operation"], "replace")
+        source = (root / "mod.py").read_text()
+        self.assertEqual(source.count("def normalize"), 0)   # no shadowing
+
+    def test_escalation_reaches_the_real_menu_after_inference_fails(self):
+        # The re-ask stage must not just re-run the same deterministic
+        # inference; scenario: inferred insert-after keeps failing, stage 1
+        # must show the 3-option operation menu.
+        holder, root = _corpus({"mod.py": (
+            "def total(nums):\n    result = 0\n"
+            "    for n in nums:\n        result = _acc(result, n)\n"
+            "    return result\n")})
+        self.addCleanup(holder.cleanup)
+        vertical = EditVertical("total is broken", root,
+                                "from mod import total\n"
+                                "assert total([1, 2]) == 3\n")
+        backend = ScriptedBackend(["replace the target"], ["return a - b"])
+        _run(vertical, backend, max_steps=40)
+        self.assertTrue(any("insert new helper code" in m
+                            for m in backend.menus_seen), backend.menus_seen)
+
     def test_undefined_helper_skips_the_operation_menu(self):
         # A backend rigged to always answer "replace" would sabotage this
         # fix if the operation menu were consulted; inference must bypass it.
@@ -148,6 +188,39 @@ class DeleteStrikeOutTest(unittest.TestCase):
         final = (root / "mod.py").read_text()
         self.assertIn("strip", final)
         self.assertNotIn("swapcase", final)
+
+
+class StatelessGenerationTest(unittest.TestCase):
+    def test_generation_prompts_never_carry_failure_feedback(self):
+        # E5b: error-feedback repair underperforms blind resampling, so a
+        # regeneration prompt must not contain the previous failure line —
+        # while the re-asked operation MENU legitimately sees it.
+        holder, root = _corpus(
+            {"mod.py": "def add(a, b):\n    return a - b\n"})
+        self.addCleanup(holder.cleanup)
+        vertical = EditVertical("fix add", root,
+                                "from mod import add\nassert add(2, 3) == 5\n")
+
+        generation_prompts = []
+
+        class Recorder(ScriptedBackend):
+            def complete(self, model, raw_prompt, opts):
+                if "ACTIONS:" not in raw_prompt:
+                    generation_prompts.append(raw_prompt)
+                return super().complete(model, raw_prompt, opts)
+
+        backend = Recorder(["replace the target"],
+                           ["return a * b", "return a + b"])
+        outcome = _run(vertical, backend, max_steps=40)
+        self.assertTrue(outcome["success"], outcome)
+        self.assertGreaterEqual(len(generation_prompts), 2)
+        for prompt in generation_prompts:
+            self.assertNotIn("edit failed", prompt)
+            self.assertNotIn("> target:", prompt)
+            self.assertIn("return a - b", prompt)   # verbatim span present
+        # ...and the menu episode DID keep the failure line for menus
+        self.assertIn("edit failed",
+                      vertical._menu_episode.render_base())
 
 
 class OscillationEscalationTest(unittest.TestCase):

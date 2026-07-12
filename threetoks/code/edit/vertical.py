@@ -23,7 +23,14 @@ the harness already knows the answer:
 Repair escalates instead of looping on one wrong choice (E8 scenarios
 2/4/5): first failure regenerates the body, the next re-asks the
 operation, the next re-locates to the runner-up candidate — all bounded
-by MAX_REPAIRS and the episode step budget.
+by MAX_REPAIRS_TOTAL and the episode step budget.
+
+Two episodes, one boundary: MENU decisions read the growing session log
+(located target, chosen operation, what failed) — the state-machine
+memory that lets a re-asked menu choose differently. GENERATE decisions
+get a fresh episode every time and never see failure text: repair is
+blind resampling, because E5b measured error-feedback repair as WORSE
+than blind (docs/DESIGN-coding-agent.md §2).
 """
 import re
 from dataclasses import dataclass
@@ -80,13 +87,21 @@ class EditVertical:
         self.root = Path(corpus_root)
         self.test_code = test_code
         self.index = SymbolIndex(self.root)
-        self.episode = Episode(SYSTEM_MENU, request)
+        # Menus see the growing session log (what was located, what
+        # failed) — that is state-machine memory, and it is what lets a
+        # re-asked operation menu choose differently. Generations must
+        # NOT: repair is blind resample (E5b — error feedback measurably
+        # underperforms), so next_node() swaps in a fresh stateless
+        # episode for every generate step.
+        self._menu_episode = Episode(SYSTEM_MENU, request)
+        self.episode = self._menu_episode
         self.steps_left = 0
         self.phase = "start"
         self.outcome = EditOutcome()
 
         self._req_tokens = set(_IDENT.findall(request.lower()))
         self._locate_pool: list[Symbol] = []   # ranked runners-up
+        self._locate_labels: list[str] = []
         self._locate_choice: nav.LevelChoice | None = None
         self._nav: nav.LevelChoice | None = None
         self._nav_values: dict[str, object] = {}   # menu label -> value
@@ -106,6 +121,7 @@ class EditVertical:
         self._generate_node: ops.GenerateSpanNode | None = None
         self._repairs = 0       # total failed checks, capped for the episode
         self._stage = 0         # escalation stage for the CURRENT target
+        self._skip_inference = False   # escalation forces the real menu
 
     # ------------------------------------------------------------ engine API
 
@@ -122,6 +138,8 @@ class EditVertical:
                 continue
             node = getattr(self, f"_node_{self.phase}")()
             if node is not None:
+                self.episode = Episode(ops.GENERATE_SYSTEM, self.request) \
+                    if self.phase == "generate" else self._menu_episode
                 return node
             # a phase that resolved for free loops back with no node
 
@@ -168,9 +186,11 @@ class EditVertical:
             return
         self.outcome.path_taken = "disambiguate"
         self._locate_pool = [s for _, s in ranked]
+        self._locate_labels = _uniquify(
+            [self._symbol_label(s) for _, s in ranked])
         self._locate_choice = nav.LevelChoice(
             "Several definitions match. Which one is the request about?",
-            [self._symbol_label(s) for _, s in ranked])
+            list(self._locate_labels))
         self.phase = "locate_menu"
 
     def _name_hits(self) -> list[Symbol]:
@@ -221,7 +241,7 @@ class EditVertical:
         self._stage = 0        # each target gets its own escalation ladder
         self.outcome.target = symbol.qualname
         self.outcome.target_file = symbol.file
-        self.episode.log_session(f"> target: {symbol.qualname} in {symbol.file}")
+        self._menu_episode.log_session(f"> target: {symbol.qualname} in {symbol.file}")
 
     def _node_locate_menu(self):
         return self._menu_or_free(self._locate_choice, self._picked_candidate)
@@ -234,9 +254,9 @@ class EditVertical:
             self._picked_candidate(picked)
 
     def _picked_candidate(self, label: str) -> None:
-        labels = [self._symbol_label(s) for s in self._locate_pool]
-        symbol = self._locate_pool.pop(labels.index(label))
-        self._set_target(symbol)
+        position = self._locate_labels.index(label)
+        self._locate_labels.pop(position)
+        self._set_target(self._locate_pool.pop(position))
         self.phase = "operation"
 
     def _menu_or_free(self, choice: nav.LevelChoice, on_pick):
@@ -265,9 +285,10 @@ class EditVertical:
         if len(scored) == 1 or (top > 0 and top > second):
             on_pick(scored[0][0])
             return
-        self._nav_values = {_clip(label): value for value, label, _ in scored}
-        self._nav = nav.LevelChoice(question,
-                                    [_clip(label) for _, label, _ in scored])
+        labels = _uniquify([_clip(label) for _, label, _ in scored])
+        self._nav_values = {label: value
+                            for label, (value, _, _) in zip(labels, scored)}
+        self._nav = nav.LevelChoice(question, labels)
         self._nav_on_pick = on_pick
         self.phase = phase
 
@@ -417,15 +438,21 @@ class EditVertical:
     # ------------------------------------------------------------ operation
 
     def _node_operation(self):
-        """Infer the operation for free when possible, else one menu."""
-        inferred = self._infer_operation()
-        if inferred is not None:
-            self._begin_operation(inferred)
-            return None
+        """Infer the operation for free when possible, else one menu.
+
+        The re-ask escalation stage sets ``_skip_inference`` — otherwise a
+        deterministic inference would just re-pick the operation that
+        already failed, and the "widen the scope" stage would be a no-op.
+        """
+        if not self._skip_inference:
+            inferred = self._infer_operation()
+            if inferred is not None:
+                self._begin_operation(inferred)
+                return None
+        self._skip_inference = False
         options = [OPERATION_LABELS[op]
                    for op in (OP_REPLACE, OP_INSERT_AFTER, OP_DELETE)]
-        return MenuNode(f"Fix request: {self.request}\n"
-                        "How should this be fixed?", options, escape=True)
+        return MenuNode("How should this be fixed?", options, escape=True)
 
     def _infer_operation(self) -> str | None:
         """insert-after, for free, when the target calls an undefined name.
@@ -437,18 +464,24 @@ class EditVertical:
         helper = self._missing_helper()
         if helper is None:
             return None
-        self.episode.log_session(
+        self._menu_episode.log_session(
             f"> inferred: insert missing helper {helper[0]}()")
         return OP_INSERT_AFTER
 
     def _missing_helper(self) -> tuple[str, str] | None:
-        """The (name, args) of an undefined callee in the target, if any."""
+        """The (name, args) of an undefined callee in the target, if any.
+
+        "Known" covers everything the file binds at top level — imports,
+        constants, defs — so a call to an imported name is never mistaken
+        for a missing helper (that inference would shadow the import).
+        """
         source = self.index.source_of(self.target.file)
         span = _dedent(ops.span_text(source, self.target.lineno,
                                      self.target.end_lineno),
                        self._target_indent)
-        known = {s.name for s in self.index.symbols
-                 if s.file == self.target.file}
+        known = ops.module_level_names(source) \
+            | {s.name for s in self.index.symbols
+               if s.file == self.target.file}
         return ops.find_missing_helper(span, self.target.name, known)
 
     def _apply_operation(self, node, decision) -> None:
@@ -461,7 +494,7 @@ class EditVertical:
 
     def _begin_operation(self, operation: str) -> None:
         self.outcome.operation = operation
-        self.episode.log_session(f"> op: {operation}")
+        self._menu_episode.log_session(f"> op: {operation}")
         if operation == OP_DELETE:
             self._start_delete()
         else:
@@ -493,7 +526,8 @@ class EditVertical:
         self._delete_spans = [span for _, span in ranked]
         self._delete_choice = nav.LevelChoice(
             f"Which line inside {self.target.name}() is wrong?",
-            [_clip(ops.span_text(source, s, e)) for _, (s, e) in ranked])
+            _uniquify([_clip(ops.span_text(source, s, e))
+                       for _, (s, e) in ranked]))
         self.phase = "delete_menu"
 
     def _node_delete_menu(self):
@@ -536,9 +570,8 @@ class EditVertical:
         span = ops.span_text(source, target.lineno, target.end_lineno)
         before, after = ops.context_lines(source, target.lineno,
                                           target.end_lineno)
-        instruction = _replace_instruction(self.request,
-                                           _dedent(span, self._target_indent),
-                                           before, after)
+        instruction = _replace_instruction(
+            _dedent(span, self._target_indent), before, after)
         prefill = f"def {target.name}({args}):\n    "
         return ops.GenerateSpanNode(instruction, prefill, splice)
 
@@ -553,7 +586,6 @@ class EditVertical:
                                             self._seen_hashes)
         span = ops.span_text(source, self.target.lineno, self.target.end_lineno)
         instruction = (
-            f"Fix request: {self.request}\n"
             f"Existing function (verbatim, do not repeat it):\n{span}\n"
             f"Write the missing helper function {name}({args}) that this "
             "code calls but that is never defined. Do not use pass or "
@@ -611,7 +643,7 @@ class EditVertical:
         to the next locate candidate (which resets the ladder for the new
         target). MAX_REPAIRS_TOTAL bounds the whole episode.
         """
-        self.episode.log_session(f"> {why}")
+        self._menu_episode.log_session(f"> {why}")
         self._repairs += 1
         self.outcome.repairs = self._repairs
         if self._repairs > MAX_REPAIRS_TOTAL \
@@ -622,6 +654,7 @@ class EditVertical:
         if stage == 0 and self.outcome.operation:
             self._retry_same_operation()
         elif stage <= 1:
+            self._skip_inference = True
             self.phase = "operation"
         elif self._locate_pool:
             self._relocate()
@@ -638,7 +671,7 @@ class EditVertical:
     def _relocate(self) -> None:
         """Stage 3: give up on this target; take the ranked runner-up."""
         runner_up = self._locate_pool.pop(0)
-        self.episode.log_session(f"> retargeting: {runner_up.qualname}")
+        self._menu_episode.log_session(f"> retargeting: {runner_up.qualname}")
         self._set_target(runner_up)
         self.phase = "operation"
 
@@ -648,10 +681,10 @@ class EditVertical:
         self.phase = "done"
 
 
-def _replace_instruction(request: str, span: str, before: str,
-                         after: str) -> str:
-    """The replace micro-prompt: request + verbatim span + context."""
-    lines = [f"Fix request: {request}", "Current function (verbatim):", span]
+def _replace_instruction(span: str, before: str, after: str) -> str:
+    """The replace micro-prompt: verbatim span + context (the request is
+    already the fresh generate episode's TASK line)."""
+    lines = ["Current function (verbatim):", span]
     if before:
         lines += ["Lines just before it:", before]
     if after:
@@ -718,6 +751,21 @@ def _clip(text: str, limit: int = LABEL_CLIP) -> str:
     """One-line, length-capped menu label text."""
     text = " ".join(text.split())
     return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _uniquify(labels: list[str]) -> list[str]:
+    """Deduplicate menu labels that clipping made identical.
+
+    Labels double as lookup keys back to the picked candidate, so two
+    entries sharing a long common prefix must not collapse into one.
+    """
+    counts: dict[str, int] = {}
+    out = []
+    for label in labels:
+        counts[label] = counts.get(label, 0) + 1
+        out.append(label if counts[label] == 1
+                   else f"{label} ({counts[label]})")
+    return out
 
 
 if __name__ == "__main__":

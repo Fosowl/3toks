@@ -13,6 +13,7 @@ attempt so Policy's existing retry ladder resamples blind.
 import ast
 
 from threetoks.code import gates
+from threetoks.code.nodes import IMPLEMENT_MAX_TOKENS, IMPLEMENT_STOP
 from threetoks.nodes import Decision
 
 CONTEXT_LINES = 3
@@ -22,8 +23,10 @@ GENERATE_SYSTEM = ("You are a Python programmer fixing one function in an "
                    "existing file. Write exactly the requested code. Output "
                    "only code, no explanations, no markdown. Never leave it "
                    "unfinished: no pass, no ..., no raise NotImplementedError.")
-GENERATE_STOP = ("\ndef ", "\nclass ", "\nif __name__", "\n@", "\nprint(")
-GENERATE_MAX_TOKENS = 200
+# The stop/cap contract is the greenfield ImplementNode's — one source of
+# truth, so an anti-cheat tweak there propagates here.
+GENERATE_STOP = IMPLEMENT_STOP
+GENERATE_MAX_TOKENS = IMPLEMENT_MAX_TOKENS
 
 
 def replace_span(source: str, start: int, end: int, replacement: str) -> str:
@@ -102,6 +105,35 @@ def statement_spans(source: str, qualname: str) -> list[tuple[int, int]]:
         return []
     return [(stmt.lineno, getattr(stmt, "end_lineno", stmt.lineno))
             for stmt in node.body]
+
+
+def module_level_names(source: str) -> set[str]:
+    """Every name a file binds at top level: imports, defs, classes,
+    assignments.
+
+    The missing-helper inference must treat all of these as defined — a
+    call to a ``from helpers import normalize`` name or a module constant
+    is NOT a missing helper, and inferring insert-after for one would
+    shadow the real binding.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return set()
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            names |= {a.asname or a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            names |= {a.asname or a.name for a in node.names}
+        elif isinstance(node, FUNC_TYPES + (ast.ClassDef,)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            names |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) \
+                and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+    return names
 
 
 def find_missing_helper(source: str, func_name: str,

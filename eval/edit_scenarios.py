@@ -418,9 +418,64 @@ SCENARIO_12 = Scenario(
 )
 
 
+# 13-14: keyword ranking deliberately TIES, so a real menu reaches the
+# live model (direction-review finding: 1-12 all resolve locate/nav free
+# post-ranking, leaving model disambiguation unmeasured).
+
+_S13_INVOICE_RENDER = '''"""Invoice rendering."""
+
+
+def render(record):
+    """Render an order total in dollars."""
+    return "$" + record["cents"] / 100
+'''
+
+_S13_EMAIL_RENDER = '''"""Email rendering."""
+
+
+def render(record):
+    """Render a subject line."""
+    return "[mail] " + record.get("subject", "")
+'''
+
+SCENARIO_13 = Scenario(
+    key="13_locate_menu_tie",
+    title="render() twice, request keywords tie -> real locate menu",
+    request="fix render, it crashes formatting the money amount",
+    files={"views/invoice.py": _S13_INVOICE_RENDER,
+           "views/email.py": _S13_EMAIL_RENDER},
+    test_code=("from views.invoice import render\n"
+               'assert render({"cents": 150}) == "$1.50"\n'),
+    expected_operation=OP_REPLACE,
+)
+
+_S14_BATCHING = '''"""Batching helpers."""
+
+
+def split_batches(rows, size):
+    """Group rows into fixed-size batches."""
+    return [rows[i:i + size] for i in range(0, len(rows) - 1, size)]
+
+
+def merge_batches(batches):
+    """Concatenate batches back into rows."""
+    return [row for batch in batches for row in batch]
+'''
+
+SCENARIO_14 = Scenario(
+    key="14_def_menu_tie",
+    title="two defs tie on keywords -> real def-level menu",
+    request="the last entry disappears from every batch",
+    files={"batching/batches.py": _S14_BATCHING},
+    test_code=("from batching.batches import split_batches\n"
+               "assert split_batches([1, 2, 3], 2) == [[1, 2], [3]]\n"),
+    expected_operation=OP_REPLACE,
+)
+
+
 ALL_SCENARIOS = [SCENARIO_1, SCENARIO_2, SCENARIO_3, SCENARIO_4, SCENARIO_5,
                  SCENARIO_6, SCENARIO_7, SCENARIO_8, SCENARIO_9, SCENARIO_10,
-                 SCENARIO_11, SCENARIO_12]
+                 SCENARIO_11, SCENARIO_12, SCENARIO_13, SCENARIO_14]
 
 
 if __name__ == "__main__":
@@ -429,7 +484,7 @@ if __name__ == "__main__":
 
     from threetoks.code.edit import oracle
 
-    assert len({s.key for s in ALL_SCENARIOS}) == 12
+    assert len({s.key for s in ALL_SCENARIOS}) == 14
     with tempfile.TemporaryDirectory() as tmp:
         for scenario in ALL_SCENARIOS:
             root = Path(tmp) / scenario.key
