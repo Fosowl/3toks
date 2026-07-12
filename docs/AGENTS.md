@@ -145,6 +145,14 @@ the list is the router's fallback** when the model's choice is invalid or
 unparseable (`threetoks/agents/router.py`), so keep a cheap, safe default
 (`casual`) first. Names must stay unique — the registry test enforces this.
 
+An agent may itself route further: the `code` agent front-doors four modes
+(navigate / edit / compute / author) through `threetoks/code/route.py` —
+deterministic pre-checks first, one one-token menu otherwise (measured in
+spike E7; see docs/DESIGN-coding-agent.md §9a). It also reads
+`services.retriever` (the opt-in retrieval-as-repair hook, None unless
+`[code] retrieval` is enabled and a search provider exists) and
+`services.files_root` (the corpus the navigate/edit modes operate on).
+
 ## Design rules an agent must follow
 
 These are load-bearing, not stylistic — Phase-0/Phase-2 measurements are

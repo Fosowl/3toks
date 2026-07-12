@@ -1,4 +1,44 @@
-# ThreeToks — Handoff Summary (2026-07-07)
+# ThreeToks — Handoff Summary (updated 2026-07-13; original 2026-07-07)
+
+## 0. Coding-agent v2 update (2026-07-13)
+
+Three research spikes (spikes/e7_code_routing, e8_edit_vertical,
+e9_code_retrieval — each with a REPORT.md) were promoted into the tree:
+
+- **Mode routing** (`threetoks/code/route.py`): navigate/edit/compute/
+  author, ~70% routed free at ~98% precision, 91.3% end-to-end live.
+- **Edit vertical** (`threetoks/code/edit/`): selection-dominated editing
+  of existing code — ast symbol index, ranked free-take navigation with
+  bounded backtracking, span-only generation, caller-test oracle,
+  per-target escalating repair. Live: 10-11/14 planted-bug scenarios
+  (`python3 eval/run_edit_eval.py`), successful edits at 3-92% of
+  whole-file rewrite cost. Settled boundary: menus read the session log;
+  generations get fresh stateless episodes (E5b — never error feedback).
+- **Two-anchor contracts + retrieval-as-repair** (`threetoks/code/
+  retrieve.py`, `[code] retrieval`, OFF by default): anchors are lists
+  (boundary case + normal case); exhausted anchor-bearing methods can be
+  repaired from web-retrieved snippets judged purely by subprocess
+  execution (E9: 7/8 classics, 0 false accepts). Mojeek added as the
+  leading zero-infra search hop.
+
+Full design + evidence: docs/DESIGN-coding-agent.md §9. Deferred
+follow-ups (verification-panel advisories, all logged, none blocking):
+split `code/edit/vertical.py`'s navigation walk into a Navigator in
+nav.py; consolidate the now-4 keyword-overlap ranking implementations
+(memory.py, web/target.py, web/vertical.py, code/edit/vertical.py); the
+prefix-fuzzy match rule in edit ranking is deterministic but unmeasured;
+a real license pipeline + OS-level sandbox before retrieval defaults on;
+a compute/REPL vertical proper (compute mode currently reuses
+CodeVertical + script execution).
+
+**Known broken on this branch (pre-existing, not from this work): the
+web layer is behind its own tests** — `SearchUnavailable`/challenge
+detection missing from web/search.py, `MAX_REJECTED_QUERIES`/
+`SEARCH_UNAVAILABLE_ANSWER` from web/vertical.py, `strip_quotes` from
+web/target.py; 7 tests fail at import/assert (test_web_search,
+test_web_vertical, test_target, 4 in test_agents_core). A separate
+restoration task was spawned for this; everything else in the suite is
+green.
 
 Self-contained briefing for a new instance/agent taking over. Repo:
 `/Users/mlg/Documents/A-project/AI/ThreeToks`, git `main`, ~36 commits,
