@@ -240,6 +240,84 @@ class OscillationEscalationTest(unittest.TestCase):
                          "def add(a, b):\n    return a - b\n")   # restored
 
 
+class OscillationSeedTest(unittest.TestCase):
+    def test_regenerating_an_annotated_original_verbatim_is_caught(self):
+        # Bug-hunt finding: the seed hash was taken from verbatim file
+        # text while candidates hash a canonical reconstruction, so any
+        # type annotation defeated the guard. The model here regenerates
+        # the exact original buggy body (sans docstring, as the prefill
+        # never shows one) — it must be rejected without an oracle run.
+        holder, root = _corpus({"mod.py": (
+            "def add(a: int, b: int) -> int:\n"
+            '    """Add two numbers."""\n'
+            "    return a - b\n")})
+        self.addCleanup(holder.cleanup)
+        vertical = EditVertical("fix add", root,
+                                "from mod import add\nassert add(2, 3) == 5\n")
+        oracle_runs = []
+        original_check = vertical._check_candidate
+        vertical._check_candidate = lambda c: (oracle_runs.append(c),
+                                               original_check(c))[1]
+        backend = ScriptedBackend(["replace the target"], ["return a - b"])
+        outcome = _run(vertical, backend, max_steps=40)
+        self.assertFalse(outcome["success"])
+        # the regenerated original bug never reached the oracle
+        self.assertEqual(oracle_runs, [])
+
+
+class MethodEscapeBacktrackTest(unittest.TestCase):
+    def test_escaping_the_method_menu_reaches_a_sibling_function(self):
+        # Bug-hunt finding: a method-menu escape used to strike out the
+        # whole FILE, making the correct sibling def unreachable.
+        holder, root = _corpus({"mod.py": (
+            "class Widget:\n"
+            "    def up(self):\n        return 1\n\n"
+            "    def down(self):\n        return -1\n\n\n"
+            "def bump(value):\n    return value - 1\n")})
+        self.addCleanup(holder.cleanup)
+        vertical = EditVertical("incrementing gives one less than expected",
+                                root, "from mod import bump\n"
+                                "assert bump(1) == 2\n")
+        backend = ScriptedBackend(["Widget", "none of these fit", "bump",
+                                   "replace the target"],
+                                  ["return value + 1"])
+        outcome = _run(vertical, backend, max_steps=40)
+        self.assertTrue(outcome["success"], outcome)
+        self.assertEqual(outcome["target"], "bump")
+
+
+class ViableOperationsTest(unittest.TestCase):
+    def test_insert_is_not_offered_without_a_missing_helper(self):
+        holder, root = _corpus(
+            {"mod.py": "def add(a, b):\n    return a - b\n"})
+        self.addCleanup(holder.cleanup)
+        vertical = EditVertical("fix add", root,
+                                "from mod import add\nassert add(2, 3) == 5\n")
+        backend = ScriptedBackend(["insert new helper", "replace the target"],
+                                  ["return a + b"])
+        outcome = _run(vertical, backend)
+        self.assertTrue(outcome["success"], outcome)
+        self.assertEqual(outcome["operation"], "replace")
+        self.assertFalse(any("insert new helper" in m
+                             for m in backend.menus_seen))
+
+    def test_one_liner_target_offers_no_delete(self):
+        # def and body share a line: deleting the sole statement would
+        # erase the whole function, so delete must not be offered.
+        holder, root = _corpus(
+            {"mod.py": "def add(a, b): return a - b\n"})
+        self.addCleanup(holder.cleanup)
+        vertical = EditVertical("fix add", root,
+                                "from mod import add\nassert add(2, 3) == 5\n")
+        backend = ScriptedBackend(["delete the offending",
+                                   "replace the target"], ["return a + b"])
+        outcome = _run(vertical, backend)
+        self.assertTrue(outcome["success"], outcome)
+        self.assertEqual(outcome["operation"], "replace")
+        self.assertFalse(any("delete the offending" in m
+                             for m in backend.menus_seen))
+
+
 class DisambiguationTest(unittest.TestCase):
     CORPUS = {
         "shop/orders.py": ('def validate(v):\n    """Check an order '
@@ -308,8 +386,9 @@ class NavigationTest(unittest.TestCase):
         outcome = _run(vertical, backend)
         self.assertTrue(outcome["success"], outcome)
         self.assertEqual(outcome["path_taken"], "navigate")
-        # navigation was all free-takes; only the operation menu was shown
-        self.assertEqual(len(backend.menus_seen), 1)
+        # navigation free-takes every level AND the operation menu (only
+        # replace is viable for a helper-free two-liner): zero menus.
+        self.assertEqual(len(backend.menus_seen), 0)
 
 
 class RankedNavigationTest(unittest.TestCase):

@@ -32,6 +32,7 @@ get a fresh episode every time and never see failure text: repair is
 blind resampling, because E5b measured error-feedback repair as WORSE
 than blind (docs/DESIGN-coding-agent.md §2).
 """
+import ast
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,7 +43,9 @@ from threetoks.code.edit.index import Symbol, SymbolIndex
 from threetoks.nodes import MenuNode
 from threetoks.render import Episode
 
-MAX_REPAIRS_TOTAL = 5     # hard cap on failed checks across the episode
+# Failed checks tolerated per episode: the 6th failure ends it, so up to
+# 5 widening retries run. Scenario 11 (relocate recovery) needs all 5.
+MAX_REPAIRS_TOTAL = 6
 NAV_BACKTRACKS_MAX = 2    # escapes tolerated while navigating
 FORCE_DONE_AT_STEPS_LEFT = 2
 REPAIR_TEMPERATURE = 0.4
@@ -234,14 +237,41 @@ class EditVertical:
         self._original_source = self.index.source_of(symbol.file)
         def_line = self._original_source.splitlines()[symbol.lineno - 1]
         self._target_indent = def_line[:len(def_line) - len(def_line.lstrip())]
-        span = ops.span_text(self._original_source, symbol.lineno,
-                             symbol.end_lineno)
-        self._seen_hashes = {hash(_dedent(span, self._target_indent))}
+        self._seen_hashes = self._seed_hashes()
         self._tried_deletes = set()
         self._stage = 0        # each target gets its own escalation ladder
         self.outcome.target = symbol.qualname
         self.outcome.target_file = symbol.file
         self._menu_episode.log_session(f"> target: {symbol.qualname} in {symbol.file}")
+
+    def _seed_hashes(self) -> set[int]:
+        """Hashes of the ORIGINAL buggy function in candidate-canonical form.
+
+        Candidates are hashed on ``gates.function_source`` output — a
+        canonical reconstruction that drops annotations and normalizes the
+        def line — so seeding with the verbatim file text would never
+        match a regeneration of the same bug (bug-hunt finding: any type
+        hint or docstring difference silently defeated the guard). The
+        seed therefore runs the original through the SAME pipeline, both
+        with and without its docstring (the prefill never shows the
+        docstring, so the model usually regenerates the body without it).
+        """
+        span = _dedent(ops.span_text(self._original_source,
+                                     self.target.lineno,
+                                     self.target.end_lineno),
+                       self._target_indent)
+        lines = span.splitlines()
+        body = "\n".join([lines[1].lstrip(" "), *lines[2:]]) \
+            if len(lines) > 1 else "pass"
+        args = ops.def_args(self._original_source, self.target.qualname)
+        canonical = gates.function_source(self.target.name, args, body)
+        seeds = {hash(span)}
+        if canonical is not None:
+            seeds.add(hash(canonical))
+            stripped = _without_docstring(canonical, self.target.name)
+            if stripped is not None:
+                seeds.add(hash(stripped))
+        return seeds
 
     def _node_locate_menu(self):
         return self._menu_or_free(self._locate_choice, self._picked_candidate)
@@ -296,17 +326,24 @@ class EditVertical:
         """Shared decision handling: pick, page, or backtrack on escape."""
         picked = self._nav.apply(decision)
         if picked is None:
-            self._backtrack_from(self.phase, fail_reason)
+            self._backtrack_from(self.phase, fail_reason, escaped=True)
         elif picked != nav.MORE_LABEL:
             self._nav_on_pick(self._nav_values[picked])
 
-    def _backtrack_from(self, phase: str, why: str = "nothing fits") -> None:
+    def _backtrack_from(self, phase: str, why: str = "nothing fits",
+                        escaped: bool = False) -> None:
         """An escape mid-navigation goes UP one level (the escaped choice
         struck out), instead of abandoning the episode (E8 live runs died
-        exactly here). Bounded by NAV_BACKTRACKS_MAX."""
-        self._backtracks += 1
+        exactly here). Only real model escapes count against
+        NAV_BACKTRACKS_MAX — an empty level cascading upward does not."""
+        if escaped:
+            self._backtracks += 1
         if phase == "nav_folder" or self._backtracks > NAV_BACKTRACKS_MAX:
             self._finish(False, f"navigation abandoned: {why}")
+        elif phase == "nav_method":
+            # escaping the method menu strikes out the CLASS, not the file
+            self._excluded["def"].add((self._rel_path(), self._nav_class))
+            self._picked_file(self._nav_file)
         elif phase == "nav_file":
             self._excluded["folder"].add(self._nav_folder)
             self._enter_folder_level()
@@ -366,6 +403,8 @@ class EditVertical:
         source = self.index.source_of(rel)
         entries = []
         for name, kind in self.index.top_level_names(rel):
+            if (rel, name) in self._excluded["def"]:
+                continue
             symbol = self.index.symbol_at(rel, name)
             hint = symbol.doc or (", ".join(self.index.methods_of(rel, name))
                                   if kind == "class" else "")
@@ -450,9 +489,24 @@ class EditVertical:
                 self._begin_operation(inferred)
                 return None
         self._skip_inference = False
-        options = [OPERATION_LABELS[op]
-                   for op in (OP_REPLACE, OP_INSERT_AFTER, OP_DELETE)]
+        options = [OPERATION_LABELS[op] for op in self._viable_operations()]
+        if len(options) == 1:
+            self._begin_operation(self._viable_operations()[0])
+            return None
         return MenuNode("How should this be fixed?", options, escape=True)
+
+    def _viable_operations(self) -> list[str]:
+        """Operations that can actually run against this target (free
+        pre-filter): insert-after needs a provably missing helper, delete
+        needs at least one deletable statement. Offering an impossible
+        option just burns the menu pick (bug-hunt finding: a no-helper
+        insert pick recursively consumed the whole repair ladder)."""
+        viable = [OP_REPLACE]
+        if self._missing_helper() is not None:
+            viable.append(OP_INSERT_AFTER)
+        if self._deletable_spans():
+            viable.append(OP_DELETE)
+        return viable
 
     def _infer_operation(self) -> str | None:
         """insert-after, for free, when the target calls an undefined name.
@@ -502,15 +556,23 @@ class EditVertical:
 
     # ------------------------------------------------------------ delete
 
-    def _start_delete(self) -> None:
-        """Offer the target's statements, minus spans already tried and
-        minus any whose deletion would break the file (checked free).
-        A statement whose text strictly out-matches every sibling on
-        request keywords is deleted for free, no menu."""
+    def _deletable_spans(self) -> list[tuple[int, int]]:
+        """Statement spans that may be offered for deletion: untried,
+        below the def line itself (a one-liner's sole statement shares the
+        def line — deleting it erases the whole function), and leaving a
+        file that still parses."""
         source = self.index.source_of(self.target.file)
-        spans = [s for s in ops.statement_spans(source, self.target.qualname)
-                 if s not in self._tried_deletes
-                 and gates.parses(ops.delete_span(source, *s))]
+        return [s for s in ops.statement_spans(source, self.target.qualname)
+                if s not in self._tried_deletes
+                and s[0] > self.target.lineno
+                and gates.parses(ops.delete_span(source, *s))]
+
+    def _start_delete(self) -> None:
+        """Offer the deletable statements; a statement whose text strictly
+        out-matches every sibling on request keywords is deleted for free,
+        no menu."""
+        source = self.index.source_of(self.target.file)
+        spans = self._deletable_spans()
         if not spans:
             self._escalate("every deletable line was already tried")
             return
@@ -646,7 +708,7 @@ class EditVertical:
         self._menu_episode.log_session(f"> {why}")
         self._repairs += 1
         self.outcome.repairs = self._repairs
-        if self._repairs > MAX_REPAIRS_TOTAL \
+        if self._repairs >= MAX_REPAIRS_TOTAL \
                 or self.steps_left <= FORCE_DONE_AT_STEPS_LEFT:
             self._finish(False, why)
             return
@@ -751,6 +813,22 @@ def _clip(text: str, limit: int = LABEL_CLIP) -> str:
     """One-line, length-capped menu label text."""
     text = " ".join(text.split())
     return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _without_docstring(func_source: str, name: str) -> str | None:
+    """The function's source with its docstring statement removed."""
+    node = gates.function_def(func_source, name)
+    if node is None or not node.body:
+        return None
+    first = node.body[0]
+    if not (isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)):
+        return None
+    lines = func_source.splitlines()
+    del lines[first.lineno - 1:first.end_lineno]
+    stripped = "\n".join(lines)
+    return stripped if gates.parses(stripped) else None
 
 
 def _uniquify(labels: list[str]) -> list[str]:
