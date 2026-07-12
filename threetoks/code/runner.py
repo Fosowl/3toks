@@ -56,9 +56,9 @@ def collect_checks(methods) -> list[Check]:
     for method in methods:
         if method.body is None:
             continue
-        if method.example:
-            checks.append(Check(method.name, f"assert {method.example}",
-                                KIND_EXAMPLE))
+        if method.examples:
+            checks.extend(Check(method.name, f"assert {example}",
+                                KIND_EXAMPLE) for example in method.examples)
         elif not method.args.strip():
             checks.append(Check(method.name, f"{method.name}()", KIND_CALL))
     return checks
@@ -137,15 +137,17 @@ if __name__ == "__main__":
     assert set(spans) == {"helper", "main", "add"}, spans
 
     class _M:  # minimal MethodRecord stand-in
-        def __init__(self, name, args, body, example=None):
-            self.name, self.args, self.body, self.example = \
-                name, args, body, example
+        def __init__(self, name, args, body, examples=()):
+            self.name, self.args, self.body, self.examples = \
+                name, args, body, list(examples)
 
     checks = collect_checks([_M("helper", "n", "x"), _M("main", "", "x"),
-                             _M("add", "a, b", "x", "add(1, 2) == 3"),
+                             _M("add", "a, b", "x",
+                                ["add(1, 2) == 3", "add(0, 0) == 0"]),
                              _M("ghost", "", None)])
-    kinds = {(c.name, c.kind) for c in checks}
-    assert kinds == {("main", KIND_CALL), ("add", KIND_EXAMPLE)}, kinds
+    kinds = [(c.name, c.kind) for c in checks]
+    assert kinds == [("main", KIND_CALL), ("add", KIND_EXAMPLE),
+                     ("add", KIND_EXAMPLE)], kinds   # one check per anchor
 
     results = run_checks(module, checks)
     by_name = {r.check.name: r for r in results}

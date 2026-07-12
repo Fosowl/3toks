@@ -22,7 +22,7 @@ class MethodRecord:
     name: str
     args: str
     contract: str
-    example: str | None = None      # trusted assert expr, or None
+    examples: list[str] = field(default_factory=list)  # trusted assert exprs
     body: str | None = None         # accepted source, or None
     status: str = STATUS_PLANNED
     verified: bool = False          # passed its asserts (not just gated)
@@ -40,11 +40,17 @@ class MethodStore:
         self.methods: list[MethodRecord] = []
 
     def add(self, name: str, args: str, contract: str,
-            example: str | None = None) -> MethodRecord:
-        """Append a planned method; ignore a duplicate name."""
+            examples: list[str] | str | None = None) -> MethodRecord:
+        """Append a planned method; ignore a duplicate name.
+
+        ``examples`` are trusted anchor expressions; a single string is
+        accepted for convenience. Two anchors (a normal case plus a
+        boundary case) close the single-anchor blind spot E9 demonstrated
+        — one example says nothing about behavior at the domain edge.
+        """
         if any(method.name == name for method in self.methods):
             return self._by_name(name)
-        record = MethodRecord(name, args, contract, example)
+        record = MethodRecord(name, args, contract, _as_examples(examples))
         self.methods.append(record)
         return record
 
@@ -97,6 +103,15 @@ class MethodStore:
             return method.body.rstrip()
         return (f"def {method.name}({method.args}):\n"
                 f"{docstring(method.contract)}\n{STUB_BODY}")
+
+
+def _as_examples(examples: list[str] | str | None) -> list[str]:
+    """Normalize the examples argument to a plain list."""
+    if examples is None:
+        return []
+    if isinstance(examples, str):
+        return [examples]
+    return list(examples)
 
 
 if __name__ == "__main__":

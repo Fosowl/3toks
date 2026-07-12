@@ -62,11 +62,12 @@ class ImplementNode:
     max_tokens = IMPLEMENT_MAX_TOKENS
 
     def __init__(self, name: str, args: str, contract: str,
-                 example: str | None = None, temperature: float | None = None):
+                 examples: list[str] | None = None,
+                 temperature: float | None = None):
         self.name = name
         self.args = args
         self.contract = contract
-        self.example = example
+        self.examples = list(examples or [])
         self.temperature = temperature
         self.prefill = f"def {name}({args}):\n    "
         self.question = f"write {name}({args})"
@@ -75,8 +76,8 @@ class ImplementNode:
         """The one method's spec; goal and siblings live in the episode."""
         lines = ["Write this function with a real, working body.",
                  f"{self.name}({self.args}): {self.contract}"]
-        if self.example:
-            lines.append(f"Example: {self.example}")
+        for example in self.examples:
+            lines.append(f"Example: {example}")
         lines.append("Do not use pass or raise NotImplementedError — "
                      "actually implement it.")
         return "\n".join(lines)
