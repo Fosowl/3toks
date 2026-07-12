@@ -26,6 +26,7 @@ class MethodRecord:
     body: str | None = None         # accepted source, or None
     status: str = STATUS_PLANNED
     verified: bool = False          # passed its asserts (not just gated)
+    retrieved: bool = False         # body came from retrieval, not the model
     attempts: int = 0
     repairs: int = 0                # times the runner unlocked it to fix
     asserts: list[str] = field(default_factory=list)

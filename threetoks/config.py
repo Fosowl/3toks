@@ -34,6 +34,8 @@ DEFAULT_MAX_STEPS = 25
 DEFAULT_FILES_ROOT = "."
 DEFAULT_MEMORY_PATH = "threetoks_memory.json"
 DEFAULT_MEMORY_ENABLED = True
+DEFAULT_CODE_RETRIEVAL = False
+DEFAULT_SNIPPET_CACHE = "threetoks_snippets.json"
 
 BROWSER_MODES = ("http", "plain", "stealth")
 _TRUE_WORDS = ("1", "true", "yes", "on")
@@ -89,6 +91,15 @@ class MemoryConfig:
 
 
 @dataclass(frozen=True)
+class CodeConfig:
+    """Coding-agent knobs: retrieval-as-repair (experimental, off by
+    default — it executes and embeds code fetched from the internet)."""
+
+    retrieval: bool = DEFAULT_CODE_RETRIEVAL
+    snippet_cache: str = DEFAULT_SNIPPET_CACHE
+
+
+@dataclass(frozen=True)
 class ThreetoksConfig:
     """The whole configuration: one immutable section object per ``[section]``."""
 
@@ -98,6 +109,7 @@ class ThreetoksConfig:
     research: ResearchConfig = ResearchConfig()
     files: FilesConfig = FilesConfig()
     memory: MemoryConfig = MemoryConfig()
+    code: CodeConfig = CodeConfig()
 
 
 def _get_str(parser: configparser.ConfigParser, section: str,
@@ -173,7 +185,12 @@ def _build_config(parser: configparser.ConfigParser) -> ThreetoksConfig:
         memory=MemoryConfig(
             path=_get_str(parser, "memory", "path", DEFAULT_MEMORY_PATH),
             enabled=_get_bool(parser, "memory", "enabled",
-                              DEFAULT_MEMORY_ENABLED)))
+                              DEFAULT_MEMORY_ENABLED)),
+        code=CodeConfig(
+            retrieval=_get_bool(parser, "code", "retrieval",
+                                DEFAULT_CODE_RETRIEVAL),
+            snippet_cache=_get_str(parser, "code", "snippet_cache",
+                                   DEFAULT_SNIPPET_CACHE)))
 
 
 def user_config_dir(platform: str = None) -> str:
@@ -261,6 +278,14 @@ root = {root}
 # Cross-session (query, answer) memory store.
 path = {memory_path}
 enabled = {enabled}
+
+[code]
+# EXPERIMENTAL: when a planned function with trusted anchor examples
+# exhausts generation attempts, fetch a classic implementation from the
+# public web instead of stubbing it. Executes internet code in a
+# subprocess and embeds it (provenance-stamped, license unreviewed).
+retrieval = {retrieval}
+snippet_cache = {snippet_cache}
 """
 
 
@@ -274,7 +299,9 @@ def render_ini(config: ThreetoksConfig) -> str:
         max_rounds=config.research.max_rounds,
         max_steps=config.research.max_steps,
         root=config.files.root, memory_path=config.memory.path,
-        enabled=str(config.memory.enabled).lower())
+        enabled=str(config.memory.enabled).lower(),
+        retrieval=str(config.code.retrieval).lower(),
+        snippet_cache=config.code.snippet_cache)
 
 
 def save_config(config: ThreetoksConfig, path: str = None) -> str:
@@ -328,6 +355,8 @@ if __name__ == "__main__":
     assert parsed.llm.vote_k == DEFAULT_VOTE_K, parsed.llm  # bad -> default
     assert defaults.memory.path == DEFAULT_MEMORY_PATH, defaults.memory
     assert defaults.memory.enabled is True, defaults.memory
+    assert defaults.code.retrieval is False, defaults.code   # off by default
+    assert defaults.code.snippet_cache == DEFAULT_SNIPPET_CACHE
     os.unlink(temp_path)
     assert user_config_path("nt").endswith(
         os.path.join("threetoks", "config.ini")), user_config_path("nt")

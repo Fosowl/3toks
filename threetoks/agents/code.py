@@ -47,7 +47,8 @@ def _author(task: str, services: Services, policy) -> dict:
     whole-module correctness on a 1.5b and only add latency; the
     deterministic gates carry the quality.
     """
-    vertical = CodeVertical(task, gen_tests=False)
+    vertical = CodeVertical(task, gen_tests=False,
+                            retriever=services.retriever)
     return run_episode(vertical, policy, max_steps=MAX_STEPS)
 
 

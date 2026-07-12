@@ -719,6 +719,18 @@ def _initial_fetcher(config, services, sink=print):
     return fetcher
 
 
+def _make_retriever(config, provider):
+    """The opt-in code retrieval hook, or None (the default).
+
+    Requires both the ``[code] retrieval`` config flag AND a working
+    search provider (a bare install has neither and gets None).
+    """
+    if provider is None or not config.code.retrieval:
+        return None
+    from threetoks.code.retrieve import Retriever
+    return Retriever(provider, cache_path=config.code.snippet_cache)
+
+
 def build_state(model: str = None, sink=print):
     """Assemble live Services/specs/policy from the resolved config file.
 
@@ -741,7 +753,8 @@ def build_state(model: str = None, sink=print):
     provider = _make_provider(config, sink)
     services = Services(provider=provider,
                         files_root=Path(config.files.root),
-                        max_research_rounds=config.research.max_rounds)
+                        max_research_rounds=config.research.max_rounds,
+                        retriever=_make_retriever(config, provider))
     fetcher = _initial_fetcher(config, services, sink)
     specs = default_agents(services)
     if provider is None:  # bare install: never route to the web agent

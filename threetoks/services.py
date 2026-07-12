@@ -17,6 +17,7 @@ class Services:
     files_root: Path = field(default_factory=Path.cwd)
     max_research_rounds: int = DEFAULT_RESEARCH_ROUNDS
     recalled: list = field(default_factory=list)  # memories the selector chose
+    retriever: object = None           # code retrieval-as-repair (opt-in)
 
 
 if __name__ == "__main__":

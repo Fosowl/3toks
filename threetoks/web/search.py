@@ -198,6 +198,47 @@ class BingHtmlProvider:
         return results
 
 
+def _parse_mojeek_results(html: str, max_results: int) -> list[SearchResult]:
+    """Parse a Mojeek HTML results page (a.title anchors, li>p.s snippet)."""
+    soup = BeautifulSoup(html, "html.parser")
+    results: list[SearchResult] = []
+    for anchor in soup.select("a.title"):
+        href = anchor.get("href")
+        if not href:
+            continue
+        li = anchor.find_parent("li")
+        snippet_tag = li.find("p", class_="s") if li else None
+        results.append(SearchResult(
+            title=anchor.get_text(" ", strip=True),
+            url=href,
+            snippet=snippet_tag.get_text(" ", strip=True)
+            if snippet_tag else ""))
+        if len(results) >= max_results:
+            break
+    return results
+
+
+class MojeekHtmlProvider:
+    """Scrape mojeek.com/search — plain HTML, no JS challenge.
+
+    E9 measured this live: while Bing and both DuckDuckGo HTML endpoints
+    were bot-walled from a residential connection, Mojeek answered plain
+    requests and carried most of the retrieval benchmark. It rate-limits
+    too (403 after a fast burst, recovering in ~45s), hence its place
+    inside the paced FallbackProvider chain rather than standalone.
+    """
+
+    def search(self, query: str, max_results: int = DEFAULT_MAX_RESULTS
+               ) -> list[SearchResult]:
+        """GET the Mojeek SERP and parse organic results."""
+        response = requests.get(
+            "https://www.mojeek.com/search", params={"q": query},
+            headers={"User-Agent": BROWSER_USER_AGENT},
+            timeout=SEARCH_TIMEOUT_S)
+        response.raise_for_status()
+        return _parse_mojeek_results(response.text, max_results)
+
+
 class FallbackProvider:
     """Search the primary provider; fall back on error OR zero results."""
 
@@ -236,13 +277,18 @@ class FallbackProvider:
 
 
 def auto_provider() -> SearchProvider:
-    """Prefer a reachable local searxng, else fall back to DDG HTML."""
-    base_url = os.getenv(SEARXNG_URL_ENV, DEFAULT_SEARXNG_URL)
-    if _searxng_answers(base_url):
-        return FallbackProvider(SearxngProvider(base_url),
+    """Prefer a reachable local searxng, then Mojeek, then Bing/DDG.
+
+    Mojeek leads the zero-infrastructure hops: E9 measured it answering
+    plain HTTP while Bing and DDG served bot challenges.
+    """
+    scrapers = FallbackProvider(MojeekHtmlProvider(),
                                 FallbackProvider(BingHtmlProvider(),
                                                  DdgHtmlProvider()))
-    return FallbackProvider(BingHtmlProvider(), DdgHtmlProvider())
+    base_url = os.getenv(SEARXNG_URL_ENV, DEFAULT_SEARXNG_URL)
+    if _searxng_answers(base_url):
+        return FallbackProvider(SearxngProvider(base_url), scrapers)
+    return scrapers
 
 
 if __name__ == "__main__":
@@ -258,4 +304,9 @@ if __name__ == "__main__":
     parsed = _parse_ddg_results(_DDG, DEFAULT_MAX_RESULTS)
     assert parsed[0].url == "https://ex.com/b", parsed
     assert parsed[0].snippet == "bee snippet", parsed
+    _MOJEEK = ('<ul><li><a class="title" href="https://ex.com/c">Cee</a>'
+               '<p class="s">cee snippet</p></li></ul>')
+    parsed = _parse_mojeek_results(_MOJEEK, DEFAULT_MAX_RESULTS)
+    assert parsed == [SearchResult("Cee", "https://ex.com/c",
+                                   "cee snippet")], parsed
     print("smoke OK")

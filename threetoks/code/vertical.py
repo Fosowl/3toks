@@ -41,9 +41,14 @@ class CodeVertical:
     """Drives one module-writing episode from a natural-language goal."""
 
     def __init__(self, goal: str, gen_tests: bool = True,
-                 trusted_examples: dict | None = None):
+                 trusted_examples: dict | None = None, retriever=None):
         self.goal = goal
         self.gen_tests = gen_tests
+        # Optional retrieval-as-repair hook (threetoks/code/retrieve.py):
+        # consulted only when an anchor-bearing method exhausted its
+        # generation attempts and would otherwise stub. None = disabled
+        # (the config default).
+        self.retriever = retriever
         # method name -> list of trusted anchor expressions (a single str
         # is accepted per entry; two anchors — normal + boundary — close
         # the single-anchor blind spot E9 measured).
@@ -263,7 +268,39 @@ class CodeVertical:
                 method.body = None
             return
         keep_body = method.body is not None and not discard
+        if not keep_body and self._try_retrieval(method):
+            return
         self._finalize(method, verified=False, stub=not keep_body)
+
+    def _try_retrieval(self, method) -> bool:
+        """Last resort before stubbing: fetch a classic implementation.
+
+        Fires only for anchor-bearing methods (no anchor, no free judge
+        for foreign code) and only after generation exhausted its
+        attempts — E9's evidence: the retrieval tail is exactly where
+        blind generation loses (roman_to_int, caesar_encode), and the
+        subprocess anchor check replaces model relevance judgment.
+        """
+        if self.retriever is None or not method.examples:
+            return False
+        try:
+            source = self.retriever(method.name, method.args,
+                                    method.contract, method.examples)
+        except Exception:
+            return False       # network trouble never breaks the episode
+        if source is None:
+            return False
+        module = self._candidate_module(method, source)
+        if not gates.import_ok(module)[0]:
+            return False
+        passed, _ = gates.execute_asserts(
+            module, [f"assert {e}" for e in method.examples])
+        if not passed:
+            return False
+        method.body = source
+        method.retrieved = True
+        self._finalize(method, verified=True)
+        return True
 
     def _finalize(self, method, verified: bool, stub: bool = False) -> None:
         """Lock a method as tested (has body) or stubbed, and advance."""
@@ -414,7 +451,7 @@ class CodeVertical:
         """One method's outcome for the result payload."""
         return {"name": method.name, "status": method.status,
                 "verified": method.verified, "attempts": method.attempts,
-                "repairs": method.repairs}
+                "repairs": method.repairs, "retrieved": method.retrieved}
 
 
 def _demo_backend(bodies: list[str]):
