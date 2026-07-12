@@ -11,6 +11,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 FUNC_TYPES = (ast.FunctionDef, ast.AsyncFunctionDef)
+# Directories that are never user code; hidden dirs are skipped too.
+SKIP_DIRS = frozenset({"__pycache__", "venv", "node_modules", "build",
+                       "dist", "site-packages", "egg-info"})
+MAX_INDEXED_FILES = 500     # a corpus bigger than this is indexed partially
 
 
 @dataclass(frozen=True)
@@ -37,10 +41,22 @@ class SymbolIndex:
         self._build()
 
     def _build(self) -> None:
-        """One parse per file; unparseable files are indexed as text only."""
-        for path in sorted(self.root.rglob("*.py")):
+        """One parse per file; unparseable files are indexed as text only.
+
+        Junk directories (virtualenvs, caches, hidden dirs) are pruned and
+        the file count is capped, so pointing the index at a big real tree
+        stays cheap; ``self.truncated`` says when the cap bit.
+        """
+        self.truncated = False
+        for path in self._python_files():
+            if len(self._files) >= MAX_INDEXED_FILES:
+                self.truncated = True
+                break
             rel = path.relative_to(self.root).as_posix()
-            source = path.read_text()
+            try:
+                source = path.read_text()
+            except (OSError, UnicodeDecodeError):
+                continue
             self._files[rel] = source
             try:
                 tree = ast.parse(source)
@@ -48,6 +64,15 @@ class SymbolIndex:
                 continue
             self._collect_defs(tree, rel)
             self._collect_calls(tree, rel)
+
+    def _python_files(self):
+        """Every .py under root, junk and hidden directories pruned."""
+        for path in sorted(self.root.rglob("*.py")):
+            parts = path.relative_to(self.root).parts[:-1]
+            if any(p.startswith(".") or p in SKIP_DIRS
+                   or p.endswith(".egg-info") for p in parts):
+                continue
+            yield path
 
     def _collect_defs(self, tree: ast.AST, rel: str) -> None:
         """Record top-level functions, classes, and each class's methods."""
@@ -134,4 +159,13 @@ if __name__ == "__main__":
             ("foo", "function"), ("helper", "function"), ("Thing", "class")]
         assert index.symbol_at("a/one.py", "Thing.bar").kind == "method"
         assert index.symbol_at("a/one.py", "nope") is None
+
+        (root / "__pycache__").mkdir()
+        (root / "__pycache__" / "junk.py").write_text("def junky():\n    pass\n")
+        (root / ".hidden").mkdir()
+        (root / ".hidden" / "secret.py").write_text("def hush():\n    pass\n")
+        pruned = SymbolIndex(root)
+        assert "junky" not in {s.name for s in pruned.symbols}
+        assert "hush" not in {s.name for s in pruned.symbols}
+        assert not pruned.truncated
     print("smoke OK")
