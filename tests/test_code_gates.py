@@ -43,6 +43,40 @@ class FunctionDefTest(unittest.TestCase):
         self.assertIsNone(gates.function_def("def g(x):\n    return x\n", "f"))
 
 
+class RenormalizeIndentFallbackTest(unittest.TestCase):
+    """function_source's second chance for whole-body indent drift (E8)."""
+
+    def test_recovers_a_body_drifted_to_five_spaces(self):
+        # Live qwen2.5:1.5b-instruct drift: docstring + every body line at 5.
+        drifted = '"""doc"""\n     start = (p - 1) * s\n     return start'
+        source = gates.function_source("f", "p, s", drifted)
+        self.assertIsNotNone(source)
+        ast.parse(source)
+        self.assertNotIn("\n     ", source)
+
+    def test_never_shifts_a_valid_block_opening_body(self):
+        # A body whose continuation lines are ALL legitimately deeper (the
+        # first line opens a for-block) must not be dedented: it is valid
+        # as-is, so the fallback must never run on it.
+        loop = "for n in nums:\n        total += n\n        count += 1"
+        source = gates.function_source("f", "nums", loop)
+        self.assertIsNotNone(source)
+        self.assertIn("\n        total += n", source)
+
+    def test_preserves_relative_nesting_when_it_does_shift(self):
+        drifted = "if x:\n         return 1\n     return 0"   # 9 / 5 spaces
+        source = gates.function_source("f", "x", drifted)
+        self.assertIsNotNone(source)
+        self.assertIn("\n        return 1", source)   # inner stays one deeper
+        self.assertIn("\n    return 0", source)
+
+    def test_single_line_completion_is_untouched(self):
+        self.assertEqual(gates.renormalize_indent("return x"), "return x")
+
+    def test_unrecoverable_completion_still_returns_none(self):
+        self.assertIsNone(gates.function_source("f", "x", "return ((("))
+
+
 class IsPlaceholderTest(unittest.TestCase):
     CHEATS = ("pass", "...", "raise NotImplementedError",
               "raise NotImplementedError('todo')",

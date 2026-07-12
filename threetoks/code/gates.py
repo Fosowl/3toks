@@ -47,6 +47,40 @@ def reconstruct(name: str, args: str, completion: str) -> str:
     return f"def {name}({args}):\n{BODY_INDENT}{completion.lstrip(_LEADING_WS)}"
 
 
+def renormalize_indent(completion: str) -> str:
+    """Re-anchor a completion's continuation lines at one body level.
+
+    qwen-family models sometimes indent EVERY continuation line one column
+    off (E8 live runs: a docstring then a whole body at 5 spaces against
+    the prefill's 4), which ``reconstruct``'s first-line strip cannot fix.
+    Dedents the continuation block so its minimum indent is exactly
+    ``BODY_INDENT``, preserving deeper relative nesting.
+
+    Only ever use this as a *fallback* after the raw completion failed to
+    reconstruct: a correct body whose continuation lines are all
+    legitimately deeper (e.g. one opening ``for``/``if`` line, everything
+    else nested inside it) would be corrupted by an unconditional shift.
+    """
+    lines = completion.splitlines()
+    if len(lines) <= 1:
+        return completion
+    first, rest = lines[0], lines[1:]
+    indents = [len(l) - len(l.lstrip(" ")) for l in rest if l.strip()]
+    if not indents:
+        return completion
+    shift = len(BODY_INDENT) - min(indents)
+    if shift == 0:
+        return completion
+    fixed = [first]
+    for line in rest:
+        if not line.strip():
+            fixed.append(line)
+            continue
+        current = len(line) - len(line.lstrip(" "))
+        fixed.append(" " * max(0, current + shift) + line.lstrip(" "))
+    return "\n".join(fixed)
+
+
 def function_def(source: str, name: str) -> ast.AST | None:
     """The top-level def named `name` (sync or async), or None."""
     try:
@@ -66,7 +100,20 @@ def function_source(name: str, args: str, completion: str) -> str | None:
     keeps each method self-contained, so it cannot inject module globals a
     sibling would then silently depend on, and the undefined-name gate
     stays sound.
+
+    A completion that fails to reconstruct as-is gets one free second
+    chance with its continuation-line indentation re-anchored (see
+    ``renormalize_indent``) — recovering the E8-observed whole-body drift
+    without ever touching a completion that was already valid.
     """
+    source = _trimmed_function(name, args, completion)
+    if source is not None:
+        return source
+    return _trimmed_function(name, args, renormalize_indent(completion))
+
+
+def _trimmed_function(name: str, args: str, completion: str) -> str | None:
+    """One reconstruct-and-trim attempt; None when it does not parse."""
     raw = reconstruct(name, args, completion)
     node = function_def(raw, name)
     if node is None:
@@ -231,6 +278,12 @@ if __name__ == "__main__":
     assert ast.parse(ensure_docstring(stray, "doc")) and stray.count("\n    ") == 1
     trimmed = function_source("f", "x", "return x\n\nLEAK = {1: 2}")
     assert trimmed == "def f(x):\n    return x", trimmed   # top-level code dropped
+    drifted = ('"""doc"""\n     start = x + 1\n     return start')  # 5-space body
+    recovered = function_source("f", "x", drifted)
+    assert recovered is not None and "\n     " not in recovered, recovered
+    loop_body = "for n in x:\n        total += n\n        count += 1"
+    kept = function_source("f", "x", loop_body)             # legit deep nesting
+    assert kept is not None and "\n        total" in kept, kept
     assert undefined_names(trimmed, set()) == []           # gate now sound
     assert is_placeholder("def f(x):\n    pass", "f")
     assert is_placeholder("def f(x):\n    raise NotImplementedError", "f")
