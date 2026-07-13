@@ -247,12 +247,22 @@ def execute(source: str) -> tuple[bool, str]:
     references), so this returns stderr untrimmed; ``_run`` keeps the
     single-line view the per-method gates report.
     """
+    ok, _, stderr = execute_capture(source)
+    return ok, stderr
+
+
+def execute_capture(source: str) -> tuple[bool, str, str]:
+    """Execute source in a fresh python subprocess; (ok, stdout, stderr).
+
+    stdout is what the user's delivered script would print — the runner
+    surfaces it so a run's output is shown, never silently discarded.
+    """
     try:
         done = subprocess.run(["python3", "-"], input=source, text=True,
                               capture_output=True, timeout=SUBPROCESS_TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        return False, "TimeoutExpired"
-    return done.returncode == 0, done.stderr
+        return False, "", "TimeoutExpired"
+    return done.returncode == 0, done.stdout, done.stderr
 
 
 def _run(source: str) -> tuple[bool, str]:
@@ -338,4 +348,6 @@ if __name__ == "__main__":
     assert not bad_ok and "AssertionError" in bad_err, (bad_ok, bad_err)
     assert import_ok("def f():\n    return 1\n")[0]
     assert not import_ok("import nonexistent_pkg_xyz\n")[0]
+    ran_ok, out, err = execute_capture("print('hello')\n")
+    assert ran_ok and out == "hello\n" and err == "", (ran_ok, out, err)
     print("smoke OK")

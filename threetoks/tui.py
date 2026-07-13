@@ -213,7 +213,8 @@ def _source_lines(result: dict, enabled: bool) -> list[str]:
 
 
 def _panel_rows(result: dict, enabled: bool) -> list[str]:
-    """Content rows of the panel: label, target, answer, sources, stats."""
+    """Content rows of the panel: label, target, answer, output, sources,
+    stats."""
     label = fg(PINK, str(result.get("agent", "agent")).upper(), enabled)
     if result.get("judged_good") is False:
         label += fg(AMBER, " · UNVERIFIED", enabled)
@@ -227,11 +228,36 @@ def _panel_rows(result: dict, enabled: bool) -> list[str]:
     for answer_line in answer.splitlines() or [""]:
         rows.extend(fg(WHITE, seg, enabled)
                     for seg in _wrap(answer_line, PANEL_WIDTH - 3))
+    rows.extend(_output_rows(result, enabled))
     sources = _source_lines(result, enabled)
     if sources:
         rows.append("")
         rows.extend(sources)
     rows.extend(["", _stats_line(result, enabled)])
+    return rows
+
+
+OUTPUT_MAX_LINES = 12
+
+
+def _output_rows(result: dict, enabled: bool) -> list[str]:
+    """The script's captured stdout, shown under the code it came from.
+
+    The runner already executed the delivered entry (§7b smoke call);
+    hiding what it printed made a working script look inert. Long output
+    is clipped with an honest truncation count.
+    """
+    output = str(result.get("output") or "").rstrip()
+    if not output:
+        return []
+    lines = output.splitlines()
+    shown, hidden = lines[:OUTPUT_MAX_LINES], len(lines) - OUTPUT_MAX_LINES
+    rows = ["", dim("output when run:", enabled)]
+    for line in shown:
+        rows.extend(fg(GREEN, seg, enabled)
+                    for seg in _wrap(line, PANEL_WIDTH - 3))
+    if hidden > 0:
+        rows.append(dim(f"… {hidden} more line(s)", enabled))
     return rows
 
 

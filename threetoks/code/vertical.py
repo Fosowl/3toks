@@ -108,7 +108,22 @@ class CodeVertical:
         return {"goal": self.goal,
                 "answer": self.store.render_script(self._script_entry()),
                 "methods": [self._method_row(m) for m in self.store.methods],
+                "output": self._entry_output(),
                 "run": self._run_report()}
+
+    def _entry_output(self) -> str:
+        """What the delivered script prints when run, from the runner.
+
+        The entry's zero-arg smoke call executes exactly what the
+        ``__main__`` guard will, so its captured stdout IS the script's
+        output — shown to the user instead of silently discarded.
+        """
+        entry = self._script_entry()
+        if entry is None:
+            return ""
+        return next((r.stdout for r in self.run_results
+                     if r.check.name == entry
+                     and r.check.kind == runner.KIND_CALL), "")
 
     def _script_entry(self) -> str | None:
         """The function the ``__main__`` guard calls, or None for no guard.

@@ -43,6 +43,7 @@ class CheckResult:
     skipped: bool = False
     error: str = ""
     blamed: str = ""
+    stdout: str = ""       # what the check printed — surfaced, not discarded
 
 
 def collect_checks(methods) -> list[Check]:
@@ -115,13 +116,15 @@ def run_checks(module_source: str, checks: list[Check]) -> list[CheckResult]:
 def _run_one(module_source: str, check: Check,
              spans: dict[str, tuple[int, int]]) -> CheckResult:
     """One subprocess run; failures carry a first-error line and a blame."""
-    ok, stderr = gates.execute(module_source + "\n" + check.statement + "\n")
+    ok, stdout, stderr = gates.execute_capture(
+        module_source + "\n" + check.statement + "\n")
     if ok:
-        return CheckResult(check, passed=True)
+        return CheckResult(check, passed=True, stdout=stdout)
     if is_inconclusive(stderr):
-        return CheckResult(check, passed=False, skipped=True)
+        return CheckResult(check, passed=False, skipped=True, stdout=stdout)
     return CheckResult(check, passed=False, error=gates.first_error(stderr),
-                       blamed=blame(stderr, spans, check.name))
+                       blamed=blame(stderr, spans, check.name),
+                       stdout=stdout)
 
 
 def failures(results: list[CheckResult]) -> list[CheckResult]:

@@ -42,6 +42,13 @@ class PreRouteTest(unittest.TestCase):
             "write a script that parses log files like parser.py", self.root)
         self.assertEqual(mode, route.AUTHOR)
 
+    def test_write_code_phrasing_is_author(self):
+        # live gap: "write code in python to get weather" fell through to
+        # the menu because "code" was missing from the artifact nouns.
+        mode, _ = route.pre_route(
+            "write code in python to get weather in antibes", None)
+        self.assertEqual(mode, route.AUTHOR)
+
     def test_interrogative_code_entity_shape_is_navigate(self):
         mode, _ = route.pre_route(
             "where is the retry function defined?", None)

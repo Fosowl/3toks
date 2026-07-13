@@ -44,7 +44,7 @@ NAVIGATE_ENTITY_WORDS = ("function", "method", "class", "variable", "module",
                          "implemented", "logic", "symbol")
 COMPUTE_DATA_WORDS = ("csv", "log", "column", "data", "rows", "lines", "file")
 AUTHOR_ARTIFACT_WORDS = ("script", "program", "module", "function", "class",
-                         "tool", "cli", "library", "package")
+                         "tool", "cli", "library", "package", "code")
 
 # bare "top" is too common ("top-level function"); only "top <number>" is
 # a confident top-K compute signal (E7 found the bare-word false positive).

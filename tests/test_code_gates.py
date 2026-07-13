@@ -43,6 +43,19 @@ class FunctionDefTest(unittest.TestCase):
         self.assertIsNone(gates.function_def("def g(x):\n    return x\n", "f"))
 
 
+class ExecuteCaptureTest(unittest.TestCase):
+    def test_stdout_is_captured_not_discarded(self):
+        ok, stdout, stderr = gates.execute_capture("print('weather: 21C')\n")
+        self.assertTrue(ok)
+        self.assertEqual(stdout, "weather: 21C\n")
+        self.assertEqual(stderr, "")
+
+    def test_failure_still_carries_partial_stdout(self):
+        ok, stdout, _ = gates.execute_capture("print('before')\n1 // 0\n")
+        self.assertFalse(ok)
+        self.assertEqual(stdout, "before\n")
+
+
 class ImportAwareUndefinedNamesTest(unittest.TestCase):
     """Import statements bind names (live gemma failure: every legitimate
     `import requests` weather body was falsely rejected and stubbed)."""
