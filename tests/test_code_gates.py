@@ -43,6 +43,27 @@ class FunctionDefTest(unittest.TestCase):
         self.assertIsNone(gates.function_def("def g(x):\n    return x\n", "f"))
 
 
+class ImportAwareUndefinedNamesTest(unittest.TestCase):
+    """Import statements bind names (live gemma failure: every legitimate
+    `import requests` weather body was falsely rejected and stubbed)."""
+
+    def test_plain_import_binds_the_module_name(self):
+        body = ("def main():\n    import requests\n"
+                "    return requests.get('http://x').text\n")
+        self.assertEqual(gates.undefined_names(body, set()), [])
+
+    def test_from_import_and_aliases_bind_their_names(self):
+        body = ("def f():\n"
+                "    from json import loads as parse\n"
+                "    import os.path as p\n"
+                "    return parse('1'), p.sep\n")
+        self.assertEqual(gates.undefined_names(body, set()), [])
+
+    def test_genuinely_undefined_names_are_still_caught(self):
+        body = "def f(x):\n    import re\n    return helper(x)\n"
+        self.assertEqual(gates.undefined_names(body, set()), ["helper"])
+
+
 class RenormalizeIndentFallbackTest(unittest.TestCase):
     """function_source's second chance for whole-body indent drift (E8)."""
 

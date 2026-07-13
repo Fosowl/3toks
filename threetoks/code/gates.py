@@ -185,7 +185,13 @@ def signature_matches(source: str, name: str, args: str) -> bool:
 
 
 def undefined_names(source: str, allowed: set[str]) -> list[str]:
-    """Load-context names that are defined nowhere reachable (conservative)."""
+    """Load-context names that are defined nowhere reachable (conservative).
+
+    Import statements bind names too (``import requests`` anywhere in the
+    body defines ``requests``) — a live gemma run had every legitimate
+    weather implementation falsely rejected because this gate only saw
+    ``ast.Name`` stores and missed import aliases entirely.
+    """
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
@@ -195,10 +201,22 @@ def undefined_names(source: str, allowed: set[str]) -> list[str]:
     defined |= {a.arg for n in ast.walk(tree)
                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
                 for a in n.args.args}
+    defined |= _import_bound_names(tree)
     known = defined | _BUILTINS | allowed
     loads = {n.id for n in ast.walk(tree)
              if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
     return sorted(loads - known)
+
+
+def _import_bound_names(tree: ast.AST) -> set[str]:
+    """Every name an import statement binds, anywhere in the tree."""
+    bound: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            bound |= {a.asname or a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            bound |= {a.asname or a.name for a in node.names if a.name != "*"}
+    return bound
 
 
 def ensure_docstring(source: str, contract: str) -> str:
@@ -303,6 +321,12 @@ if __name__ == "__main__":
     assert not signature_matches(src, "clamp", "value, low")
     assert undefined_names("def f(x):\n    return helper(x)\n", set()) == ["helper"]
     assert undefined_names("def f(x):\n    return helper(x)\n", {"helper"}) == []
+    weather = ("def main():\n    import requests\n"
+               "    return requests.get('http://x').text\n")
+    assert undefined_names(weather, set()) == []       # import binds requests
+    aliased = ("def f():\n    from json import loads as parse\n"
+               "    return parse('1')\n")
+    assert undefined_names(aliased, set()) == []
     documented = ensure_docstring("def f(x):\n    return x\n", "return x")
     assert "return x" in documented and ast.parse(documented)
     hostile = ensure_docstring("def f(x):\n    return x\n", 'has """ triple')
