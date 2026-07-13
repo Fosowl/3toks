@@ -643,7 +643,7 @@ def _error_hint(error: Exception) -> str | None:
                 "pip install 'threetoks[web,browser]'")
     if isinstance(error, (ConnectionError, urllib.error.URLError)):
         return ("is Ollama running? start it and pull the model: "
-                "ollama pull gemma3:4b")
+                "ollama pull qwen2.5:1.5b-instruct")
     return None
 
 
@@ -798,7 +798,7 @@ def main(model: str = None) -> None:
 def _demo() -> None:
     """Non-interactive render of every TUI piece for eyeballing."""
     enabled = _color_enabled()
-    print(build_banner("gemma3:4b", 2, enabled))
+    print(build_banner("qwen2.5:1.5b-instruct", 2, enabled))
     print()
     events = [
         {"node": "menu", "value": "open result 2: Anthropic pricing",

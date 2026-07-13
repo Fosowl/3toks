@@ -76,7 +76,7 @@ if __name__ == "__main__":
     spec = ModelSpec("deepseek-r1:1.5b", FAMILY_R1)
     prompt = build_raw_prompt(spec, "Pick 1 or 2.", prefill="ANSWER:")
     assert prompt.endswith("</think>\n\nANSWER:") and R1_USER in prompt
-    chatml = build_raw_prompt(ModelSpec("gemma3:4b", FAMILY_CHATML),
+    chatml = build_raw_prompt(ModelSpec("qwen2.5:1.5b-instruct", FAMILY_CHATML),
                               "Pick 1 or 2.", system="s", prefill="ANSWER:")
     assert chatml.endswith("assistant\nANSWER:") and "<|im_start|>system" in chatml
     print("smoke OK")

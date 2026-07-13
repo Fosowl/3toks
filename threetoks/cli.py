@@ -20,7 +20,7 @@ from threetoks.web.vertical import WebResearchVertical
 # The web extras (requests, bs4, markdownify) are OPTIONAL: everything
 # that touches them imports lazily so the core runs on a bare install.
 
-DEFAULT_MODEL = "gemma3:4b"
+DEFAULT_MODEL = "qwen2.5:1.5b-instruct"
 DEFAULT_MAX_STEPS = 25
 
 # E1 winner ("menu_picker") extended to cover all three reply shapes.
