@@ -420,6 +420,9 @@ def _cmd_model(state: ReplState, arg: str) -> str:
         return fg(AMBER, "usage: /model NAME", state.enabled)
     state.model = name
     state.policy = state.policy_factory(name)
+    notice = unknown_family_notice(name)
+    if notice:
+        return fg(AMBER, notice, state.enabled)
     return dim(f"model = {name}", state.enabled)
 
 
@@ -719,6 +722,25 @@ def _initial_fetcher(config, services, sink=print):
     return fetcher
 
 
+def unknown_family_notice(model: str) -> str | None:
+    """A warning when the model's template family had to be guessed.
+
+    A wrong raw-mode template fails silently — menus keep answering (one
+    digit survives junk tokens) while every multi-line generation derails
+    — so the guess must be surfaced, never assumed.
+    """
+    from threetoks.backend.base import detect_family
+
+    _, known = detect_family(model)
+    if known:
+        return None
+    return (f"⚠ unknown template family for '{model}' — driving it as "
+            "ChatML, which may silently degrade generations. Known "
+            "families: qwen/smollm (chatml), gemma, llama3, "
+            "mistral/mixtral/llama2, phi3, deepseek-r1. The measured "
+            "policy model is qwen2.5:1.5b-instruct.")
+
+
 def _make_retriever(config, provider):
     """The opt-in code retrieval hook, or None (the default).
 
@@ -762,6 +784,9 @@ def build_state(model: str = None, sink=print):
     factory = lambda name: Policy(OllamaBackend(), make_policy_config(name),
                                   Tracer(None))
     chosen_model = model or config.llm.model
+    notice = unknown_family_notice(chosen_model)
+    if notice:
+        sink(notice)
     policy = factory(chosen_model)
     memory = MemoryStore.load(config.memory.path) if config.memory.enabled \
         else None

@@ -10,7 +10,7 @@ import random
 from dataclasses import dataclass
 
 from threetoks.backend.base import (FAMILY_R1, GenOpts, GenResult, LLMBackend,
-                                   ModelSpec, build_raw_prompt)
+                                   ModelSpec, build_raw_prompt, family_stops)
 from threetoks.nodes import Decision
 from threetoks.render import Episode
 from threetoks.trace import Tracer
@@ -97,7 +97,7 @@ class Policy:
                                   prefill=node.prefill)
         opts = GenOpts(max_tokens=node.max_tokens,
                        temperature=VOTE_TEMPERATURE,
-                       stop=tuple(getattr(node, "stop", ())),
+                       stop=self._stops(node),
                        num_ctx=self.config.num_ctx)
         return self.backend.complete(self.config.spec.name, prompt, opts)
 
@@ -119,9 +119,18 @@ class Policy:
         prompt = build_raw_prompt(self.config.spec, user, system=system,
                                   prefill=prefix + node.prefill)
         opts = GenOpts(max_tokens=node.max_tokens, temperature=temperature,
-                       stop=tuple(getattr(node, "stop", ())),
+                       stop=self._stops(node),
                        num_ctx=self.config.num_ctx)
         return self.backend.complete(self.config.spec.name, prompt, opts)
+
+    def _stops(self, node) -> tuple[str, ...]:
+        """The node's stop sequences plus the family's end-of-turn token.
+
+        Setting any stop overrides the Modelfile's defaults in raw mode,
+        so the family stop must always ride along or a generation node's
+        custom stops let the model run past its own end of turn.
+        """
+        return tuple(getattr(node, "stop", ())) + family_stops(self.config.spec)
 
     def _think(self, user: str, budget: int, temperature: float) -> str:
         """Bounded reasoning phase; returns text to inject before the prefill.

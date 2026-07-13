@@ -6,7 +6,7 @@
 import argparse
 import time
 
-from threetoks.backend.base import FAMILY_CHATML, FAMILY_R1, ModelSpec
+from threetoks.backend.base import FAMILY_R1, ModelSpec, detect_family
 from threetoks.backend.ollama import OllamaBackend
 from threetoks.config import load_config
 from threetoks.engine import run_episode  # noqa: F401 (eval harness imports)
@@ -33,15 +33,19 @@ SYSTEM_CHATML = (
 
 
 def model_spec(name: str) -> ModelSpec:
-    """Infer the template family from the model name."""
-    family = FAMILY_R1 if "r1" in name else FAMILY_CHATML
+    """Infer the template family from the model name (see detect_family)."""
+    family, _ = detect_family(name)
     return ModelSpec(name, family)
 
 
 def make_policy_config(name: str) -> PolicyConfig:
-    """Policy config with the family-appropriate system prompt."""
+    """Policy config with the family-appropriate system prompt.
+
+    Every family gets the E1-winning system text except R1, whose
+    think-suppression flow deliberately runs without one.
+    """
     spec = model_spec(name)
-    system = SYSTEM_CHATML if spec.family == FAMILY_CHATML else ""
+    system = "" if spec.family == FAMILY_R1 else SYSTEM_CHATML
     return PolicyConfig(spec, system=system)
 
 

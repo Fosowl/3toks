@@ -3,6 +3,15 @@
 ThreeToks builds chat templates itself (raw mode) so it can pre-close the
 <think> block of reasoning distills and steer output with a prefill —
 the two tricks that make 1-token decisions work on tiny models.
+
+Raw mode means the harness owns the whole template: a model driven with
+the wrong family sees literal special-token junk, and while menu digits
+survive that, multi-line generations derail (live failure: gemma3 under
+a ChatML template stubbed every method of a factorial). ``detect_family``
+maps known Ollama tag patterns to their template; an unknown tag falls
+back to ChatML with ``known=False`` so callers can warn instead of
+failing silently. The settled policy model remains qwen2.5:1.5b-instruct
+(DESIGN.md §11) — other families are supported, not recommended.
 """
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -14,6 +23,41 @@ R1_THINK_CLOSED = "<think>\n\n</think>\n\n"
 
 FAMILY_R1 = "r1"
 FAMILY_CHATML = "chatml"
+FAMILY_GEMMA = "gemma"
+FAMILY_LLAMA3 = "llama3"
+FAMILY_MISTRAL = "mistral"
+FAMILY_PHI3 = "phi3"
+
+# The end-of-turn token each family emits when it is done talking. Nodes
+# set their own stop sequences, which OVERRIDE the Modelfile's defaults in
+# raw mode — so the family stop must always ride along, or a generation
+# node's custom stops let the model run past its own end of turn and leak
+# template markers into the completion.
+FAMILY_STOPS = {
+    FAMILY_R1: ("<｜end▁of▁sentence｜>",),
+    FAMILY_CHATML: ("<|im_end|>",),
+    FAMILY_GEMMA: ("<end_of_turn>",),
+    FAMILY_LLAMA3: ("<|eot_id|>",),
+    FAMILY_MISTRAL: ("</s>",),
+    FAMILY_PHI3: ("<|end|>",),
+}
+
+# Ollama tag substrings -> family, checked in order (first hit wins).
+# Only patterns whose template is actually known belong here; anything
+# else is driven as ChatML with known=False so the caller can warn.
+_FAMILY_PATTERNS = (
+    ("r1", FAMILY_R1),
+    ("gemma", FAMILY_GEMMA),
+    ("llama3", FAMILY_LLAMA3),
+    ("llama-3", FAMILY_LLAMA3),
+    ("llama2", FAMILY_MISTRAL),      # nearest [INST]-style template
+    ("mistral", FAMILY_MISTRAL),
+    ("mixtral", FAMILY_MISTRAL),
+    ("phi3", FAMILY_PHI3),
+    ("phi-3", FAMILY_PHI3),
+    ("qwen", FAMILY_CHATML),
+    ("smollm", FAMILY_CHATML),
+)
 
 
 @dataclass(frozen=True)
@@ -44,24 +88,62 @@ class GenResult:
     raw: dict = field(repr=False, default_factory=dict)
 
 
+def detect_family(model_name: str) -> tuple[str, bool]:
+    """(family, known) for an Ollama model tag.
+
+    ``known=False`` means the tag matched no pattern and ChatML is a
+    guess — the caller should surface a warning, because a wrong
+    template fails silently (menus keep working, generations break).
+    """
+    lowered = model_name.lower()
+    for pattern, family in _FAMILY_PATTERNS:
+        if pattern in lowered:
+            return family, True
+    return FAMILY_CHATML, False
+
+
+def family_stops(spec: ModelSpec) -> tuple[str, ...]:
+    """The family's end-of-turn stop tokens (empty for unknown family)."""
+    return FAMILY_STOPS.get(spec.family, ())
+
+
 def build_raw_prompt(spec: ModelSpec, user: str, system: str = "",
                      think: bool = False, prefill: str = "") -> str:
     """Assemble a raw prompt for the model family.
 
-    For R1 the system text is folded into the user turn (DeepSeek guidance);
-    think=False pre-closes the reasoning block. For ChatML, system is a real
-    system turn and think is ignored.
+    ``think`` only means something for R1 (False pre-closes the reasoning
+    block). Families without a system role (R1, Gemma, Mistral) fold the
+    system text into the user turn, per each vendor's guidance.
     """
     if spec.family == FAMILY_R1:
-        merged = f"{system}\n\n{user}" if system else user
-        base = f"{R1_BOS}{R1_USER}{merged}{R1_ASSISTANT}"
+        base = f"{R1_BOS}{R1_USER}{_fold(system, user)}{R1_ASSISTANT}"
         opened = f"<think>\n{prefill}"
         return base + (opened if think else R1_THINK_CLOSED + prefill)
     if spec.family == FAMILY_CHATML:
         sys_block = f"<|im_start|>system\n{system}<|im_end|>\n" if system else ""
         return (f"{sys_block}<|im_start|>user\n{user}<|im_end|>\n"
                 f"<|im_start|>assistant\n{prefill}")
+    if spec.family == FAMILY_GEMMA:
+        return (f"<start_of_turn>user\n{_fold(system, user)}<end_of_turn>\n"
+                f"<start_of_turn>model\n{prefill}")
+    if spec.family == FAMILY_LLAMA3:
+        sys_block = (f"<|start_header_id|>system<|end_header_id|>\n\n"
+                     f"{system}<|eot_id|>") if system else ""
+        return (f"{sys_block}<|start_header_id|>user<|end_header_id|>\n\n"
+                f"{user}<|eot_id|>"
+                f"<|start_header_id|>assistant<|end_header_id|>\n\n{prefill}")
+    if spec.family == FAMILY_MISTRAL:
+        return f"[INST] {_fold(system, user)} [/INST]{prefill}"
+    if spec.family == FAMILY_PHI3:
+        sys_block = f"<|system|>\n{system}<|end|>\n" if system else ""
+        return (f"{sys_block}<|user|>\n{user}<|end|>\n"
+                f"<|assistant|>\n{prefill}")
     raise ValueError(f"unknown model family: {spec.family}")
+
+
+def _fold(system: str, user: str) -> str:
+    """System text merged into the user turn (no-system-role families)."""
+    return f"{system}\n\n{user}" if system else user
 
 
 class LLMBackend(Protocol):
@@ -79,4 +161,28 @@ if __name__ == "__main__":
     chatml = build_raw_prompt(ModelSpec("qwen2.5:1.5b-instruct", FAMILY_CHATML),
                               "Pick 1 or 2.", system="s", prefill="ANSWER:")
     assert chatml.endswith("assistant\nANSWER:") and "<|im_start|>system" in chatml
+
+    gemma = build_raw_prompt(ModelSpec("gemma3:4b", FAMILY_GEMMA),
+                             "Pick 1 or 2.", system="s", prefill="ANSWER:")
+    assert gemma.startswith("<start_of_turn>user\ns\n\nPick")
+    assert gemma.endswith("<start_of_turn>model\nANSWER:")
+    llama = build_raw_prompt(ModelSpec("llama3.2:1b", FAMILY_LLAMA3),
+                             "u", system="s", prefill="ANSWER:")
+    assert "system<|end_header_id|>\n\ns<|eot_id|>" in llama
+    assert llama.endswith("assistant<|end_header_id|>\n\nANSWER:")
+    mistral = build_raw_prompt(ModelSpec("mistral:7b", FAMILY_MISTRAL),
+                               "u", system="s", prefill="A:")
+    assert mistral == "[INST] s\n\nu [/INST]A:"
+    phi = build_raw_prompt(ModelSpec("phi3:mini", FAMILY_PHI3), "u",
+                           system="s", prefill="A:")
+    assert phi.endswith("<|assistant|>\nA:") and "<|system|>\ns<|end|>" in phi
+
+    assert detect_family("qwen2.5:1.5b-instruct") == (FAMILY_CHATML, True)
+    assert detect_family("gemma3:4b") == (FAMILY_GEMMA, True)
+    assert detect_family("llama3.2:1b") == (FAMILY_LLAMA3, True)
+    assert detect_family("mixtral:8x7b") == (FAMILY_MISTRAL, True)
+    assert detect_family("deepseek-r1:1.5b") == (FAMILY_R1, True)
+    assert detect_family("phi3:mini") == (FAMILY_PHI3, True)
+    assert detect_family("granite4:tiny") == (FAMILY_CHATML, False)  # unknown
+    assert family_stops(ModelSpec("g", FAMILY_GEMMA)) == ("<end_of_turn>",)
     print("smoke OK")
