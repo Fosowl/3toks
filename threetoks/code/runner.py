@@ -60,7 +60,7 @@ def collect_checks(methods) -> list[Check]:
         if method.examples:
             checks.extend(Check(method.name, f"assert {example}",
                                 KIND_EXAMPLE) for example in method.examples)
-        elif not method.args.strip():
+        elif gates.zero_arg_callable(method.args):
             checks.append(Check(method.name, f"{method.name}()", KIND_CALL))
     return checks
 

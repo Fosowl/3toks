@@ -128,14 +128,16 @@ class CodeVertical:
     def _script_entry(self) -> str | None:
         """The function the ``__main__`` guard calls, or None for no guard.
 
-        Deterministic preference: a bodied zero-arg ``main``, else the
-        goal-named entry when bodied and zero-arg, else the module's sole
-        bodied zero-arg function. Never a stub and never an arbitrary
-        helper — a script that crashes or picks randomly is worse than no
-        guard at all.
+        Deterministic preference: a bodied zero-arg-callable ``main``,
+        else the goal-named entry when bodied and zero-arg-callable, else
+        the module's sole bodied zero-arg-callable function (all-default
+        params count — ``say_hello(name="World")`` runs as a script).
+        Never a stub and never an arbitrary helper — a script that
+        crashes or picks randomly is worse than no guard at all.
         """
         zero_arg = [m.name for m in self.store.methods
-                    if m.body is not None and not m.args.strip()]
+                    if m.body is not None
+                    and gates.zero_arg_callable(m.args)]
         if "main" in zero_arg:
             return "main"
         match = _ENTRY.search(self.goal)

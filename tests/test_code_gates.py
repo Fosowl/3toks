@@ -76,6 +76,27 @@ class ImportAwareUndefinedNamesTest(unittest.TestCase):
         body = "def f(x):\n    import re\n    return helper(x)\n"
         self.assertEqual(gates.undefined_names(body, set()), ["helper"])
 
+    def test_nested_def_and_class_bind_their_names(self):
+        # live gemma failure: a correct nested-helper body was rejected
+        # twice and stubbed because the def statement binds without an
+        # ast.Name node.
+        nested = ("def main():\n    def say_hello():\n"
+                  "        print('hi')\n    say_hello()\n")
+        self.assertEqual(gates.undefined_names(nested, set()), [])
+        classy = ("def f():\n    class Box:\n        pass\n"
+                  "    return Box()\n")
+        self.assertEqual(gates.undefined_names(classy, set()), [])
+
+
+class ZeroArgCallableTest(unittest.TestCase):
+    def test_no_params_and_all_defaulted_params_qualify(self):
+        for args in ("", 'name="World"', "a=1, b=2", "a=1, *rest, **kw"):
+            self.assertTrue(gates.zero_arg_callable(args), args)
+
+    def test_any_required_param_disqualifies(self):
+        for args in ("name", "a, b=2", "*, required_kw", "((broken"):
+            self.assertFalse(gates.zero_arg_callable(args), args)
+
 
 class RenormalizeIndentFallbackTest(unittest.TestCase):
     """function_source's second chance for whole-body indent drift (E8)."""

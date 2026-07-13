@@ -43,6 +43,20 @@ class VerticalOutputTest(unittest.TestCase):
         self.assertIn("print('21C in Antibes')", outcome["answer"])
         self.assertEqual(outcome["output"], "21C in Antibes\n")
 
+    def test_default_arg_entry_gets_the_guard_and_its_output(self):
+        # say_hello(name="World") is zero-arg CALLABLE: it must ship with
+        # a __main__ guard and show what it prints (live gap: it shipped
+        # guardless and inert).
+        backend = QueueBackend(['say_hello(name="World"): greet someone',
+                                'print(f"Hello, {name}!")'])
+        vertical = CodeVertical("write a code to say hello",
+                                gen_tests=False)
+        policy = Policy(backend, PolicyConfig(ModelSpec("m", FAMILY_CHATML)))
+        outcome = run_episode(vertical, policy, max_steps=20)
+        self.assertIn('if __name__ == "__main__":\n    say_hello()',
+                      outcome["answer"])
+        self.assertEqual(outcome["output"], "Hello, World!\n")
+
     def test_no_runnable_entry_means_empty_output(self):
         backend = QueueBackend(["double(n): twice n", "return n * 2"])
         vertical = CodeVertical("double(n) doubles a number",

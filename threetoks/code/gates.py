@@ -173,6 +173,26 @@ def _is_noop_constant(node: ast.AST) -> bool:
         and (node.value is None or node.value is Ellipsis)
 
 
+def zero_arg_callable(args: str) -> bool:
+    """True when ``def f(args)`` can be called as ``f()``.
+
+    That covers no parameters at all AND parameters that all carry
+    defaults (``def say_hello(name="World")``) — the script-entry and
+    smoke-call rule, so a deliverable like that still gets its
+    ``__main__`` guard and its run output.
+    """
+    if not args.strip():
+        return True
+    try:
+        tree = ast.parse(f"def _probe({args}):\n    pass")
+    except (SyntaxError, ValueError):
+        return False
+    spec = tree.body[0].args
+    required = len(spec.posonlyargs) + len(spec.args) - len(spec.defaults)
+    kwonly_missing = sum(1 for d in spec.kw_defaults if d is None)
+    return required <= 0 and kwonly_missing == 0
+
+
 def signature_matches(source: str, name: str, args: str) -> bool:
     """True when the parsed def's argument names match the plan's."""
     node = function_def(source, name)
@@ -201,6 +221,12 @@ def undefined_names(source: str, allowed: set[str]) -> list[str]:
     defined |= {a.arg for n in ast.walk(tree)
                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
                 for a in n.args.args}
+    # def/class statements bind their names without an ast.Name node —
+    # a nested helper (`def say_hello(): ...` then `say_hello()`) was
+    # falsely flagged undefined on a live run and stubbed correct code.
+    defined |= {n.name for n in ast.walk(tree)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.ClassDef))}
     defined |= _import_bound_names(tree)
     known = defined | _BUILTINS | allowed
     loads = {n.id for n in ast.walk(tree)
@@ -337,6 +363,16 @@ if __name__ == "__main__":
     aliased = ("def f():\n    from json import loads as parse\n"
                "    return parse('1')\n")
     assert undefined_names(aliased, set()) == []
+    nested = ("def main():\n    def say_hello():\n        print('hi')\n"
+              "    say_hello()\n")
+    assert undefined_names(nested, set()) == []       # nested def binds
+    assert zero_arg_callable("")
+    assert zero_arg_callable('name="World"')
+    assert zero_arg_callable("a=1, *rest, b=2, **kw")
+    assert not zero_arg_callable("name")
+    assert not zero_arg_callable("a, b=2")
+    assert not zero_arg_callable("*, required_kw")
+    assert not zero_arg_callable("((broken")
     documented = ensure_docstring("def f(x):\n    return x\n", "return x")
     assert "return x" in documented and ast.parse(documented)
     hostile = ensure_docstring("def f(x):\n    return x\n", 'has """ triple')
