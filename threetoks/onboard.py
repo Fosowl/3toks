@@ -32,6 +32,16 @@ _VOICE_EXTRA_HINT = "install with: uv pip install '3toks[voice]'"
 _VOICE_PACKAGES = ("vosk", "sounddevice", "piper")
 _PIPER_SIDECAR_SUFFIX = ".json"  # piper needs voice.onnx.json beside .onnx
 
+# Said before the path questions: the two-file piper download is the
+# single most common setup mistake, and vosk needs no download at all.
+_VOICE_GUIDANCE = (
+    "a piper voice is TWO files: the .onnx AND its .onnx.json sidecar —",
+    "download both into the same folder, side by side, then give the .onnx.",
+    "the vosk model auto-downloads (~40 MB on first start) if you leave the "
+    "folder empty.")
+_VOICE_NEXT_STEP = ("voice saved — start it in a running session with /voice "
+                    "on (first start downloads the vosk model)")
+
 
 def _ask_text(ask, prompt: str, default: str) -> str:
     """One free-text question; Enter keeps ``default``."""
@@ -140,35 +150,65 @@ def _open_url_default(url: str) -> bool:
         return False
 
 
-def _show_model_pages(sink, open_url) -> None:
-    """Open the vosk and piper model pages and always print both links.
+def _show_model_pages(ask, sink, open_url) -> None:
+    """Offer to open the vosk and piper model pages; always print both links.
 
-    Inputs: ``sink`` for output and ``open_url`` to try a browser open.
-    Output: none; the printed links are the headless/failure fallback,
-    so both URLs are shown whether or not the browser opened.
+    Inputs: ``ask`` for the consent question, ``sink`` for output, and
+    ``open_url`` to try a browser open. Output: none. Nothing is opened
+    unless the user says yes, and the links are printed either way — they
+    are also the headless/failure fallback.
     """
-    open_url(VOSK_MODELS_URL)
+    if _ask_bool(ask, "Open the model download pages in your browser", True):
+        open_url(VOSK_MODELS_URL)
+        open_url(PIPER_VOICES_URL)
     sink(f"vosk STT models: {VOSK_MODELS_URL}")
-    open_url(PIPER_VOICES_URL)
     sink(f"piper TTS voices: {PIPER_VOICES_URL}")
 
 
-def _verify_tts_path(tts_path: str, sink) -> None:
-    """Warn about a missing piper voice, its sidecar, or an empty path.
+def _vosk_folder_problem(stt_path: str) -> str | None:
+    """Warning when the vosk model folder is absent, else None."""
+    if os.path.exists(stt_path):
+        return None
+    return f"warning: vosk model folder not found: {stt_path}"
 
-    Inputs: the configured ``.onnx`` path and a ``sink``. Output: none.
-    An empty path notes that voice output stays off; a set path is
-    checked for the file and its required ``.onnx.json`` sidecar.
+
+def _piper_voice_problem(tts_path: str) -> str | None:
+    """Warning when the piper ``.onnx`` or its sidecar is absent, else None.
+
+    Inputs: the configured ``.onnx`` path. Output: one warning string, or
+    None when both the voice file and its required ``.onnx.json`` sidecar
+    are on disk. Callers decide whether to warn or re-ask.
     """
-    if not tts_path:
-        sink("note: voice output stays off until a piper .onnx is set")
-        return
     if not os.path.isfile(tts_path):
-        sink(f"warning: piper voice file not found: {tts_path}")
-        return
+        return f"warning: piper voice file not found: {tts_path}"
     sidecar = tts_path + _PIPER_SIDECAR_SUFFIX
     if not os.path.isfile(sidecar):
-        sink(f"warning: piper sidecar missing: {sidecar}")
+        return f"warning: piper sidecar missing: {sidecar}"
+    return None
+
+
+def _ask_verified_path(ask, sink, prompt: str, default: str,
+                       problem_fn) -> str:
+    """One path question, re-asked while the answer fails its check.
+
+    Inputs: the consoles, the question ``prompt`` and its ``default``, and
+    ``problem_fn(path)`` returning a warning string or None. Output: the
+    chosen path. An empty answer skips verification (empty means
+    auto-download, or the side stays off). A failing path is reported and
+    a retry offered; the retry defaults to NO so that pressing Enter
+    keeps the failing path and moves on — a user who knows better, or is
+    setting up before downloading, is never trapped in the loop.
+    """
+    while True:
+        path = _ask_text(ask, prompt, default)
+        if not path:
+            return path
+        problem = problem_fn(path)
+        if problem is None:
+            return path
+        sink(problem)
+        if not _ask_bool(ask, "Try a different path", False):
+            return path
 
 
 def _verify_packages(sink) -> None:
@@ -184,16 +224,17 @@ def _verify_packages(sink) -> None:
 
 
 def _verify_voice(voice: VoiceConfig, sink) -> None:
-    """Print one actionable warning per voice-setup problem, never blocking.
+    """Close the voice step: note a silent side, hint any missing package.
 
     Inputs: the assembled ``VoiceConfig`` and a ``sink``. Output: none.
-    Sanity-checks the vosk folder, the piper voice and its sidecar, and
-    the importability of the voice packages — warnings only, no re-asks.
+    Both paths were already checked — and re-asked — by
+    :func:`_ask_verified_path`, so re-checking them here would only
+    repeat a warning the user just answered. What is left is the case
+    that loop skips (an empty piper path means no spoken answers) and the
+    importability of the extras. Warnings only, never blocking.
     """
-    stt_path = voice.stt_model_path
-    if stt_path and not os.path.exists(stt_path):
-        sink(f"warning: vosk model folder not found: {stt_path}")
-    _verify_tts_path(voice.tts_model_path, sink)
+    if not voice.tts_model_path:
+        sink("note: voice output stays off until a piper .onnx is set")
     _verify_packages(sink)
 
 
@@ -201,23 +242,29 @@ def _ask_voice(base: ThreetoksConfig, ask, sink, open_url) -> VoiceConfig:
     """Optional last step: enable voice, pick language, set model paths.
 
     ``base`` gives defaults; declining returns ``base.voice`` with
-    ``enabled=False``. On yes: asks language and both model paths, opens
-    the model pages via ``open_url``, verifies via :func:`_verify_voice`,
-    and returns the enabled ``VoiceConfig`` (``tts_speaker`` and
-    ``post_speak_delay`` carried from base).
+    ``enabled=False``. On yes: asks language, explains the two-file piper
+    download, offers to open the model pages via ``open_url``, then asks
+    both model paths — re-asking while a non-empty answer fails its check
+    — verifies via :func:`_verify_voice`, and returns the enabled
+    ``VoiceConfig`` (``tts_speaker``/``post_speak_delay`` carried).
     """
     if not _ask_bool(ask, "Enable voice mode (microphone in, spoken "
                      "answers out)", base.voice.enabled):
         return replace(base.voice, enabled=False)
     lang = _ask_text(ask, "Voice input language", base.voice.lang)
-    _show_model_pages(sink, open_url)
-    stt = _ask_text(ask, f"Vosk model folder (Enter = auto-download for "
-                    f"'{lang}')", base.voice.stt_model_path)
-    tts = _ask_text(ask, "Piper voice .onnx file (Enter = spoken answers "
-                    "stay off)", base.voice.tts_model_path)
+    for line in _VOICE_GUIDANCE:
+        sink(line)
+    _show_model_pages(ask, sink, open_url)
+    stt = _ask_verified_path(ask, sink, f"Vosk model folder (Enter = "
+                             f"auto-download for '{lang}')",
+                             base.voice.stt_model_path, _vosk_folder_problem)
+    tts = _ask_verified_path(ask, sink, "Piper voice .onnx file (Enter = "
+                             "spoken answers stay off)",
+                             base.voice.tts_model_path, _piper_voice_problem)
     voice = replace(base.voice, enabled=True, lang=lang,
                     stt_model_path=stt, tts_model_path=tts)
     _verify_voice(voice, sink)
+    sink(_VOICE_NEXT_STEP)
     return voice
 
 
@@ -298,13 +345,21 @@ if __name__ == "__main__":
     assert rerun.camera.index == 2 and rerun.relay.pin == 27
 
     opened.clear()
-    accept = iter(["", "", "http", "", "", "", "n", "y", "de", "/stt",
-                   "/voice.onnx"])
+    # yes, lang, open pages?, vosk path, keep it?, piper path, keep it?
+    accept = iter(["", "", "http", "", "", "", "n", "y", "de", "y", "/stt",
+                   "n", "/voice.onnx", "n"])
     voiced = run_wizard(ask=lambda prompt: next(accept), sink=quiet,
                        open_url=record)
     assert voiced.voice.enabled is True, voiced.voice
     assert voiced.voice.lang == "de", voiced.voice
-    assert voiced.voice.stt_model_path == "/stt", voiced.voice
+    assert voiced.voice.stt_model_path == "/stt", voiced.voice  # kept, missing
     assert voiced.voice.tts_model_path == "/voice.onnx", voiced.voice
     assert opened == [VOSK_MODELS_URL, PIPER_VOICES_URL], opened
+
+    opened.clear()
+    declined = iter(["", "", "http", "", "", "", "n", "y", "de", "n", "", ""])
+    pages_off = run_wizard(ask=lambda prompt: next(declined), sink=quiet,
+                          open_url=record)
+    assert pages_off.voice.enabled is True, pages_off.voice
+    assert opened == [], opened  # declining the browser opens nothing
     print("smoke OK")

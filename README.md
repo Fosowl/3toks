@@ -114,8 +114,9 @@ registered agent (`casual`).
 
 Slash commands in the TUI: `/help`, `/agents` (list registered agents),
 `/deep N` (set research rounds), `/browser http|plain|stealth`,
-`/model NAME` (swap the policy model), `/voice on|off` (talk instead of
-typing), `/setup` (re-run the config wizard), `/quit`.
+`/model NAME` (swap the policy model), `/voice on|off|debug` (talk instead
+of typing; `debug` traces what the microphone hears and why each gate
+dropped it), `/setup` (re-run the config wizard), `/quit`.
 
 Adding an agent is one new module plus one line in the registry — see
 [docs/AGENTS.md](docs/AGENTS.md) for the contract and a minimal example.
@@ -169,7 +170,11 @@ spoken answers, so it never talks to itself), and a one-token pertinence
 menu ("meant for the assistant" vs "background noise") decided by the
 policy model — cost: 1 token per utterance that survives the free gates.
 The vosk model auto-downloads for `[voice] lang` (default `en-us`); set
-`stt_model_path` to use a local one.
+`stt_model_path` to use a local one. `/voice debug` traces each raw
+transcript as it arrives, why a gate dropped it (empty, hallucination,
+echo), and whether the pertinence menu judged it directed at you or noise
+— and if nothing at all appears in debug mode while you speak, check your
+OS microphone permission for the terminal you run 3toks in.
 
 **Voice output — `3toks[tts]`** (piper-tts + sounddevice + numpy). Spoken
 answers via a local Piper voice. Voice models are NOT auto-downloaded:
@@ -180,8 +185,13 @@ hard-muted during playback plus `post_speak_delay` seconds of reverb
 decay. Install both sides at once with `3toks[voice]`; either side alone
 also works (voice-in/text-out or type-in/spoken-out). Set
 `[voice] enabled = true` to start the TUI already listening. `/setup`
-includes an optional voice step that opens the vosk/piper model pages,
-asks for the model paths, and sanity-checks them.
+includes an optional voice step that walks the two-file piper download
+interactively — it spells out that you need the `.onnx` *and* its
+`.onnx.json` sidecar side by side, offers to open the vosk/piper model
+pages, and re-asks any path that fails its check until you have a working
+one (or keep yours). `/voice on` re-reads the saved config as it starts,
+so a voice setup applies without restarting the TUI — if voice is already
+running, `/voice off` first.
 
 **Camera — `3toks[camera]`** (opencv-python). Registers the `look` agent
 when the configured model is vision-capable. One JPEG frame (device

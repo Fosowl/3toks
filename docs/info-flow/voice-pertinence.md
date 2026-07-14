@@ -8,10 +8,13 @@ composed in `threetoks/voice/session.py` (`VoiceSession.listen`).
 
 1. **Vosk transcript** — raw text from `SpeechListener.listen`. Zero
    model cost.
-2. **Deterministic gates** (`accept_transcript`, zero model cost):
+2. **Deterministic gates** (`gate_transcript`, zero model cost):
    empty → drop; whole text in `KNOWN_HALLUCINATIONS` → drop; echo of
    the assistant's own last `SPOKEN_HISTORY` answers
    (`threetoks/voice/echo.py`, n-gram window both directions) → drop.
+   It returns the drop reason (`GATE_EMPTY`/`GATE_HALLUCINATION`/
+   `GATE_ECHO`/`GATE_OK`) so `/voice debug` can name it;
+   `accept_transcript` is the reason-less wrapper.
 3. **Pertinence menu** (`is_pertinent`, ~1 output token): one
    `MenuNode` with two semantically described options, `escape=False`,
    decided by the session policy.
