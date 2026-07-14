@@ -7,6 +7,7 @@ only points at it (see docs/DESIGN.md §8). The store is append-only and
 skips exact-duplicate texts; ``render`` produces compact numbered lines
 for the rolling log.
 """
+import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -27,6 +28,25 @@ def _host_of(url: str) -> str:
     """Return the hostname of a URL, or the URL itself if unparsable."""
     host = urlparse(url).netloc
     return host or url
+
+
+def rank_by_overlap(texts: list[str], query: str, top_k: int) -> list[str]:
+    """The ``top_k`` texts sharing the most 4+-letter words with ``query``.
+
+    Deterministic and free: answer fallbacks use it to quote the notes
+    closest to the task instead of whichever happened to be stored first.
+    Ties keep the original order (stable sort); a query with no usable
+    keywords falls back to the head of the list.
+    """
+    keywords = set(re.findall(r"\w{4,}", query.lower()))
+    if not keywords:
+        return texts[:top_k]
+
+    def overlap(text: str) -> int:
+        lowered = text.lower()
+        return sum(word in lowered for word in keywords)
+
+    return sorted(texts, key=overlap, reverse=True)[:top_k]
 
 
 class NoteStore:
@@ -104,4 +124,7 @@ if __name__ == "__main__":
     ranked = store.select([2, 1])  # reorder: preserves index order
     assert ranked.count() == 2, ranked.count()
     assert ranked.entries()[0].text == "It has 2.1 million people.", ranked
+    closest = rank_by_overlap(store.texts(), "how many people live there?", 1)
+    assert closest == ["It has 2.1 million people."], closest
+    assert rank_by_overlap(["a", "b"], "??", 1) == ["a"]  # no keywords: head
     print("smoke OK")

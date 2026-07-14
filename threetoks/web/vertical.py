@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from threetoks.nodes import ESCAPE, MenuNode, PickManyNode, ShortTextNode
 from threetoks.render import Episode
+from threetoks.web.notes import rank_by_overlap
 from threetoks.web.target import QUERY_TEMPERATURE, normalize_query
 
 MAX_RESULTS_SHOWN = 5
@@ -245,8 +246,12 @@ class WebResearchVertical:
         The notes are now high-quality, so a short generation grounded in
         them beats quoting a fragment; the bleed guard and the top-2
         verbatim fallback in ``_accept_answer`` catch a garbled generation.
+        Notes are shown WITHOUT their "(source: ...)" tags here — a live
+        run showed the 1.5b copying the tags into the answer text.
         """
-        body = self.notes.render() if self.notes.count() else "(none)"
+        body = "\n".join(f"[{i}] {t}"
+                         for i, t in enumerate(self.notes.texts(), 1)) \
+            or "(none)"
         self.episode.open_observation(f"NOTES COLLECTED:\n{body}",
                                       "> moving to final answer")
         self.page = None
@@ -292,8 +297,13 @@ class WebResearchVertical:
         self.answer = text or "(no answer)"
 
     def _quote_fallback(self) -> str:
-        """Quote the top curated notes when synthesis keeps bleeding."""
-        top = self.notes.texts()[:QUOTE_FALLBACK_NOTES]
+        """Quote the notes closest to the task when synthesis keeps bleeding.
+
+        Ranked by task-keyword overlap, not store order: the fallback must
+        stay aimed at the goal even though the generation step gave up.
+        """
+        top = rank_by_overlap(self.notes.texts(), self.task,
+                              QUOTE_FALLBACK_NOTES)
         return "\n".join(top) if top else "(no answer)"
 
     # ------------------------------------------------------------ transitions
