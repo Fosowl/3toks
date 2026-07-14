@@ -35,7 +35,7 @@ NOISE_OPTION = "background noise, other people talking, or fragmented speech"
 _GATE_PREFIX = (
     "You gate an always-listening microphone that constantly picks up TV, "
     "music, and side conversations. Let through only speech aimed at the "
-    "assistant; when unsure, treat it as noise.")
+    "assistant; when unsure, treat it as noise. Legit utterances are usually complete sentences, questions, or commands. examples: 'turn on the light', 'what's the weather?', 'Who is Fosowl?', 'Code a 3d game'. ")
 _GATE_TASK = "classify one overheard transcript"
 
 # Audio stream shape (Vosk expects 16-bit mono PCM).
