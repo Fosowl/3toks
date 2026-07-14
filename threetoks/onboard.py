@@ -62,10 +62,11 @@ def _ask_int(ask, prompt: str, default: int) -> int:
 
 
 def _ask_llm(base: ThreetoksConfig, ask) -> LlmConfig:
-    """Model and host questions; vote_k stays as configured."""
+    """Model and host questions; provider, api_base, vote_k stay as configured."""
     model = _ask_text(ask, "Ollama model", base.llm.model)
     host = _ask_text(ask, "Ollama host", base.llm.host)
-    return LlmConfig(model=model, host=host, vote_k=base.llm.vote_k)
+    return LlmConfig(model=model, host=host, provider=base.llm.provider,
+                     api_base=base.llm.api_base, vote_k=base.llm.vote_k)
 
 
 def _ask_browser(base: ThreetoksConfig, ask) -> BrowserConfig:
@@ -120,8 +121,10 @@ def run_wizard(base: ThreetoksConfig = None, ask=input,
     """Ask the setup questions one at a time and return the answers.
 
     ``base`` supplies the shown defaults (built-ins when ``None``); Enter
-    keeps a default and invalid answers re-ask. Settings the wizard does
-    not ask about (vote_k, pacing, step cap) carry over from ``base``.
+    keeps a default and invalid answers re-ask. Everything the wizard
+    does not ask about — provider/api_base/vote_k, pacing, step cap, and
+    the whole code/voice/camera/relay sections — carries over from
+    ``base`` untouched, so re-running ``/setup`` never wipes hand-edits.
     """
     base = base or ThreetoksConfig()
     sink("ThreeToks setup — Enter keeps the [default].")
@@ -131,7 +134,9 @@ def run_wizard(base: ThreetoksConfig = None, ask=input,
         search=_ask_search(base, ask),
         research=_ask_research(base, ask),
         files=_ask_files(base, ask),
-        memory=_ask_memory(base, ask))
+        memory=_ask_memory(base, ask),
+        code=base.code, voice=base.voice,
+        camera=base.camera, relay=base.relay)
 
 
 def run_onboarding(ask=input, sink=print) -> str:
@@ -161,4 +166,19 @@ if __name__ == "__main__":
     retried = run_wizard(ask=lambda prompt: next(retries), sink=quiet)
     assert retried.browser.mode == "plain", retried.browser
     assert retried.research.max_rounds == 3, retried.research
+
+    from threetoks.config import (CameraConfig, CodeConfig, RelayConfig,
+                                 VoiceConfig)
+    edited = ThreetoksConfig(
+        llm=LlmConfig(provider="anthropic", api_base="http://p"),
+        code=CodeConfig(retrieval=True),
+        voice=VoiceConfig(enabled=True, tts_model_path="/v.onnx"),
+        camera=CameraConfig(index=2), relay=RelayConfig(pin=27))
+    keeps = iter(["", "", "http", "", "", "", "n"])
+    rerun = run_wizard(edited, ask=lambda prompt: next(keeps), sink=quiet)
+    assert rerun.llm.provider == "anthropic", rerun.llm  # never wiped
+    assert rerun.llm.api_base == "http://p", rerun.llm
+    assert rerun.code.retrieval is True, rerun.code
+    assert rerun.voice.tts_model_path == "/v.onnx", rerun.voice
+    assert rerun.camera.index == 2 and rerun.relay.pin == 27
     print("smoke OK")

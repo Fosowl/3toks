@@ -32,6 +32,8 @@ class OllamaBackend:
             options["seed"] = opts.seed
         payload = {"model": model, "prompt": raw_prompt, "raw": True,
                    "stream": False, "options": options}
+        if opts.images:  # multimodal models take raw base64 alongside
+            payload["images"] = list(opts.images)
         start = time.time()
         data = self._post("/api/generate", payload)
         return GenResult(text=data.get("response", ""),

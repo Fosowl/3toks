@@ -144,5 +144,28 @@ class RunOnboardingTest(unittest.TestCase):
         self.assertTrue(any(target in line for line in lines))
 
 
+class UnaskedSectionsSurviveTest(unittest.TestCase):
+    """Regression: /setup must never wipe sections it does not ask about."""
+
+    def test_enter_through_keeps_every_unasked_field(self):
+        from threetoks.config import (CameraConfig, CodeConfig, LlmConfig,
+                                     RelayConfig, VoiceConfig)
+        edited = ThreetoksConfig(
+            llm=LlmConfig(provider="anthropic", api_base="http://p"),
+            code=CodeConfig(retrieval=True, snippet_cache="/s.json"),
+            voice=VoiceConfig(enabled=True, tts_model_path="/v.onnx",
+                              tts_speaker=3, post_speak_delay=1.5),
+            camera=CameraConfig(index=2),
+            relay=RelayConfig(pin=27))
+        ask, _ = _scripted(["", "", "http", "", "", "", "n"])
+        rerun = run_wizard(edited, ask=ask, sink=_quiet)
+        self.assertEqual(rerun.llm.provider, "anthropic")
+        self.assertEqual(rerun.llm.api_base, "http://p")
+        self.assertEqual(rerun.code, edited.code)
+        self.assertEqual(rerun.voice, edited.voice)
+        self.assertEqual(rerun.camera, edited.camera)
+        self.assertEqual(rerun.relay, edited.relay)
+
+
 if __name__ == "__main__":
     unittest.main()

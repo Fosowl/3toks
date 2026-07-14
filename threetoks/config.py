@@ -29,7 +29,21 @@ DEFAULT_CONFIG_NAME = "config.ini"
 # generation fails to reconstruct (live failure: factorial fully stubbed).
 DEFAULT_MODEL = "qwen2.5:1.5b-instruct"
 DEFAULT_LLM_HOST = "http://localhost:11434"
+DEFAULT_PROVIDER = "ollama"
+DEFAULT_API_BASE = ""
 DEFAULT_VOTE_K = 1
+DEFAULT_VOICE_ENABLED = False
+DEFAULT_VOICE_LANG = "en-us"
+DEFAULT_STT_MODEL_PATH = ""
+DEFAULT_TTS_MODEL_PATH = ""
+DEFAULT_TTS_SPEAKER = -1  # -1 = the voice model's default speaker
+DEFAULT_POST_SPEAK_DELAY_S = 0.8
+DEFAULT_CAMERA_INDEX = 0
+DEFAULT_RELAY_PIN = 17  # BCM numbering
+
+# Keep in sync with threetoks.backend.providers.PROVIDERS (test-enforced).
+PROVIDER_CHOICES = ("ollama", "anthropic", "openai", "openrouter",
+                    "together", "deepseek", "google", "lm-studio", "custom")
 DEFAULT_BROWSER_MODE = "http"
 DEFAULT_BROWSER_VISIBLE = False
 DEFAULT_SEARXNG_URL = "http://localhost:8080"
@@ -49,10 +63,17 @@ _FALSE_WORDS = ("0", "false", "no", "off")
 
 @dataclass(frozen=True)
 class LlmConfig:
-    """Language-model settings: which model, where it lives, vote count."""
+    """Language-model settings: transport, model, where it lives, votes.
+
+    ``provider`` picks the transport (ollama = local raw mode, the
+    measured default; everything else is a chat API — supported, not
+    recommended). ``api_base`` overrides the provider's default URL.
+    """
 
     model: str = DEFAULT_MODEL
     host: str = DEFAULT_LLM_HOST
+    provider: str = DEFAULT_PROVIDER
+    api_base: str = DEFAULT_API_BASE
     vote_k: int = DEFAULT_VOTE_K
 
 
@@ -105,6 +126,38 @@ class CodeConfig:
 
 
 @dataclass(frozen=True)
+class VoiceConfig:
+    """Voice mode: whether the TUI listens/speaks, and with which models.
+
+    STT (vosk) auto-downloads by ``lang`` unless ``stt_model_path`` is
+    set; TTS (piper) never auto-downloads — ``tts_model_path`` must name
+    a local ``.onnx`` voice. ``tts_speaker`` of -1 means the voice's
+    default speaker.
+    """
+
+    enabled: bool = DEFAULT_VOICE_ENABLED
+    lang: str = DEFAULT_VOICE_LANG
+    stt_model_path: str = DEFAULT_STT_MODEL_PATH
+    tts_model_path: str = DEFAULT_TTS_MODEL_PATH
+    tts_speaker: int = DEFAULT_TTS_SPEAKER
+    post_speak_delay: float = DEFAULT_POST_SPEAK_DELAY_S
+
+
+@dataclass(frozen=True)
+class CameraConfig:
+    """Which camera device the vision agent captures from."""
+
+    index: int = DEFAULT_CAMERA_INDEX
+
+
+@dataclass(frozen=True)
+class RelayConfig:
+    """GPIO pin (BCM) of the light relay on a Raspberry Pi."""
+
+    pin: int = DEFAULT_RELAY_PIN
+
+
+@dataclass(frozen=True)
 class ThreetoksConfig:
     """The whole configuration: one immutable section object per ``[section]``."""
 
@@ -115,6 +168,9 @@ class ThreetoksConfig:
     files: FilesConfig = FilesConfig()
     memory: MemoryConfig = MemoryConfig()
     code: CodeConfig = CodeConfig()
+    voice: VoiceConfig = VoiceConfig()
+    camera: CameraConfig = CameraConfig()
+    relay: RelayConfig = RelayConfig()
 
 
 def _get_str(parser: configparser.ConfigParser, section: str,
@@ -169,6 +225,10 @@ def _build_config(parser: configparser.ConfigParser) -> ThreetoksConfig:
         llm=LlmConfig(
             model=_get_str(parser, "llm", "model", DEFAULT_MODEL),
             host=_get_str(parser, "llm", "host", DEFAULT_LLM_HOST),
+            provider=_get_choice(parser, "llm", "provider",
+                                 DEFAULT_PROVIDER, PROVIDER_CHOICES),
+            api_base=_get_str(parser, "llm", "api_base",
+                              DEFAULT_API_BASE),
             vote_k=_get_int(parser, "llm", "vote_k", DEFAULT_VOTE_K)),
         browser=BrowserConfig(
             mode=_get_choice(parser, "browser", "mode",
@@ -195,7 +255,24 @@ def _build_config(parser: configparser.ConfigParser) -> ThreetoksConfig:
             retrieval=_get_bool(parser, "code", "retrieval",
                                 DEFAULT_CODE_RETRIEVAL),
             snippet_cache=_get_str(parser, "code", "snippet_cache",
-                                   DEFAULT_SNIPPET_CACHE)))
+                                   DEFAULT_SNIPPET_CACHE)),
+        voice=VoiceConfig(
+            enabled=_get_bool(parser, "voice", "enabled",
+                              DEFAULT_VOICE_ENABLED),
+            lang=_get_str(parser, "voice", "lang", DEFAULT_VOICE_LANG),
+            stt_model_path=_get_str(parser, "voice", "stt_model_path",
+                                    DEFAULT_STT_MODEL_PATH),
+            tts_model_path=_get_str(parser, "voice", "tts_model_path",
+                                    DEFAULT_TTS_MODEL_PATH),
+            tts_speaker=_get_int(parser, "voice", "tts_speaker",
+                                 DEFAULT_TTS_SPEAKER),
+            post_speak_delay=_get_float(parser, "voice", "post_speak_delay",
+                                        DEFAULT_POST_SPEAK_DELAY_S)),
+        camera=CameraConfig(
+            index=_get_int(parser, "camera", "index",
+                           DEFAULT_CAMERA_INDEX)),
+        relay=RelayConfig(
+            pin=_get_int(parser, "relay", "pin", DEFAULT_RELAY_PIN)))
 
 
 def user_config_dir(platform: str = None) -> str:
@@ -255,9 +332,17 @@ _INI_TEMPLATE = """\
 # Bad or missing values silently fall back to the built-in defaults.
 
 [llm]
-# Ollama model used for every decision node, and the server that hosts it.
+# Model used for every decision node, and the transport that serves it.
+# provider: ollama (local raw mode — the measured default) or a chat API:
+# anthropic | openai | openrouter | together | deepseek | google |
+# lm-studio | custom. Chat providers read their API key from the
+# environment (OPENAI_API_KEY, ANTHROPIC_API_KEY, ... / LLM_API_KEY for
+# lm-studio and custom) and are supported, not recommended.
+# api_base overrides the provider's default URL (required for custom).
 model = {model}
 host = {host}
+provider = {provider}
+api_base = {api_base}
 vote_k = {vote_k}
 
 [browser]
@@ -291,13 +376,38 @@ enabled = {enabled}
 # subprocess and embeds it (provenance-stamped, license unreviewed).
 retrieval = {retrieval}
 snippet_cache = {snippet_cache}
+
+[voice]
+# Optional voice mode (extras: '3toks[stt]' and/or '3toks[tts]').
+# enabled starts the TUI listening/speaking; /voice toggles at runtime.
+# STT auto-downloads a vosk model for lang unless stt_model_path is set.
+# TTS needs a local piper .onnx voice at tts_model_path (never downloaded).
+# tts_speaker -1 = the voice's default; post_speak_delay (s) lets room
+# echo decay before the microphone unmutes.
+enabled = {voice_enabled}
+lang = {voice_lang}
+stt_model_path = {stt_model_path}
+tts_model_path = {tts_model_path}
+tts_speaker = {tts_speaker}
+post_speak_delay = {post_speak_delay}
+
+[camera]
+# Optional camera for vision-capable models (extra: '3toks[camera]').
+index = {camera_index}
+
+[relay]
+# Optional GPIO light relay, Raspberry Pi only (extra: '3toks[relay]').
+# BCM pin number driving the (active-low) relay board.
+pin = {relay_pin}
 """
 
 
 def render_ini(config: ThreetoksConfig) -> str:
     """Render ``config`` as a commented INI string that parses back equal."""
     return _INI_TEMPLATE.format(
-        model=config.llm.model, host=config.llm.host, vote_k=config.llm.vote_k,
+        model=config.llm.model, host=config.llm.host,
+        provider=config.llm.provider, api_base=config.llm.api_base,
+        vote_k=config.llm.vote_k,
         mode=config.browser.mode, visible=str(config.browser.visible).lower(),
         searxng_url=config.search.searxng_url,
         min_interval_s=config.search.min_interval_s,
@@ -306,7 +416,14 @@ def render_ini(config: ThreetoksConfig) -> str:
         root=config.files.root, memory_path=config.memory.path,
         enabled=str(config.memory.enabled).lower(),
         retrieval=str(config.code.retrieval).lower(),
-        snippet_cache=config.code.snippet_cache)
+        snippet_cache=config.code.snippet_cache,
+        voice_enabled=str(config.voice.enabled).lower(),
+        voice_lang=config.voice.lang,
+        stt_model_path=config.voice.stt_model_path,
+        tts_model_path=config.voice.tts_model_path,
+        tts_speaker=config.voice.tts_speaker,
+        post_speak_delay=config.voice.post_speak_delay,
+        camera_index=config.camera.index, relay_pin=config.relay.pin)
 
 
 def save_config(config: ThreetoksConfig, path: str = None) -> str:
@@ -362,6 +479,25 @@ if __name__ == "__main__":
     assert defaults.memory.enabled is True, defaults.memory
     assert defaults.code.retrieval is False, defaults.code   # off by default
     assert defaults.code.snippet_cache == DEFAULT_SNIPPET_CACHE
+    assert defaults.llm.provider == "ollama", defaults.llm
+    assert defaults.llm.api_base == "", defaults.llm
+    assert defaults.voice.enabled is False, defaults.voice
+    assert defaults.voice.tts_speaker == DEFAULT_TTS_SPEAKER
+    assert defaults.camera.index == 0 and defaults.relay.pin == 17
+    with tempfile.NamedTemporaryFile("w", suffix=".ini",
+                                     delete=False) as handle:
+        handle.write("[llm]\nprovider = anthropic\n"
+                     "[voice]\nenabled = yes\npost_speak_delay = 1.5\n"
+                     "[relay]\npin = 27\n")
+        section_path = handle.name
+    sections = load_config(section_path)
+    assert sections.llm.provider == "anthropic", sections.llm
+    assert sections.voice.enabled is True, sections.voice
+    assert sections.voice.post_speak_delay == 1.5, sections.voice
+    assert sections.relay.pin == 27, sections.relay
+    bad = load_config("/nonexistent/threetoks.ini")
+    assert bad.llm.provider == DEFAULT_PROVIDER  # bad/missing -> default
+    os.unlink(section_path)
     os.unlink(temp_path)
     assert user_config_path("nt").endswith(
         os.path.join("threetoks", "config.ini")), user_config_path("nt")

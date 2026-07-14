@@ -13,6 +13,7 @@ back to ChatML with ``known=False`` so callers can warn instead of
 failing silently. The settled policy model remains qwen2.5:1.5b-instruct
 (DESIGN.md §11) — other families are supported, not recommended.
 """
+import re
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -69,12 +70,17 @@ class ModelSpec:
 
 @dataclass(frozen=True)
 class GenOpts:
-    """Generation options for one completion."""
+    """Generation options for one completion.
+
+    ``images`` are raw base64 JPEGs for multimodal models; each backend
+    adds its own wire framing (Ollama field, data URI, source block).
+    """
     max_tokens: int
     temperature: float = 0.0
     stop: tuple[str, ...] = ()
     num_ctx: int = 2048
     seed: int | None = None
+    images: tuple[str, ...] = ()
 
 
 @dataclass
@@ -154,6 +160,49 @@ class LLMBackend(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class ChatPrompt:
+    """Un-templated prompt parts for chat-API transports.
+
+    Chat providers own their template, so the harness hands them parts
+    instead of a rendered raw string; how faithfully ``prefill`` can be
+    honoured is each backend's business (see threetoks/backend/providers.py).
+    """
+    system: str
+    user: str
+    prefill: str = ""
+
+
+class ChatBackend(Protocol):
+    """Transport that speaks a chat API instead of raw prompts.
+
+    The policy dispatches to ``chat`` (instead of build_raw_prompt +
+    ``complete``) whenever a backend exposes it as a callable.
+    """
+
+    def chat(self, model: str, prompt: ChatPrompt, opts: GenOpts) -> GenResult:
+        """Run one chat completion from un-templated parts."""
+        ...
+
+
+# Model-name marks meaning "accepts image input" (no API introspection
+# exists across providers; a name match is the practical test).
+_VISION_MODEL_MARKS = ("vision", "llava", "gpt-4o", "gpt-4-turbo", "gpt-4.1",
+                       "gpt-5", "gemini", "claude-3", "claude-4",
+                       "claude-opus", "claude-sonnet", "claude-haiku",
+                       "pixtral", "yi-vision", "glm-4v", "internvl",
+                       "molmo", "minicpm-v", "moondream")
+_QWEN_VL_PATTERN = re.compile(r"qwen[\w.-]*vl(?![a-z])")
+
+
+def is_vision_model(model_name: str) -> bool:
+    """Whether ``model_name`` names a model that accepts image input."""
+    lowered = model_name.lower()
+    if any(mark in lowered for mark in _VISION_MODEL_MARKS):
+        return True
+    return bool(_QWEN_VL_PATTERN.search(lowered))
+
+
 if __name__ == "__main__":
     spec = ModelSpec("deepseek-r1:1.5b", FAMILY_R1)
     prompt = build_raw_prompt(spec, "Pick 1 or 2.", prefill="ANSWER:")
@@ -185,4 +234,13 @@ if __name__ == "__main__":
     assert detect_family("phi3:mini") == (FAMILY_PHI3, True)
     assert detect_family("granite4:tiny") == (FAMILY_CHATML, False)  # unknown
     assert family_stops(ModelSpec("g", FAMILY_GEMMA)) == ("<end_of_turn>",)
+
+    assert is_vision_model("gpt-4o-mini")
+    assert is_vision_model("claude-sonnet-4-5")
+    assert is_vision_model("llava:7b")
+    assert is_vision_model("qwen2.5vl:7b") and is_vision_model("qwen2-vl-72b")
+    assert not is_vision_model("qwen2.5:1.5b-instruct")
+    assert not is_vision_model("mistral:7b")
+    assert GenOpts(max_tokens=3).images == ()
+    assert ChatPrompt("s", "u").prefill == ""
     print("smoke OK")
