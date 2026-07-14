@@ -8,6 +8,7 @@ __pycache__/
 
 # Distribution / packaging
 .Python
+reference_tts_stt_project/
 build/
 develop-eggs/
 dist/
