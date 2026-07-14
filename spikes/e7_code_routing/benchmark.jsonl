@@ -1,0 +1,69 @@
+{"request": "Where is the slugify function defined?", "label": "navigate"}
+{"request": "What does parse_line do in parser.py?", "label": "navigate"}
+{"request": "Where is the Cache class implemented in pkg/utils.py?", "label": "navigate"}
+{"request": "How does the top_ip function pick the most frequent IP?", "label": "navigate"}
+{"request": "What's the purpose of the Cache eviction logic in pkg/utils.py?", "label": "navigate"}
+{"request": "Explain how notes.md ties into the parser bug.", "label": "navigate"}
+{"request": "Which function in parser.py has the off-by-one bug?", "label": "navigate"}
+{"request": "Where does the code read the sales.csv file from?", "label": "navigate"}
+{"request": "What is Cache.capacity used for?", "label": "navigate"}
+{"request": "Can you point me to where slugify is defined?", "label": "navigate"}
+{"request": "Which method evicts the oldest cache entry?", "label": "navigate"}
+{"request": "I'm trying to understand what parse_line returns — where is it defined?", "label": "navigate"}
+{"request": "What does the utils.py module export?", "label": "navigate"}
+{"request": "How is the log line parsed in parser.py?", "label": "navigate"}
+{"request": "Locate the function that slugifies text.", "label": "navigate"}
+{"request": "Walk me through what happens when Cache.put is called twice past capacity.", "label": "navigate"}
+{"request": "Is there a class in this codebase that handles caching?", "label": "navigate"}
+{"request": "Can you check why parser.py gives the wrong method field?", "label": "navigate"}
+{"request": "How is the top IP computed in parser.py?", "label": "navigate"}
+{"request": "Fix the off-by-one bug in parser.py.", "label": "edit"}
+{"request": "Rename slugify to to_slug everywhere in pkg/utils.py.", "label": "edit"}
+{"request": "Add a docstring to the Cache class in utils.py.", "label": "edit"}
+{"request": "Refactor parse_line in parser.py to use regex instead of split.", "label": "edit"}
+{"request": "Debug why top_ip returns the wrong IP sometimes.", "label": "edit"}
+{"request": "Remove the unused capacity check from Cache.put.", "label": "edit"}
+{"request": "Update parser.py so parts[5] is used instead of parts[2] for the method field.", "label": "edit"}
+{"request": "Can you clean up the Cache class so eviction is O(1)?", "label": "edit"}
+{"request": "Change Cache to evict the least-recently-used item instead of the oldest inserted.", "label": "edit"}
+{"request": "There's a typo in notes.md, please correct it.", "label": "edit"}
+{"request": "Patch parser.py so it doesn't crash on malformed log lines.", "label": "edit"}
+{"request": "Add type hints to every function in pkg/utils.py.", "label": "edit"}
+{"request": "This function has a bug: it always returns None instead of the count.", "label": "edit"}
+{"request": "Simplify the eviction logic in Cache.put.", "label": "edit"}
+{"request": "Optimize parse_line so it doesn't call .strip() twice.", "label": "edit"}
+{"request": "The parser.py script throws a KeyError on empty lines — please fix that.", "label": "edit"}
+{"request": "This script is supposed to sum a column but it just prints zero every time — what's going on?", "label": "edit"}
+{"request": "What's the sum of the revenue column in sales.csv?", "label": "compute"}
+{"request": "Parse access.log and tell me which IP hit the server the most.", "label": "compute"}
+{"request": "How many 404s are in access.log?", "label": "compute"}
+{"request": "What's the average units sold per day in sales.csv?", "label": "compute"}
+{"request": "Parse this log and tell me the top IP.", "label": "compute"}
+{"request": "Count how many lines in access.log come from 10.0.0.1.", "label": "compute"}
+{"request": "What's the total revenue across all regions in sales.csv?", "label": "compute"}
+{"request": "Tell me the most common status code in access.log.", "label": "compute"}
+{"request": "Sum column 2 of data.csv.", "label": "compute"}
+{"request": "How many rows in sales.csv have units greater than 10?", "label": "compute"}
+{"request": "Calculate the median revenue value across the rows in sales.csv.", "label": "compute"}
+{"request": "What's the total number of requests logged in access.log?", "label": "compute"}
+{"request": "Group the sales by region and tell me which region made the most revenue.", "label": "compute"}
+{"request": "I have a CSV of expenses — what's the biggest single expense?", "label": "compute"}
+{"request": "Filter access.log down to just the POST requests and count them.", "label": "compute"}
+{"request": "What percentage of requests in access.log returned a non-200 status?", "label": "compute"}
+{"request": "Write a script that reverses a string.", "label": "author"}
+{"request": "Create a function that checks if a number is prime.", "label": "author"}
+{"request": "Build me a tool that dedupes a list of email addresses.", "label": "author"}
+{"request": "Write a script that reads a CSV and prints the average of column 3.", "label": "author"}
+{"request": "Generate a Python module for basic unit conversions (miles to km, etc).", "label": "author"}
+{"request": "Make me a small CLI that renames files in a folder to lowercase.", "label": "author"}
+{"request": "Write a program that plays tic-tac-toe against the user.", "label": "author"}
+{"request": "Create a class that represents a simple bank account with deposit/withdraw.", "label": "author"}
+{"request": "Write a script that parses log files like access.log and reports the top 5 IPs.", "label": "author"}
+{"request": "Author a quick tool that validates email addresses with a regex.", "label": "author"}
+{"request": "I need a program that converts Celsius to Fahrenheit — can you make one?", "label": "author"}
+{"request": "Build a small library for retrying flaky HTTP calls with backoff.", "label": "author"}
+{"request": "Write me a quick script to shuffle the lines of a text file.", "label": "author"}
+{"request": "Create a simple script for converting Markdown to plain text.", "label": "author"}
+{"request": "Can you put together a program that solves Sudoku puzzles?", "label": "author"}
+{"request": "Generate a tool that batch-renames image files by date taken.", "label": "author"}
+{"request": "Add a script to compute the average revenue and save it as report.py.", "label": "author"}

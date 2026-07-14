@@ -47,6 +47,40 @@ def reconstruct(name: str, args: str, completion: str) -> str:
     return f"def {name}({args}):\n{BODY_INDENT}{completion.lstrip(_LEADING_WS)}"
 
 
+def renormalize_indent(completion: str) -> str:
+    """Re-anchor a completion's continuation lines at one body level.
+
+    qwen-family models sometimes indent EVERY continuation line one column
+    off (E8 live runs: a docstring then a whole body at 5 spaces against
+    the prefill's 4), which ``reconstruct``'s first-line strip cannot fix.
+    Dedents the continuation block so its minimum indent is exactly
+    ``BODY_INDENT``, preserving deeper relative nesting.
+
+    Only ever use this as a *fallback* after the raw completion failed to
+    reconstruct: a correct body whose continuation lines are all
+    legitimately deeper (e.g. one opening ``for``/``if`` line, everything
+    else nested inside it) would be corrupted by an unconditional shift.
+    """
+    lines = completion.splitlines()
+    if len(lines) <= 1:
+        return completion
+    first, rest = lines[0], lines[1:]
+    indents = [len(l) - len(l.lstrip(" ")) for l in rest if l.strip()]
+    if not indents:
+        return completion
+    shift = len(BODY_INDENT) - min(indents)
+    if shift == 0:
+        return completion
+    fixed = [first]
+    for line in rest:
+        if not line.strip():
+            fixed.append(line)
+            continue
+        current = len(line) - len(line.lstrip(" "))
+        fixed.append(" " * max(0, current + shift) + line.lstrip(" "))
+    return "\n".join(fixed)
+
+
 def function_def(source: str, name: str) -> ast.AST | None:
     """The top-level def named `name` (sync or async), or None."""
     try:
@@ -66,7 +100,20 @@ def function_source(name: str, args: str, completion: str) -> str | None:
     keeps each method self-contained, so it cannot inject module globals a
     sibling would then silently depend on, and the undefined-name gate
     stays sound.
+
+    A completion that fails to reconstruct as-is gets one free second
+    chance with its continuation-line indentation re-anchored (see
+    ``renormalize_indent``) — recovering the E8-observed whole-body drift
+    without ever touching a completion that was already valid.
     """
+    source = _trimmed_function(name, args, completion)
+    if source is not None:
+        return source
+    return _trimmed_function(name, args, renormalize_indent(completion))
+
+
+def _trimmed_function(name: str, args: str, completion: str) -> str | None:
+    """One reconstruct-and-trim attempt; None when it does not parse."""
     raw = reconstruct(name, args, completion)
     node = function_def(raw, name)
     if node is None:
@@ -126,6 +173,26 @@ def _is_noop_constant(node: ast.AST) -> bool:
         and (node.value is None or node.value is Ellipsis)
 
 
+def zero_arg_callable(args: str) -> bool:
+    """True when ``def f(args)`` can be called as ``f()``.
+
+    That covers no parameters at all AND parameters that all carry
+    defaults (``def say_hello(name="World")``) — the script-entry and
+    smoke-call rule, so a deliverable like that still gets its
+    ``__main__`` guard and its run output.
+    """
+    if not args.strip():
+        return True
+    try:
+        tree = ast.parse(f"def _probe({args}):\n    pass")
+    except (SyntaxError, ValueError):
+        return False
+    spec = tree.body[0].args
+    required = len(spec.posonlyargs) + len(spec.args) - len(spec.defaults)
+    kwonly_missing = sum(1 for d in spec.kw_defaults if d is None)
+    return required <= 0 and kwonly_missing == 0
+
+
 def signature_matches(source: str, name: str, args: str) -> bool:
     """True when the parsed def's argument names match the plan's."""
     node = function_def(source, name)
@@ -138,7 +205,13 @@ def signature_matches(source: str, name: str, args: str) -> bool:
 
 
 def undefined_names(source: str, allowed: set[str]) -> list[str]:
-    """Load-context names that are defined nowhere reachable (conservative)."""
+    """Load-context names that are defined nowhere reachable (conservative).
+
+    Import statements bind names too (``import requests`` anywhere in the
+    body defines ``requests``) — a live gemma run had every legitimate
+    weather implementation falsely rejected because this gate only saw
+    ``ast.Name`` stores and missed import aliases entirely.
+    """
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
@@ -148,10 +221,28 @@ def undefined_names(source: str, allowed: set[str]) -> list[str]:
     defined |= {a.arg for n in ast.walk(tree)
                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
                 for a in n.args.args}
+    # def/class statements bind their names without an ast.Name node —
+    # a nested helper (`def say_hello(): ...` then `say_hello()`) was
+    # falsely flagged undefined on a live run and stubbed correct code.
+    defined |= {n.name for n in ast.walk(tree)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.ClassDef))}
+    defined |= _import_bound_names(tree)
     known = defined | _BUILTINS | allowed
     loads = {n.id for n in ast.walk(tree)
              if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
     return sorted(loads - known)
+
+
+def _import_bound_names(tree: ast.AST) -> set[str]:
+    """Every name an import statement binds, anywhere in the tree."""
+    bound: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            bound |= {a.asname or a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            bound |= {a.asname or a.name for a in node.names if a.name != "*"}
+    return bound
 
 
 def ensure_docstring(source: str, contract: str) -> str:
@@ -182,12 +273,22 @@ def execute(source: str) -> tuple[bool, str]:
     references), so this returns stderr untrimmed; ``_run`` keeps the
     single-line view the per-method gates report.
     """
+    ok, _, stderr = execute_capture(source)
+    return ok, stderr
+
+
+def execute_capture(source: str) -> tuple[bool, str, str]:
+    """Execute source in a fresh python subprocess; (ok, stdout, stderr).
+
+    stdout is what the user's delivered script would print — the runner
+    surfaces it so a run's output is shown, never silently discarded.
+    """
     try:
         done = subprocess.run(["python3", "-"], input=source, text=True,
                               capture_output=True, timeout=SUBPROCESS_TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        return False, "TimeoutExpired"
-    return done.returncode == 0, done.stderr
+        return False, "", "TimeoutExpired"
+    return done.returncode == 0, done.stdout, done.stderr
 
 
 def _run(source: str) -> tuple[bool, str]:
@@ -231,6 +332,12 @@ if __name__ == "__main__":
     assert ast.parse(ensure_docstring(stray, "doc")) and stray.count("\n    ") == 1
     trimmed = function_source("f", "x", "return x\n\nLEAK = {1: 2}")
     assert trimmed == "def f(x):\n    return x", trimmed   # top-level code dropped
+    drifted = ('"""doc"""\n     start = x + 1\n     return start')  # 5-space body
+    recovered = function_source("f", "x", drifted)
+    assert recovered is not None and "\n     " not in recovered, recovered
+    loop_body = "for n in x:\n        total += n\n        count += 1"
+    kept = function_source("f", "x", loop_body)             # legit deep nesting
+    assert kept is not None and "\n        total" in kept, kept
     assert undefined_names(trimmed, set()) == []           # gate now sound
     assert is_placeholder("def f(x):\n    pass", "f")
     assert is_placeholder("def f(x):\n    raise NotImplementedError", "f")
@@ -250,6 +357,22 @@ if __name__ == "__main__":
     assert not signature_matches(src, "clamp", "value, low")
     assert undefined_names("def f(x):\n    return helper(x)\n", set()) == ["helper"]
     assert undefined_names("def f(x):\n    return helper(x)\n", {"helper"}) == []
+    weather = ("def main():\n    import requests\n"
+               "    return requests.get('http://x').text\n")
+    assert undefined_names(weather, set()) == []       # import binds requests
+    aliased = ("def f():\n    from json import loads as parse\n"
+               "    return parse('1')\n")
+    assert undefined_names(aliased, set()) == []
+    nested = ("def main():\n    def say_hello():\n        print('hi')\n"
+              "    say_hello()\n")
+    assert undefined_names(nested, set()) == []       # nested def binds
+    assert zero_arg_callable("")
+    assert zero_arg_callable('name="World"')
+    assert zero_arg_callable("a=1, *rest, b=2, **kw")
+    assert not zero_arg_callable("name")
+    assert not zero_arg_callable("a, b=2")
+    assert not zero_arg_callable("*, required_kw")
+    assert not zero_arg_callable("((broken")
     documented = ensure_docstring("def f(x):\n    return x\n", "return x")
     assert "return x" in documented and ast.parse(documented)
     hostile = ensure_docstring("def f(x):\n    return x\n", 'has """ triple')
@@ -261,4 +384,6 @@ if __name__ == "__main__":
     assert not bad_ok and "AssertionError" in bad_err, (bad_ok, bad_err)
     assert import_ok("def f():\n    return 1\n")[0]
     assert not import_ok("import nonexistent_pkg_xyz\n")[0]
+    ran_ok, out, err = execute_capture("print('hello')\n")
+    assert ran_ok and out == "hello\n" and err == "", (ran_ok, out, err)
     print("smoke OK")

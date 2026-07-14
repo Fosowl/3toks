@@ -114,7 +114,11 @@ class PickManyNode:
         return Decision(self.kind, picked, text, valid=bool(picked))
 
 
-TEMPLATE_MARKERS = ("<|im_start|>", "<|im_end|>", "<|endoftext|>", "</s>")
+# End/turn markers any supported family might leak into a completion
+# (raw-mode models sometimes emit their own end token inline).
+TEMPLATE_MARKERS = ("<|im_start|>", "<|im_end|>", "<|endoftext|>", "</s>",
+                    "<end_of_turn>", "<|eot_id|>", "<|end|>",
+                    "<｜end▁of▁sentence｜>")
 
 
 class ShortTextNode:

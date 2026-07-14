@@ -50,6 +50,33 @@ class ImplementNodeParseTest(unittest.TestCase):
         self.assertIsNone(decision.value)
 
 
+class ImplementNodePlaceholderTest(unittest.TestCase):
+    """A placeholder body is invalid at parse time, so the retry ladder
+    resamples immediately, and the retry prompt escalates explicitly."""
+
+    CHEATS = ("raise NotImplementedError", "pass", "...",
+              "return None", "return", "return NotImplementedError")
+
+    def test_every_cheat_form_parses_invalid(self):
+        for cheat in self.CHEATS:
+            node = ImplementNode("f", "x", "do the thing")
+            decision = node.parse(cheat, PERM)
+            self.assertFalse(decision.valid, cheat)
+            self.assertEqual(node.placeholder_rejections, 1, cheat)
+
+    def test_retry_prompt_escalates_after_a_placeholder(self):
+        node = ImplementNode("f", "x", "do the thing")
+        self.assertNotIn("COMPLETE working logic", node.render(PERM))
+        node.parse("raise NotImplementedError", PERM)
+        self.assertIn("COMPLETE working logic", node.render(PERM))
+
+    def test_real_bodies_stay_valid_and_unescalated(self):
+        node = ImplementNode("f", "x", "double it")
+        decision = node.parse("return x * 2", PERM)
+        self.assertTrue(decision.valid)
+        self.assertEqual(node.placeholder_rejections, 0)
+
+
 class ImplementNodeConstructionTest(unittest.TestCase):
     def test_temperature_is_none_by_default(self):
         self.assertIsNone(ImplementNode("f", "x", "c").temperature)

@@ -145,6 +145,14 @@ the list is the router's fallback** when the model's choice is invalid or
 unparseable (`threetoks/agents/router.py`), so keep a cheap, safe default
 (`casual`) first. Names must stay unique — the registry test enforces this.
 
+An agent may itself route further: the `code` agent front-doors four modes
+(navigate / edit / compute / author) through `threetoks/code/route.py` —
+deterministic pre-checks first, one one-token menu otherwise (measured in
+spike E7; see docs/DESIGN-coding-agent.md §9a). It also reads
+`services.retriever` (the opt-in retrieval-as-repair hook, None unless
+`[code] retrieval` is enabled and a search provider exists) and
+`services.files_root` (the corpus the navigate/edit modes operate on).
+
 ## Design rules an agent must follow
 
 These are load-bearing, not stylistic — Phase-0/Phase-2 measurements are
@@ -166,11 +174,17 @@ the reason for each one:
    Never ask the model to summarize or restate source content — that
    reintroduces hallucination risk the numbered-pointer design exists to
    remove.
-4. **Answers are extractive by default.** When notes exist, offer a final
-   `PickManyNode` over the collected notes and join the chosen ones
-   verbatim as the answer; only fall back to a free-text `ShortTextNode`
-   synthesis step when there are no notes to point at. Eval data showed
-   free synthesis garbles facts the notes already hold.
+4. **Answers are grounded generation over curated notes.** When notes
+   exist, rank them down with a curation `PickManyNode` (pick order =
+   ranking), then run ONE short `ShortTextNode` generation with the notes
+   on screen that answers the task in plain words — the web and files
+   verticals share this shape. Never dump picked notes verbatim as the
+   default answer (a live files run answered "what are these files?" with
+   naked code lines), and never generate without the notes visible:
+   ungrounded synthesis garbles facts the notes already hold (eval data).
+   If the generation keeps bleeding menu digits, fall back to quoting the
+   task-closest notes (`rank_by_overlap`) — the fallback stays aimed at
+   the goal, not at store order.
 5. **Budgets and guards are mandatory, not optional.** Every multi-step
    agent needs: a step budget (`max_steps` passed to `run_episode`, or an
    equivalent `steps_left` counter), a forced-answer trigger a few steps

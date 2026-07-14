@@ -257,7 +257,7 @@ error + blamed method, rounds used) and per-method `repairs` counts.
   runner's zero-arg smoke call executes exactly what the guard will, so a
   clean run report means `python3 module.py` runs.
 
-## 8. What's left for v2
+## 8. What's left for v2 (historical; §9 shipped part of it)
 
 The plan step remains the highest-leverage lever (the one fix targeting it
 bought a whole point): plan **coherence checks** (reject a plan whose later
@@ -266,3 +266,88 @@ missing helper mid-run — deliberately cut from v1 because it makes the method
 list non-append-only). Beyond that: a repair pass that feeds a *negative
 example* rather than resampling blind, and promoting model asserts from
 advisory to gating only once a trusted oracle is present.
+
+## 9. v2: modes, editing, and retrieval (E7 / E8 / E9)
+
+Three spikes (spikes/e7_code_routing, e8_edit_vertical, e9_code_retrieval)
+measured the coding agent's expansion beyond greenfield generation. All
+three shipped; the evidence and the settled rules:
+
+### 9a. Mode routing (`threetoks/code/route.py`, E7)
+
+Every coding request is first routed into one of four modes — navigate /
+edit / compute / author — by deterministic pre-checks (path-mention +
+verb cues, phrasing shapes), falling through to one one-token menu.
+Measured live on a 69-request benchmark: **69.6% routed free at 97.9%
+precision, 76.2% menu accuracy on the remainder, 91.3% end-to-end at ~3
+output tokens per model-routed request**. The top-level agent router
+stays heuristic-free by design; this sub-router earned its pre-checks
+with that measurement. Every observed menu error funnels into
+compute/author (the least damaging confusions — nothing is wrongly
+routed *into* a mutating mode). The modes map to: free symbol-index
+lookup (navigate), the edit vertical (edit), CodeVertical + executing
+the script and answering with its output (compute), CodeVertical
+delivering the module (author).
+
+### 9b. The edit vertical (`threetoks/code/edit/`, E8)
+
+Editing existing code is selection-dominated — the content already
+exists, so the model points and only the delta is generated. One ast
+pass indexes every def/class/method + call sites; "where is X" resolves
+free when unique. Navigation (folder → file → def → method) and
+disambiguation are keyword-ranked with request-token overlap (path,
+qualname, docstring, AND body identifiers — body words navigated E8's
+scenario 12 for free); a strict ranking winner is taken for FREE, ties
+show enriched labels, an escape backtracks one level (bounded) instead
+of aborting. Operations are pre-filtered to what can actually run:
+insert-after only when the target provably calls an undefined name
+(then it is *inferred* free, no menu — the "known" set covers imports
+and module constants, not just defs), delete only when a deletable
+statement exists (never the def line itself). Splices are gated free:
+placeholder dodge, oscillation (seed hashes cover the original in
+candidate-canonical form, with and without docstring), whole-file
+re-parse. The trusted oracle is the caller's test (fail-before /
+pass-after, subprocess, bytecode writes disabled); without one, the
+edited module must import and the result reports `verified=False`.
+Repair escalates per target — regenerate once, re-ask the operation
+(inference suppressed), relocate to the runner-up — the 6th failed
+check ends the episode.
+
+**Load-bearing boundary (E5b):** menu decisions read the growing
+session log (what was located, what failed) — that memory is what makes
+a re-asked menu meaningful. Generation decisions get a fresh stateless
+episode every time and never see failure text: repair is blind
+resampling, because error feedback measurably underperforms it.
+
+Measured on 14 planted-bug scenarios live (eval/run_edit_eval.py):
+**10-11/14 across runs, 13/14 expected-operation choice, successful
+edits cost 3-92% of a whole-file rewrite** (failures can cost more than
+a rewrite — the expected-cost argument rests on the success rate, which
+is why the escalation ladder exists). The spike's original 5 scenarios
+went from 2/5 live (E8) to 4-5/5.
+
+### 9c. Two-anchor contracts and retrieval-as-repair (E9)
+
+Trusted contracts now carry a *list* of anchor examples. E9's proof:
+one anchor accepted an `is_prime` that returns True for 0 and 1 —
+boundary cases are exactly where classic implementations diverge, so
+pair a normal case with a boundary case.
+
+`threetoks/code/retrieve.py` is the repair tail for the E6 failure
+class (classic textbook functions): when an anchor-bearing method
+exhausts its generation attempts and would stub, search the public web,
+extract candidate defs from `<pre>`/`<code>` blocks (E9: every accepted
+snippet came from explained-code pages, none from raw GitHub — and
+unauthenticated GitHub code search is dead), gate with a TIGHT
+whitelist (pure-computation stdlib only, forbidden-builtins scan,
+dunder trip wire), and accept only what passes every anchor in a
+subprocess. **No model call anywhere — execution is the judge** (7/8
+classics, 0/4 false accepts on invented names in E9). Accepted snippets
+are provenance-stamped and cached (`[code] snippet_cache`) so repeat
+misses are free. Mojeek leads the zero-infrastructure search hops
+(E9: it answered plain HTTP while Bing/DDG were bot-walled).
+
+**Off by default** (`[code] retrieval` in config.ini): it executes and
+embeds internet code; the whitelist + subprocess timeout are a speed
+bump, not a sandbox, and licensing is recorded (source URL) but not
+resolved. Turning it on is an explicit, informed choice.

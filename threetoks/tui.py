@@ -213,7 +213,8 @@ def _source_lines(result: dict, enabled: bool) -> list[str]:
 
 
 def _panel_rows(result: dict, enabled: bool) -> list[str]:
-    """Content rows of the panel: label, target, answer, sources, stats."""
+    """Content rows of the panel: label, target, answer, output, sources,
+    stats."""
     label = fg(PINK, str(result.get("agent", "agent")).upper(), enabled)
     if result.get("judged_good") is False:
         label += fg(AMBER, " · UNVERIFIED", enabled)
@@ -227,11 +228,36 @@ def _panel_rows(result: dict, enabled: bool) -> list[str]:
     for answer_line in answer.splitlines() or [""]:
         rows.extend(fg(WHITE, seg, enabled)
                     for seg in _wrap(answer_line, PANEL_WIDTH - 3))
+    rows.extend(_output_rows(result, enabled))
     sources = _source_lines(result, enabled)
     if sources:
         rows.append("")
         rows.extend(sources)
     rows.extend(["", _stats_line(result, enabled)])
+    return rows
+
+
+OUTPUT_MAX_LINES = 12
+
+
+def _output_rows(result: dict, enabled: bool) -> list[str]:
+    """The script's captured stdout, shown under the code it came from.
+
+    The runner already executed the delivered entry (§7b smoke call);
+    hiding what it printed made a working script look inert. Long output
+    is clipped with an honest truncation count.
+    """
+    output = str(result.get("output") or "").rstrip()
+    if not output:
+        return []
+    lines = output.splitlines()
+    shown, hidden = lines[:OUTPUT_MAX_LINES], len(lines) - OUTPUT_MAX_LINES
+    rows = ["", dim("output when run:", enabled)]
+    for line in shown:
+        rows.extend(fg(GREEN, seg, enabled)
+                    for seg in _wrap(line, PANEL_WIDTH - 3))
+    if hidden > 0:
+        rows.append(dim(f"… {hidden} more line(s)", enabled))
     return rows
 
 
@@ -420,6 +446,9 @@ def _cmd_model(state: ReplState, arg: str) -> str:
         return fg(AMBER, "usage: /model NAME", state.enabled)
     state.model = name
     state.policy = state.policy_factory(name)
+    notice = unknown_family_notice(name)
+    if notice:
+        return fg(AMBER, notice, state.enabled)
     return dim(f"model = {name}", state.enabled)
 
 
@@ -643,7 +672,7 @@ def _error_hint(error: Exception) -> str | None:
                 "pip install 'threetoks[web,browser]'")
     if isinstance(error, (ConnectionError, urllib.error.URLError)):
         return ("is Ollama running? start it and pull the model: "
-                "ollama pull gemma3:4b")
+                "ollama pull qwen2.5:1.5b-instruct")
     return None
 
 
@@ -719,6 +748,37 @@ def _initial_fetcher(config, services, sink=print):
     return fetcher
 
 
+def unknown_family_notice(model: str) -> str | None:
+    """A warning when the model's template family had to be guessed.
+
+    A wrong raw-mode template fails silently — menus keep answering (one
+    digit survives junk tokens) while every multi-line generation derails
+    — so the guess must be surfaced, never assumed.
+    """
+    from threetoks.backend.base import detect_family
+
+    _, known = detect_family(model)
+    if known:
+        return None
+    return (f"⚠ unknown template family for '{model}' — driving it as "
+            "ChatML, which may silently degrade generations. Known "
+            "families: qwen/smollm (chatml), gemma, llama3, "
+            "mistral/mixtral/llama2, phi3, deepseek-r1. The measured "
+            "policy model is qwen2.5:1.5b-instruct.")
+
+
+def _make_retriever(config, provider):
+    """The opt-in code retrieval hook, or None (the default).
+
+    Requires both the ``[code] retrieval`` config flag AND a working
+    search provider (a bare install has neither and gets None).
+    """
+    if provider is None or not config.code.retrieval:
+        return None
+    from threetoks.code.retrieve import Retriever
+    return Retriever(provider, cache_path=config.code.snippet_cache)
+
+
 def build_state(model: str = None, sink=print):
     """Assemble live Services/specs/policy from the resolved config file.
 
@@ -741,7 +801,8 @@ def build_state(model: str = None, sink=print):
     provider = _make_provider(config, sink)
     services = Services(provider=provider,
                         files_root=Path(config.files.root),
-                        max_research_rounds=config.research.max_rounds)
+                        max_research_rounds=config.research.max_rounds,
+                        retriever=_make_retriever(config, provider))
     fetcher = _initial_fetcher(config, services, sink)
     specs = default_agents(services)
     if provider is None:  # bare install: never route to the web agent
@@ -749,6 +810,9 @@ def build_state(model: str = None, sink=print):
     factory = lambda name: Policy(OllamaBackend(), make_policy_config(name),
                                   Tracer(None))
     chosen_model = model or config.llm.model
+    notice = unknown_family_notice(chosen_model)
+    if notice:
+        sink(notice)
     policy = factory(chosen_model)
     memory = MemoryStore.load(config.memory.path) if config.memory.enabled \
         else None
@@ -785,7 +849,7 @@ def main(model: str = None) -> None:
 def _demo() -> None:
     """Non-interactive render of every TUI piece for eyeballing."""
     enabled = _color_enabled()
-    print(build_banner("gemma3:4b", 2, enabled))
+    print(build_banner("qwen2.5:1.5b-instruct", 2, enabled))
     print()
     events = [
         {"node": "menu", "value": "open result 2: Anthropic pricing",

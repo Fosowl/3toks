@@ -43,6 +43,95 @@ class FunctionDefTest(unittest.TestCase):
         self.assertIsNone(gates.function_def("def g(x):\n    return x\n", "f"))
 
 
+class ExecuteCaptureTest(unittest.TestCase):
+    def test_stdout_is_captured_not_discarded(self):
+        ok, stdout, stderr = gates.execute_capture("print('weather: 21C')\n")
+        self.assertTrue(ok)
+        self.assertEqual(stdout, "weather: 21C\n")
+        self.assertEqual(stderr, "")
+
+    def test_failure_still_carries_partial_stdout(self):
+        ok, stdout, _ = gates.execute_capture("print('before')\n1 // 0\n")
+        self.assertFalse(ok)
+        self.assertEqual(stdout, "before\n")
+
+
+class ImportAwareUndefinedNamesTest(unittest.TestCase):
+    """Import statements bind names (live gemma failure: every legitimate
+    `import requests` weather body was falsely rejected and stubbed)."""
+
+    def test_plain_import_binds_the_module_name(self):
+        body = ("def main():\n    import requests\n"
+                "    return requests.get('http://x').text\n")
+        self.assertEqual(gates.undefined_names(body, set()), [])
+
+    def test_from_import_and_aliases_bind_their_names(self):
+        body = ("def f():\n"
+                "    from json import loads as parse\n"
+                "    import os.path as p\n"
+                "    return parse('1'), p.sep\n")
+        self.assertEqual(gates.undefined_names(body, set()), [])
+
+    def test_genuinely_undefined_names_are_still_caught(self):
+        body = "def f(x):\n    import re\n    return helper(x)\n"
+        self.assertEqual(gates.undefined_names(body, set()), ["helper"])
+
+    def test_nested_def_and_class_bind_their_names(self):
+        # live gemma failure: a correct nested-helper body was rejected
+        # twice and stubbed because the def statement binds without an
+        # ast.Name node.
+        nested = ("def main():\n    def say_hello():\n"
+                  "        print('hi')\n    say_hello()\n")
+        self.assertEqual(gates.undefined_names(nested, set()), [])
+        classy = ("def f():\n    class Box:\n        pass\n"
+                  "    return Box()\n")
+        self.assertEqual(gates.undefined_names(classy, set()), [])
+
+
+class ZeroArgCallableTest(unittest.TestCase):
+    def test_no_params_and_all_defaulted_params_qualify(self):
+        for args in ("", 'name="World"', "a=1, b=2", "a=1, *rest, **kw"):
+            self.assertTrue(gates.zero_arg_callable(args), args)
+
+    def test_any_required_param_disqualifies(self):
+        for args in ("name", "a, b=2", "*, required_kw", "((broken"):
+            self.assertFalse(gates.zero_arg_callable(args), args)
+
+
+class RenormalizeIndentFallbackTest(unittest.TestCase):
+    """function_source's second chance for whole-body indent drift (E8)."""
+
+    def test_recovers_a_body_drifted_to_five_spaces(self):
+        # Live qwen2.5:1.5b-instruct drift: docstring + every body line at 5.
+        drifted = '"""doc"""\n     start = (p - 1) * s\n     return start'
+        source = gates.function_source("f", "p, s", drifted)
+        self.assertIsNotNone(source)
+        ast.parse(source)
+        self.assertNotIn("\n     ", source)
+
+    def test_never_shifts_a_valid_block_opening_body(self):
+        # A body whose continuation lines are ALL legitimately deeper (the
+        # first line opens a for-block) must not be dedented: it is valid
+        # as-is, so the fallback must never run on it.
+        loop = "for n in nums:\n        total += n\n        count += 1"
+        source = gates.function_source("f", "nums", loop)
+        self.assertIsNotNone(source)
+        self.assertIn("\n        total += n", source)
+
+    def test_preserves_relative_nesting_when_it_does_shift(self):
+        drifted = "if x:\n         return 1\n     return 0"   # 9 / 5 spaces
+        source = gates.function_source("f", "x", drifted)
+        self.assertIsNotNone(source)
+        self.assertIn("\n        return 1", source)   # inner stays one deeper
+        self.assertIn("\n    return 0", source)
+
+    def test_single_line_completion_is_untouched(self):
+        self.assertEqual(gates.renormalize_indent("return x"), "return x")
+
+    def test_unrecoverable_completion_still_returns_none(self):
+        self.assertIsNone(gates.function_source("f", "x", "return ((("))
+
+
 class IsPlaceholderTest(unittest.TestCase):
     CHEATS = ("pass", "...", "raise NotImplementedError",
               "raise NotImplementedError('todo')",

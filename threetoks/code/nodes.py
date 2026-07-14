@@ -53,7 +53,15 @@ class PlanNode:
 
 
 class ImplementNode:
-    """Ask for one method body; valid iff it parses as the named function."""
+    """Ask for one method body; valid iff it parses as a REAL function.
+
+    A placeholder body (pass / ... / raise NotImplementedError / the
+    return-shaped dodges) parses as invalid here, so the Policy retry
+    ladder resamples it immediately — one cheap in-decision retry instead
+    of a full vertical attempt — and the retry prompt escalates: it tells
+    the model outright that its last answer was an empty placeholder and
+    to write the real logic.
+    """
 
     kind = "implement"
     tag = "impl"
@@ -62,28 +70,38 @@ class ImplementNode:
     max_tokens = IMPLEMENT_MAX_TOKENS
 
     def __init__(self, name: str, args: str, contract: str,
-                 example: str | None = None, temperature: float | None = None):
+                 examples: list[str] | None = None,
+                 temperature: float | None = None):
         self.name = name
         self.args = args
         self.contract = contract
-        self.example = example
+        self.examples = list(examples or [])
         self.temperature = temperature
         self.prefill = f"def {name}({args}):\n    "
         self.question = f"write {name}({args})"
+        self.placeholder_rejections = 0
 
     def render(self, perm: tuple[int, ...]) -> str:
         """The one method's spec; goal and siblings live in the episode."""
         lines = ["Write this function with a real, working body.",
                  f"{self.name}({self.args}): {self.contract}"]
-        if self.example:
-            lines.append(f"Example: {self.example}")
+        for example in self.examples:
+            lines.append(f"Example: {example}")
         lines.append("Do not use pass or raise NotImplementedError — "
                      "actually implement it.")
+        if self.placeholder_rejections:
+            lines.append("Your previous answer was an empty placeholder. "
+                         "That is not acceptable: write the COMPLETE "
+                         "working logic of the function now.")
         return "\n".join(lines)
 
     def parse(self, text: str, perm: tuple[int, ...]) -> Decision:
-        """Reconstruct and trim to the named function; valid iff it parses."""
+        """Reconstruct and trim to the named function; a body that does
+        not parse OR is a placeholder dodge is invalid (ladder resamples)."""
         source = gates.function_source(self.name, self.args, text)
+        if source is not None and gates.is_placeholder(source, self.name):
+            self.placeholder_rejections += 1
+            return Decision(self.kind, None, text, valid=False)
         return Decision(self.kind, source, text, valid=source is not None)
 
 
@@ -136,6 +154,12 @@ if __name__ == "__main__":
     good = impl.parse("return max(low, min(high, value))", ())
     assert good.valid and "def clamp" in good.value
     assert not impl.parse("return (((", ()).valid          # syntax error
+    dodge = impl.parse("raise NotImplementedError", ())
+    assert not dodge.valid and impl.placeholder_rejections == 1
+    assert "COMPLETE working logic" in impl.render(())     # escalated retry
+    assert not impl.parse("return None", ()).valid         # return-shaped dodge
+    fresh = ImplementNode("clamp", "v, lo, hi", "limit")
+    assert "COMPLETE working logic" not in fresh.render(())
     tests = TestNode("add", "a, b").parse("add(1, 2) == 3\nassert add(0,0)==0", ())
     assert tests.valid and tests.value == [
         "assert add(1, 2) == 3", "assert add(0,0)==0"], tests.value

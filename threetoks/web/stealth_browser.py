@@ -234,8 +234,23 @@ class StealthBrowserFetcher:
             self._wait_until_ready(driver)
             html = driver.page_source
         except WebDriverException as error:
+            self._discard_dead_driver()
             raise FetchError(f"{url}: {error.msg or error}") from error
         return html_to_page(html, url)
+
+    def _discard_dead_driver(self) -> None:
+        """Drop the driver when its session no longer answers.
+
+        A fetch failure can mean a dead browser (window closed by hand,
+        Chrome crashed) or just a bad page. Probe the session: one that
+        still answers is kept, so the window stays open; a dead one is
+        discarded so the next fetch starts a fresh browser instead of
+        failing forever.
+        """
+        try:
+            self.driver.window_handles
+        except WebDriverException:
+            self.close()
 
     def close(self) -> None:
         """Quit the driver if it was started; safe to call repeatedly."""
@@ -258,6 +273,7 @@ if __name__ == "__main__":
 
         page_source = "<html><title>T</title><body>" \
             "<p>The capital of France is Paris today.</p></body></html>"
+        window_handles = ["w0"]
 
         def __init__(self):
             self.got = []
@@ -275,6 +291,16 @@ if __name__ == "__main__":
         def quit(self):
             self.quit_count += 1
 
+    class _DeadDriver(_FakeDriver):
+        """A driver whose session died: every call raises."""
+
+        @property
+        def window_handles(self):
+            raise WebDriverException("invalid session id")
+
+        def get(self, url):
+            raise WebDriverException("disconnected")
+
     fetcher = make_stealth_fetcher()
     assert fetcher.driver is None, "driver must be lazy"
     fake = _FakeDriver()
@@ -287,4 +313,15 @@ if __name__ == "__main__":
     fetcher.close()
     fetcher.close()  # idempotent
     assert fake.quit_count == 1, fake.quit_count
+
+    dead_fetcher = make_stealth_fetcher()
+    dead = _DeadDriver()
+    dead_fetcher.driver = dead
+    try:
+        dead_fetcher.fetch_page("https://example.com/")
+        raise AssertionError("expected FetchError from a dead session")
+    except FetchError:
+        pass
+    assert dead_fetcher.driver is None, "dead driver must be discarded"
+    assert dead.quit_count == 1, dead.quit_count
     print("smoke OK")

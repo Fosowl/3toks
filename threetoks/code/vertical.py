@@ -41,10 +41,19 @@ class CodeVertical:
     """Drives one module-writing episode from a natural-language goal."""
 
     def __init__(self, goal: str, gen_tests: bool = True,
-                 trusted_examples: dict[str, str] | None = None):
+                 trusted_examples: dict | None = None, retriever=None):
         self.goal = goal
         self.gen_tests = gen_tests
-        self.trusted = trusted_examples or {}
+        # Optional retrieval-as-repair hook (threetoks/code/retrieve.py):
+        # consulted only when an anchor-bearing method exhausted its
+        # generation attempts and would otherwise stub. None = disabled
+        # (the config default).
+        self.retriever = retriever
+        # method name -> list of trusted anchor expressions (a single str
+        # is accepted per entry; two anchors — normal + boundary — close
+        # the single-anchor blind spot E9 measured).
+        self.trusted = {name: value if isinstance(value, list) else [value]
+                        for name, value in (trusted_examples or {}).items()}
         self.store = MethodStore(goal)
         self.episode = Episode("", goal)
         self.steps_left = INITIAL_STEPS_LEFT
@@ -99,19 +108,36 @@ class CodeVertical:
         return {"goal": self.goal,
                 "answer": self.store.render_script(self._script_entry()),
                 "methods": [self._method_row(m) for m in self.store.methods],
+                "output": self._entry_output(),
                 "run": self._run_report()}
+
+    def _entry_output(self) -> str:
+        """What the delivered script prints when run, from the runner.
+
+        The entry's zero-arg smoke call executes exactly what the
+        ``__main__`` guard will, so its captured stdout IS the script's
+        output — shown to the user instead of silently discarded.
+        """
+        entry = self._script_entry()
+        if entry is None:
+            return ""
+        return next((r.stdout for r in self.run_results
+                     if r.check.name == entry
+                     and r.check.kind == runner.KIND_CALL), "")
 
     def _script_entry(self) -> str | None:
         """The function the ``__main__`` guard calls, or None for no guard.
 
-        Deterministic preference: a bodied zero-arg ``main``, else the
-        goal-named entry when bodied and zero-arg, else the module's sole
-        bodied zero-arg function. Never a stub and never an arbitrary
-        helper — a script that crashes or picks randomly is worse than no
-        guard at all.
+        Deterministic preference: a bodied zero-arg-callable ``main``,
+        else the goal-named entry when bodied and zero-arg-callable, else
+        the module's sole bodied zero-arg-callable function (all-default
+        params count — ``say_hello(name="World")`` runs as a script).
+        Never a stub and never an arbitrary helper — a script that
+        crashes or picks randomly is worse than no guard at all.
         """
         zero_arg = [m.name for m in self.store.methods
-                    if m.body is not None and not m.args.strip()]
+                    if m.body is not None
+                    and gates.zero_arg_callable(m.args)]
         if "main" in zero_arg:
             return "main"
         match = _ENTRY.search(self.goal)
@@ -178,7 +204,7 @@ class CodeVertical:
         heated = method.attempts or method.repairs   # repairs resample varied
         temperature = REPAIR_TEMPERATURE if heated else None
         return ImplementNode(method.name, method.args, method.contract,
-                             method.example, temperature)
+                             method.examples, temperature)
 
     def _apply_implement(self, decision) -> None:
         """Gate a fresh body; store it and move to tests, or repair/stub."""
@@ -190,7 +216,7 @@ class CodeVertical:
             self._close_or_repair(method, discard=True)
             return
         method.body = gates.ensure_docstring(source, method.contract)
-        if self.gen_tests and not method.asserts and not method.example:
+        if self.gen_tests and not method.asserts and not method.examples:
             self.await_test = True
             return
         self._run_asserts(method)
@@ -216,9 +242,9 @@ class CodeVertical:
         so the body is kept unverified rather than discarded.
         """
         module = self.store.render_module()
-        if method.example:
+        if method.examples:
             ok, stderr = gates.execute_asserts(
-                module, [f"assert {method.example}"])
+                module, [f"assert {e}" for e in method.examples])
             if not ok and runner.is_inconclusive(stderr):
                 return self._finalize(method, verified=False)
             if not ok and self._blame_elsewhere(method, module, stderr):
@@ -228,7 +254,7 @@ class CodeVertical:
         passed, _ = gates.run_asserts(module, method.asserts)
         if not passed:
             return self._close_or_repair(method, discard=False)
-        checked = bool(method.example) or bool(method.asserts)
+        checked = bool(method.examples) or bool(method.asserts)
         self._finalize(method, verified=checked)
 
     def _blame_elsewhere(self, method, module: str, stderr: str) -> bool:
@@ -259,7 +285,39 @@ class CodeVertical:
                 method.body = None
             return
         keep_body = method.body is not None and not discard
+        if not keep_body and self._try_retrieval(method):
+            return
         self._finalize(method, verified=False, stub=not keep_body)
+
+    def _try_retrieval(self, method) -> bool:
+        """Last resort before stubbing: fetch a classic implementation.
+
+        Fires only for anchor-bearing methods (no anchor, no free judge
+        for foreign code) and only after generation exhausted its
+        attempts — E9's evidence: the retrieval tail is exactly where
+        blind generation loses (roman_to_int, caesar_encode), and the
+        subprocess anchor check replaces model relevance judgment.
+        """
+        if self.retriever is None or not method.examples:
+            return False
+        try:
+            source = self.retriever(method.name, method.args,
+                                    method.contract, method.examples)
+        except Exception:
+            return False       # network trouble never breaks the episode
+        if source is None:
+            return False
+        module = self._candidate_module(method, source)
+        if not gates.import_ok(module)[0]:
+            return False
+        passed, _ = gates.execute_asserts(
+            module, [f"assert {e}" for e in method.examples])
+        if not passed:
+            return False
+        method.body = source
+        method.retrieved = True
+        self._finalize(method, verified=True)
+        return True
 
     def _finalize(self, method, verified: bool, stub: bool = False) -> None:
         """Lock a method as tested (has body) or stubbed, and advance."""
@@ -410,7 +468,7 @@ class CodeVertical:
         """One method's outcome for the result payload."""
         return {"name": method.name, "status": method.status,
                 "verified": method.verified, "attempts": method.attempts,
-                "repairs": method.repairs}
+                "repairs": method.repairs, "retrieved": method.retrieved}
 
 
 def _demo_backend(bodies: list[str]):
@@ -446,6 +504,23 @@ if __name__ == "__main__":
     assert row["status"] == "tested" and row["verified"], row
     import ast
     ast.parse(outcome["answer"])
+
+    # two trusted anchors: a body passing only the normal case is rejected
+    two_anchor = CodeVertical(
+        "check primality with is_prime(n)", gen_tests=False,
+        trusted_examples={"is_prime": ["is_prime(17) == True",
+                                       "is_prime(1) == False"]})
+    naive = _demo_backend([
+        "is_prime(n): true when n is prime",
+        "for i in range(2, int(n ** 0.5) + 1):\n"
+        "        if n % i == 0:\n            return False\n    return True",
+        "if n < 2:\n        return False\n"
+        "    for i in range(2, int(n ** 0.5) + 1):\n"
+        "        if n % i == 0:\n            return False\n    return True"])
+    two_policy = Policy(naive, PolicyConfig(ModelSpec("m", FAMILY_CHATML)))
+    two_outcome = run_episode(two_anchor, two_policy, max_steps=20)
+    assert "n < 2" in two_outcome["answer"], two_outcome["answer"]
+    assert two_outcome["methods"][0]["verified"], two_outcome["methods"]
 
     from threetoks.nodes import Decision
     entry = CodeVertical("Write triple(n) that multiplies n by three")

@@ -1,7 +1,7 @@
 """Unit tests for the provenance-tracked note store (offline)."""
 import unittest
 
-from threetoks.web.notes import Note, NoteStore
+from threetoks.web.notes import Note, NoteStore, rank_by_overlap
 
 WIKI = "https://en.wikipedia.org/wiki/Paris"
 
@@ -63,6 +63,26 @@ class NoteStoreTest(unittest.TestCase):
         note = Note("q", WIKI, 0)
         with self.assertRaises(Exception):
             note.text = "mutated"
+
+
+class RankByOverlapTest(unittest.TestCase):
+    def test_task_closest_text_ranks_first(self):
+        texts = ["Paris is in France.",
+                 "The Eiffel Tower is 330 meters tall."]
+        ranked = rank_by_overlap(texts, "how tall is the tower?", 2)
+        self.assertEqual(ranked[0], "The Eiffel Tower is 330 meters tall.")
+
+    def test_top_k_caps_the_result(self):
+        texts = ["tower one", "tower two", "tower three"]
+        self.assertEqual(len(rank_by_overlap(texts, "tower?", 2)), 2)
+
+    def test_no_keywords_keeps_original_head(self):
+        texts = ["first", "second"]
+        self.assertEqual(rank_by_overlap(texts, "a b?", 1), ["first"])
+
+    def test_ties_preserve_original_order(self):
+        texts = ["alpha note", "beta note"]
+        self.assertEqual(rank_by_overlap(texts, "note?", 2), texts)
 
 
 if __name__ == "__main__":

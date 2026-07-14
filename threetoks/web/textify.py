@@ -21,8 +21,8 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 from markdownify import MarkdownConverter
 
-DEFAULT_MAX_SENTENCES = 120
-DEFAULT_MAX_LINKS = 20
+DEFAULT_MAX_SENTENCES = 128
+DEFAULT_MAX_LINKS = 32
 MIN_SENTENCE_WORDS = 5
 DIGIT_MIN_WORDS = 3
 CLAUSE_MIN_WORDS = 4
