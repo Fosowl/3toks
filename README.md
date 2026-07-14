@@ -3,11 +3,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 An extremely token-frugal agentic framework for small local LLMs.
-Target: a *useful* agent on a 1.5b model on 8GB-class hardware, with
+Target: a *useful* agent even on a 1.5b model on 4GB-class hardware, with
 sub-second decision steps.
 
 Core idea: the harness walks a **tree of decisions** and renders each one as
-a numbered menu; the model answers with **~1 token**. Everything
+a numbered menu; the model answers with **~3 tokens**. Everything
 deterministic (parsing, page rendering, notes, undo) is code; the model is
 only the policy oracle. Notes are taken by *pointing at numbered sentences*,
 never by rewriting content. A ReAct-style agent spends 200-500 tokens and
@@ -23,9 +23,6 @@ same tree-of-menus engine.
 - Default policy model: `qwen2.5:1.5b-instruct` via Ollama, for all nodes.
   `deepseek-r1:1.5b` is supported (raw-mode think suppression) but is not
   used by default — see Phase-0 findings below.
-
-`agenticSeek/` is a reference clone (gitignored) — recon notes in
-[docs/recon-agenticseek.md](docs/recon-agenticseek.md).
 
 ## Install
 
@@ -63,10 +60,12 @@ pulled:
 ollama pull qwen2.5:1.5b-instruct
 ```
 
-Interactive TUI (REPL with a live decision ticker):
+Interactive CLI:
 
 ```sh
-python3 -m threetoks      # or just `threetoks` once installed
+threetoks
+# or just 'threetoks'
+python3 -m threetoks
 ```
 
 One-shot from the command line:
