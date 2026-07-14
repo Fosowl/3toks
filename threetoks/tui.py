@@ -417,7 +417,7 @@ def _cmd_help(state: ReplState, arg: str) -> str:
         ("/deep N", "set research rounds to N"),
         ("/browser MODE [on-screen]", "fetch via http|plain|stealth"),
         ("/model NAME", "swap the deciding model"),
-        ("/voice [on|off]", "talk instead of typing (voice extras)"),
+        ("/voice [on|off|debug]", "talk instead of typing (voice extras)"),
         ("/setup", "re-run the config wizard"),
         ("/quit", "leave the mesh"),
     ]
@@ -549,8 +549,11 @@ def _cmd_setup(state: ReplState, arg: str) -> str:
     if find_config_path() != path:
         return fg(AMBER, f"saved — {path}, but {find_config_path()} takes "
                   "precedence here and will be read instead", state.enabled)
-    return dim(f"saved — {path} (applies next start; /model and /browser "
-               "change this session)", state.enabled)
+    return dim(f"saved — {path} (applies next start; /model, /browser and "
+               "/voice on pick up changes this session)", state.enabled)
+
+
+_VOICE_ARGS = ("", "on", "off", "debug")  # accepted /voice arguments
 
 
 def _close_voice(state: ReplState) -> None:
@@ -560,25 +563,43 @@ def _close_voice(state: ReplState) -> None:
         state.voice = None
 
 
-def _cmd_voice(state: ReplState, arg: str) -> str:
-    """Toggle voice mode: microphone in and/or spoken answers out.
+def _reload_voice_config(state: ReplState) -> None:
+    """Re-read the saved ``[voice]`` section so a fresh /setup applies now.
 
-    ``/voice on`` builds a session from whichever voice extras are
-    installed (stt and tts degrade independently); ``/voice off``
-    returns to the keyboard; bare ``/voice`` reports the current state.
-    Failures surface as a styled message with the install hint.
+    Without this the session would keep the config captured at startup and
+    ``/voice on`` would ignore paths the user just saved. ``load_config``
+    is total — a missing or malformed file degrades to the built-in
+    defaults rather than raising, exactly as the next start would — so the
+    guard here only covers genuinely unexpected errors, and keeps the
+    startup section when one happens.
     """
-    want = arg.strip().lower()
-    if want not in ("", "on", "off"):
-        return fg(AMBER, "usage: /voice [on|off]", state.enabled)
-    if want == "":
-        status = "on" if state.voice is not None else "off"
-        return dim(f"voice is {status}", state.enabled)
-    if want == "off":
-        _close_voice(state)
-        return dim("voice off — keyboard input", state.enabled)
+    try:
+        from threetoks.config import load_config
+        state.voice_config = load_config().voice
+    except Exception:  # noqa: BLE001 - a bad config must not block voice
+        return
+
+
+def _toggle_voice_debug(state: ReplState) -> str:
+    """Flip per-transcript tracing on the live session; report the state."""
+    if state.voice is None:
+        return dim("voice is off — /voice on first", state.enabled)
+    state.voice.debug = not state.voice.debug
+    status = "on" if state.voice.debug else "off"
+    return dim(f"voice debug {status}", state.enabled)
+
+
+def _voice_on(state: ReplState) -> str:
+    """Build a session from the freshly reloaded config; report the notes.
+
+    The config is only re-read on the off-to-on edge, so a live session
+    is told how to pick up a change rather than being left to imply it
+    already did.
+    """
     if state.voice is not None:
-        return dim("voice is already on", state.enabled)
+        return dim("voice is already on — /voice off then on to re-read "
+                   "the config", state.enabled)
+    _reload_voice_config(state)
     from threetoks.voice.session import make_voice_session
     try:
         state.voice, notes = make_voice_session(state.voice_config)
@@ -588,6 +609,29 @@ def _cmd_voice(state: ReplState, arg: str) -> str:
                 state.enabled)]
     rows.extend(fg(AMBER, note, state.enabled) for note in notes)
     return "\n".join(rows)
+
+
+def _cmd_voice(state: ReplState, arg: str) -> str:
+    """Toggle voice mode: microphone in and/or spoken answers out.
+
+    ``/voice on`` re-reads the saved ``[voice]`` config, then builds a
+    session from whichever voice extras are installed (stt and tts degrade
+    independently); ``/voice off`` returns to the keyboard; ``/voice
+    debug`` traces raw transcripts and gate drops; bare ``/voice`` reports
+    the current state. Failures surface as a styled message.
+    """
+    want = arg.strip().lower()
+    if want not in _VOICE_ARGS:
+        return fg(AMBER, "usage: /voice [on|off|debug]", state.enabled)
+    if want == "":
+        status = "on" if state.voice is not None else "off"
+        return dim(f"voice is {status}", state.enabled)
+    if want == "off":
+        _close_voice(state)
+        return dim("voice off — keyboard input", state.enabled)
+    if want == "debug":
+        return _toggle_voice_debug(state)
+    return _voice_on(state)
 
 
 def _cmd_quit(state: ReplState, arg: str) -> str:
@@ -705,21 +749,31 @@ def _read_line(read_input, prompt: str):
         return None
 
 
+def _debug_sink(state: ReplState, sink):
+    """A dim per-event writer while voice debug is on, else None."""
+    if not state.voice.debug:
+        return None
+    return lambda line: sink(dim("  · voice: " + line, state.enabled))
+
+
 def _listen_line(state: ReplState, read_input, prompt: str, sink):
     """Block on the microphone until a pertinent transcript arrives.
 
     Gated-out transcripts show as a dim ignored line; an accepted one is
-    echoed like typed input. Ctrl-C while listening turns voice mode off
-    and falls back to one keyboard read instead of quitting; any other
-    failure (backend down mid-gate, audio device gone) renders as an
-    error panel and does the same — the session must always survive.
+    echoed like typed input. In debug mode every raw transcript, gate
+    drop, and pertinence verdict is traced too. Ctrl-C while listening
+    turns voice mode off and falls back to one keyboard read instead of
+    quitting; any other failure (backend down mid-gate, audio device
+    gone) renders as an error panel and does the same — the session must
+    always survive.
     """
     from threetoks.voice.session import HEARD
     sink(dim(f"  {ZAP} listening {CHEVRON} speak now (Ctrl-C for keyboard)",
              state.enabled))
+    debug_sink = _debug_sink(state, sink)
     while state.running:
         try:
-            gated = state.voice.listen(state.policy)
+            gated = state.voice.listen(state.policy, debug_sink)
         except KeyboardInterrupt:
             _close_voice(state)
             sink(dim("voice off — keyboard input", state.enabled))

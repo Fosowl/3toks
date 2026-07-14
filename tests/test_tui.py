@@ -309,6 +309,10 @@ class SlashCommandTest(unittest.TestCase):
                      "/quit"):
             self.assertIn(name, reply)
 
+    def test_help_shows_the_voice_arguments(self):
+        reply = tui.handle_command(make_state(enabled=False), "/help")
+        self.assertIn("/voice [on|off|debug]", reply)
+
     def test_agents_lists_registered_specs(self):
         reply = tui.handle_command(make_state(enabled=False), "/agents")
         self.assertIn("casual", reply)
@@ -423,6 +427,8 @@ class SlashCommandTest(unittest.TestCase):
         wizard.assert_called_once_with()
         self.assertIn("saved", reply)
         self.assertIn(saved, reply)
+        # /voice on re-reads the file, so it applies without a restart.
+        self.assertIn("/voice on", reply)
 
     def test_setup_warns_when_a_cwd_config_shadows_the_saved_file(self):
         state = make_state(enabled=False)

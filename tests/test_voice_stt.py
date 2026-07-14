@@ -59,6 +59,36 @@ class AcceptTranscriptTest(unittest.TestCase):
                          "what time is it")
 
 
+class GateTranscriptTest(unittest.TestCase):
+    """The same gate as accept_transcript, plus the reason debug mode shows."""
+
+    def test_empty_reports_empty(self):
+        self.assertEqual(stt.gate_transcript("   ", ""),
+                         (None, stt.GATE_EMPTY))
+
+    def test_every_known_hallucination_reports_hallucination(self):
+        for junk in stt.KNOWN_HALLUCINATIONS:
+            self.assertEqual(stt.gate_transcript(junk, ""),
+                             (None, stt.GATE_HALLUCINATION), junk)
+
+    def test_echo_reports_echo(self):
+        self.assertEqual(stt.gate_transcript("turn the light on",
+                                             "turn the light on"),
+                         (None, stt.GATE_ECHO))
+
+    def test_clean_transcript_reports_ok_and_strips(self):
+        self.assertEqual(stt.gate_transcript("  what time is it  ", ""),
+                         ("what time is it", stt.GATE_OK))
+
+    def test_each_drop_reports_the_reason_that_names_its_cause(self):
+        # The reasons must be distinguishable: debug mode prints them to
+        # tell "the mic heard junk" apart from "we filtered our own voice".
+        drops = {stt.gate_transcript("  ", "")[1]: "empty",
+                 stt.gate_transcript("hey", "")[1]: "hallucination",
+                 stt.gate_transcript("say it back", "say it back")[1]: "echo"}
+        self.assertEqual(len(drops), 3, drops)  # three causes, three reasons
+
+
 class IsPertinentTest(unittest.TestCase):
     def test_directed_option_is_pertinent(self):
         policy = make_policy([reply_for(stt.DIRECTED_OPTION)])

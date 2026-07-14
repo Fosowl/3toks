@@ -1,5 +1,6 @@
 """Offline tests for the voice session and its TUI wiring."""
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from threetoks.nodes import Decision
@@ -97,6 +98,60 @@ class VoiceSessionTest(unittest.TestCase):
         self.assertFalse(listener.started)
 
 
+class VoiceDebugSinkTest(unittest.TestCase):
+    """debug_sink traces one line per event; the return value is unchanged."""
+
+    def test_debug_is_off_by_default(self):
+        self.assertFalse(VoiceSession(FakeListener(), None).debug)
+        self.assertTrue(VoiceSession(FakeListener(), None, debug=True).debug)
+
+    def test_quiet_tick_emits_nothing(self):
+        # A quiet tick fires twice a second; tracing it would be a flood.
+        session = VoiceSession(FakeListener([]), None)
+        traced = []
+        self.assertIsNone(session.listen(FakePolicy(DIRECTED_OPTION),
+                                         traced.append))
+        self.assertEqual(traced, [])
+
+    def test_directed_speech_traces_the_raw_line_and_the_verdict(self):
+        session = VoiceSession(FakeListener(["what time is it"]), None)
+        traced = []
+        gated = session.listen(FakePolicy(DIRECTED_OPTION), traced.append)
+        self.assertEqual(gated, (HEARD, "what time is it"))
+        self.assertEqual(traced, ["heard raw: 'what time is it'",
+                                  "pertinence: directed"])
+
+    def test_noise_traces_the_noise_verdict(self):
+        session = VoiceSession(FakeListener(["tv chatter"]), None)
+        traced = []
+        gated = session.listen(FakePolicy(NOISE_OPTION), traced.append)
+        self.assertEqual(gated, (IGNORED, "tv chatter"))
+        self.assertEqual(traced[-1], "pertinence: noise")
+
+    def test_gate_drop_is_traced_with_its_reason(self):
+        session = VoiceSession(FakeListener(["hi"]), None)
+        traced = []
+        self.assertIsNone(session.listen(FakePolicy(DIRECTED_OPTION),
+                                         traced.append))
+        self.assertEqual(traced, ["heard raw: 'hi'",
+                                  "dropped (hallucination): 'hi'"])
+
+    def test_echo_drop_names_echo(self):
+        session = VoiceSession(FakeListener(["the light is now on"]), None)
+        session.speak("The light is now on.")
+        traced = []
+        self.assertIsNone(session.listen(FakePolicy(DIRECTED_OPTION),
+                                         traced.append))
+        self.assertTrue(any("dropped (echo)" in line for line in traced),
+                        traced)
+
+    def test_no_sink_keeps_the_return_contract(self):
+        session = VoiceSession(FakeListener(["hi", "what time is it"]), None)
+        self.assertIsNone(session.listen(FakePolicy(DIRECTED_OPTION)))
+        self.assertEqual(session.listen(FakePolicy(DIRECTED_OPTION)),
+                         (HEARD, "what time is it"))
+
+
 class MakeVoiceSessionTest(unittest.TestCase):
     @staticmethod
     def _broken(_config):
@@ -145,6 +200,46 @@ class CmdVoiceTest(unittest.TestCase):
         self.assertIsNone(state.voice)
         self.assertFalse(session.listener.started)
 
+    def test_usage_names_the_debug_argument(self):
+        self.assertIn("debug", _cmd_voice(make_state(), "loud"))
+
+    def test_debug_toggles_on_the_live_session(self):
+        state = make_state()
+        state.voice = VoiceSession(FakeListener(), None)
+        self.assertIn("voice debug on", _cmd_voice(state, "debug"))
+        self.assertTrue(state.voice.debug)
+        self.assertIn("voice debug off", _cmd_voice(state, "debug"))
+        self.assertFalse(state.voice.debug)
+
+    def test_debug_without_a_session_reports_voice_is_off(self):
+        state = make_state()
+        self.assertIn("voice is off", _cmd_voice(state, "debug"))
+        self.assertIsNone(state.voice)
+
+    def test_on_reloads_the_freshly_saved_voice_config(self):
+        # The /setup bug: a config saved this session must be picked up.
+        state = make_state(voice_config="stale")
+        fresh = SimpleNamespace(voice="fresh")
+        session = VoiceSession(FakeListener(), None)
+        with mock.patch("threetoks.config.load_config",
+                        return_value=fresh), \
+                mock.patch("threetoks.voice.session.make_voice_session",
+                           return_value=(session, [])) as factory:
+            _cmd_voice(state, "on")
+        factory.assert_called_once_with("fresh")
+        self.assertEqual(state.voice_config, "fresh")
+
+    def test_on_keeps_the_startup_config_when_the_reload_fails(self):
+        state = make_state(voice_config="startup")
+        session = VoiceSession(FakeListener(), None)
+        with mock.patch("threetoks.config.load_config",
+                        side_effect=OSError("unreadable config")), \
+                mock.patch("threetoks.voice.session.make_voice_session",
+                           return_value=(session, [])) as factory:
+            _cmd_voice(state, "on")
+        factory.assert_called_once_with("startup")
+        self.assertEqual(state.voice_config, "startup")
+
     def test_on_failure_surfaces_a_styled_message(self):
         state = make_state()
         with mock.patch("threetoks.voice.session.make_voice_session",
@@ -182,6 +277,30 @@ class VoiceInputLoopTest(unittest.TestCase):
         line = _next_line(state, None, "> ", stop_soon)
         self.assertIsNone(line)
         self.assertTrue(any("ignored" in row for row in shown))
+
+    def test_debug_mode_shows_raw_transcripts_and_gate_drops(self):
+        state = make_state(policy=FakePolicy(DIRECTED_OPTION))
+        state.voice = VoiceSession(FakeListener(["hi", "what time is it"]),
+                                   None, debug=True)
+        shown = []
+        line = _next_line(state, None, "> ", shown.append)
+        self.assertEqual(line, "what time is it")  # contract unchanged
+        traced = [row for row in shown if "voice:" in row]
+        self.assertTrue(any("heard raw: 'hi'" in row for row in traced),
+                        traced)
+        self.assertTrue(any("dropped (hallucination)" in row
+                            for row in traced), traced)
+        self.assertTrue(any("pertinence: directed" in row for row in traced),
+                        traced)
+
+    def test_without_debug_the_gate_trace_stays_hidden(self):
+        state = make_state(policy=FakePolicy(DIRECTED_OPTION))
+        state.voice = VoiceSession(FakeListener(["hi", "what time is it"]),
+                                   None)
+        shown = []
+        line = _next_line(state, None, "> ", shown.append)
+        self.assertEqual(line, "what time is it")
+        self.assertFalse(any("voice:" in row for row in shown), shown)
 
     def test_ctrl_c_while_listening_falls_back_to_keyboard(self):
         class InterruptingListener(FakeListener):

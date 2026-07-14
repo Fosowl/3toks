@@ -7,12 +7,18 @@ the echo filter. The TUI talks only to this class.
 """
 from collections import deque
 
-from threetoks.voice.stt import accept_transcript, is_pertinent
+from threetoks.voice.stt import gate_transcript, is_pertinent
 
 LISTEN_TICK_S = 0.5     # short poll so Ctrl-C stays responsive
 SPOKEN_HISTORY = 3      # answers remembered for echo rejection
 HEARD = "heard"         # transcript aimed at the assistant
 IGNORED = "ignored"     # transcript gated out by the pertinence check
+
+
+def _emit(debug_sink, line: str) -> None:
+    """Write one debug line when a sink is wired, else do nothing."""
+    if debug_sink is not None:
+        debug_sink(line)
 
 
 class VoiceSession:
@@ -21,11 +27,14 @@ class VoiceSession:
     Inputs: a started-or-startable SpeechListener (or None for typed
     input), a Speaker (or None for text-only output). When both exist
     the speaker mutes the microphone for the whole playback window.
+    ``debug`` is the caller-flipped flag the TUI reads to decide whether
+    to hand :meth:`listen` a debug sink.
     """
 
-    def __init__(self, listener=None, speaker=None):
+    def __init__(self, listener=None, speaker=None, debug: bool = False):
         self.listener = listener
         self.speaker = speaker
+        self.debug = debug
         self._spoken: deque = deque(maxlen=SPOKEN_HISTORY)
         if listener is not None and speaker is not None:
             speaker.on_start = listener.mute
@@ -38,23 +47,30 @@ class VoiceSession:
         """Whether voice input is available."""
         return self.listener is not None
 
-    def listen(self, policy) -> tuple | None:
+    def listen(self, policy, debug_sink=None) -> tuple | None:
         """One gated transcript as ``(HEARD | IGNORED, text)``, or None.
 
         Blocks up to LISTEN_TICK_S for a final transcript, then runs the
         deterministic gates (empty / hallucination / echo of our own
         speech — those yield None like a quiet tick) and the model
         pertinence gate via ``policy`` (a rejection yields IGNORED so
-        the caller can show it). Callers loop on None.
+        the caller can show it). Callers loop on None. ``debug_sink``, a
+        one-line writer, traces the raw transcript, any gate drop and its
+        reason, and the pertinence verdict; a quiet tick stays silent
+        because it fires twice a second.
         """
         raw = self.listener.listen(timeout_s=LISTEN_TICK_S)
         if raw is None:
             return None
-        text = accept_transcript(raw, tuple(self._spoken))
+        _emit(debug_sink, f"heard raw: '{raw}'")
+        text, reason = gate_transcript(raw, tuple(self._spoken))
         if text is None:
+            _emit(debug_sink, f"dropped ({reason}): '{raw}'")
             return None
         if not is_pertinent(text, policy):
+            _emit(debug_sink, "pertinence: noise")
             return IGNORED, text
+        _emit(debug_sink, "pertinence: directed")
         return HEARD, text
 
     def speak(self, answer: str) -> None:
@@ -156,6 +172,7 @@ if __name__ == "__main__":
     speaker = _FakeSpeaker()
     session = VoiceSession(listener, speaker)
     assert listener.started and speaker.on_start == listener.mute
+    assert session.debug is False  # debug is opt-in
     kind, text = session.listen(_YesPolicy())
     assert (kind, text) == (HEARD, "turn on the light")
     session.speak("The light is now on.")
@@ -163,6 +180,18 @@ if __name__ == "__main__":
     assert session.listen(_YesPolicy()) is None  # echo of our own answer
     session.close()
     assert not listener.started
+
+    traced = []
+    debugged = VoiceSession(_FakeListener(["hi", "what time is it"]), None)
+    assert debugged.listen(_YesPolicy(), traced.append) is None  # junk
+    assert traced == ["heard raw: 'hi'",
+                      "dropped (hallucination): 'hi'"], traced
+    assert debugged.listen(_YesPolicy(), traced.append)[0] == HEARD
+    assert traced[-1] == "pertinence: directed", traced
+    quiet_tick = VoiceSession(_FakeListener([]), None)
+    silent = []
+    assert quiet_tick.listen(_YesPolicy(), silent.append) is None
+    assert silent == [], silent  # a quiet tick must stay silent
 
     def _broken(_):
         raise ImportError("vosk not installed")

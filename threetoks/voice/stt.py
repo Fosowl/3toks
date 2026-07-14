@@ -2,8 +2,9 @@
 
 Single responsibility: turn microphone audio into transcripts the assistant
 should act on. Two cheap stdlib gates run first — a hallucination/echo
-filter (``accept_transcript``) then a model-backed pertinence check
-(``is_pertinent``) — before the expensive assistant is ever consulted.
+filter (``gate_transcript``, or ``accept_transcript`` when the drop reason
+is not wanted) then a model-backed pertinence check (``is_pertinent``) —
+before the expensive assistant is ever consulted.
 ``SpeechListener`` wraps Vosk + sounddevice; those extras are imported
 lazily so this module (and its gates) import on a bare install.
 """
@@ -22,6 +23,12 @@ from threetoks.voice.echo import SpokenHistory, is_echo
 # added because the reference main loop skipped it too.
 KNOWN_HALLUCINATIONS = ("hi", "hi.", "hey", "hey.", "hum", "huh", "he")
 
+# Why the deterministic gate let a transcript through, or dropped it.
+GATE_OK = "ok"
+GATE_EMPTY = "empty"
+GATE_HALLUCINATION = "hallucination"
+GATE_ECHO = "echo"
+
 # Pertinence gate: two semantically described options, never bare yes/no.
 DIRECTED_OPTION = "a task, question, or command meant for the assistant"
 NOISE_OPTION = "background noise, other people talking, or fragmented speech"
@@ -38,23 +45,37 @@ _DTYPE = "int16"
 _LOG_SILENT = -1  # Vosk level: mute model chatter
 
 
+def gate_transcript(text: str,
+                    spoken_history: SpokenHistory) -> tuple[str | None, str]:
+    """Deterministic pre-model gate reporting why it decided.
+
+    `text`: raw STT output. `spoken_history`: recent TTS (string or
+    iterable of strings) for echo rejection. Returns ``(accepted,
+    reason)``: the stripped transcript with GATE_OK, else None with
+    GATE_EMPTY, GATE_HALLUCINATION, or GATE_ECHO. The reason exists so
+    voice debug mode can show what vanished. House rule: these cheap
+    checks run before any model call.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return None, GATE_EMPTY
+    if stripped.lower() in KNOWN_HALLUCINATIONS:
+        return None, GATE_HALLUCINATION
+    if is_echo(stripped, spoken_history):
+        return None, GATE_ECHO
+    return stripped, GATE_OK
+
+
 def accept_transcript(text: str, spoken_history: SpokenHistory) -> str | None:
     """Deterministic pre-model gate on one raw transcript.
 
     `text`: raw STT output. `spoken_history`: recent TTS (string or
     iterable of strings) for echo rejection. Returns the stripped
     transcript, or None when it is empty, a known silence hallucination,
-    or an echo of the assistant's own speech. House rule: these cheap
-    checks run before any model call.
+    or an echo of the assistant's own speech — :func:`gate_transcript`
+    without the reason, for callers that only want the text.
     """
-    stripped = text.strip()
-    if not stripped:
-        return None
-    if stripped.lower() in KNOWN_HALLUCINATIONS:
-        return None
-    if is_echo(stripped, spoken_history):
-        return None
-    return stripped
+    return gate_transcript(text, spoken_history)[0]
 
 
 def is_pertinent(text: str, policy: Policy) -> bool:
@@ -205,6 +226,12 @@ if __name__ == "__main__":
     assert accept_transcript("turn the light on",
                              "turn the light on") is None  # echo
     assert accept_transcript(" hello there ", "") == "hello there"
+
+    assert gate_transcript("   ", "") == (None, GATE_EMPTY)
+    assert gate_transcript("hi", "") == (None, GATE_HALLUCINATION)
+    assert gate_transcript("turn the light on",
+                           "turn the light on") == (None, GATE_ECHO)
+    assert gate_transcript(" hello there ", "") == ("hello there", GATE_OK)
 
     class _PickDirected:
         """Fake backend: reply with the digit that shows DIRECTED_OPTION."""
