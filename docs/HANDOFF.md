@@ -144,8 +144,9 @@ separately; historical: 6-7/10 answers, ~11s/task).
   reliable fetch path; a BrowserSearchProvider (search THROUGH stealth
   Chrome) is designed-but-unbuilt and would close the class.
 - searxng runs via infra/searxng (docker compose, container left running).
-  Machine: stale homebrew chromedriver v139 (uc bypasses it); Chrome BETA
-  151 installed, not stable.
+  Machine: stale homebrew chromedriver v139 (uc bypasses it; the plain
+  browser masks it out of PATH at startup so selenium-manager resolves a
+  matching driver); Chrome BETA 151 installed, not stable.
 - Advisory nits (reviewed, logged, unfixed): TUI float() strictness on
   malformed events; eval trace_totals subscripts; files agent offers
   answer on empty folders; note provenance indexes the relevance-filtered
