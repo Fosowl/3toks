@@ -28,6 +28,8 @@ _PAGE_HTML = ("<html><title>Demo</title><body>"
 class FakeDriver:
     """Records get/quit calls and returns canned HTML as ``page_source``."""
 
+    window_handles = ["w0"]  # a live session answers the liveness probe
+
     def __init__(self, page_source: str = _PAGE_HTML):
         self.page_source = page_source
         self.got = []
@@ -44,6 +46,17 @@ class FakeDriver:
 
     def quit(self) -> None:
         self.quit_count += 1
+
+
+class DeadSessionDriver(FakeDriver):
+    """A driver whose session is gone: navigation and probes both raise."""
+
+    @property
+    def window_handles(self):
+        raise WebDriverException("invalid session id")
+
+    def get(self, url: str) -> None:
+        raise WebDriverException("disconnected")
 
 
 class LazyCreationTest(unittest.TestCase):
@@ -136,6 +149,29 @@ class ErrorTranslationTest(unittest.TestCase):
             fetcher = make_stealth_fetcher()
             with self.assertRaises(FetchError):
                 fetcher.fetch_page("https://example.com/")
+
+
+class DeadDriverRecoveryTest(unittest.TestCase):
+    def test_dead_session_discarded_after_fetch_failure(self):
+        dead = DeadSessionDriver()
+        with mock.patch.object(stealth_browser, "create_driver",
+                               return_value=dead):
+            fetcher = make_stealth_fetcher()
+            with self.assertRaises(FetchError):
+                fetcher.fetch_page("https://example.com/")
+        self.assertIsNone(fetcher.driver)  # next fetch starts a fresh browser
+        self.assertEqual(dead.quit_count, 1)
+
+    def test_live_driver_kept_after_page_failure(self):
+        fake = FakeDriver()
+        fake.get = mock.Mock(side_effect=WebDriverException("bad page"))
+        with mock.patch.object(stealth_browser, "create_driver",
+                               return_value=fake):
+            fetcher = make_stealth_fetcher()
+            with self.assertRaises(FetchError):
+                fetcher.fetch_page("https://example.com/")
+        self.assertIs(fetcher.driver, fake)  # the window stays open
+        self.assertEqual(fake.quit_count, 0)
 
 
 class CloseTest(unittest.TestCase):

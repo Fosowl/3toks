@@ -14,8 +14,16 @@ sleeps, no captcha extension. Plain selenium + chrome.
 
 Driver resolution relies on selenium-manager (selenium >= 4.6), which
 downloads a matching chromedriver automatically — no separate install.
+selenium-manager prefers a chromedriver found on PATH even when it cannot
+drive the installed Chrome, which kills every session at startup (in
+visible mode: a window that flashes open and instantly closes on each
+fetch); such a stale driver is masked out of PATH for the startup call so
+a matching one is resolved instead.
 """
 import os
+import re
+import shutil
+import subprocess
 import sys
 import time
 
@@ -31,9 +39,11 @@ WINDOW_SIZE = "1280,900"
 PAGE_LOAD_TIMEOUT_S = 20
 READY_STATE_TIMEOUT_S = 8
 JS_SETTLE_S = 1.0
+VERSION_TIMEOUT_S = 10
 CHROME_ENV_VAR = "CHROME_EXECUTABLE_PATH"
 _READY_SCRIPT = "return document.readyState"
 _READY_COMPLETE = "complete"
+_VERSION_RE = re.compile(r"(\d+)\.\d+")
 _MAC_CHROME_PATHS = (
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
@@ -92,13 +102,87 @@ def create_chrome_options(visible: bool) -> Options:
     return options
 
 
-def create_driver(visible: bool) -> webdriver.Chrome:
-    """Start a Chrome WebDriver via selenium-manager, or raise ``FetchError``."""
-    options = create_chrome_options(visible)
+def _binary_major_version(executable: str):
+    """Major version from ``executable --version`` output, or ``None``.
+
+    Works for Chrome ("Google Chrome 151.0.7922.19 beta") and chromedriver
+    ("ChromeDriver 139.0.7258.5 (...)"); any spawn or parse failure means
+    "unknown", never an exception.
+    """
     try:
-        driver = webdriver.Chrome(options=options)
+        proc = subprocess.run([executable, "--version"], capture_output=True,
+                              text=True, timeout=VERSION_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = _VERSION_RE.search(proc.stdout)
+    return int(match.group(1)) if match else None
+
+
+def _path_without_chromedriver():
+    """``PATH`` with every directory holding a chromedriver removed.
+
+    Returns ``None`` when no chromedriver is on ``PATH`` — nothing to mask.
+    """
+    if shutil.which("chromedriver") is None:
+        return None
+    entries = os.environ.get("PATH", "").split(os.pathsep)
+    kept = [entry for entry in entries
+            if not shutil.which("chromedriver", path=entry)]
+    return os.pathsep.join(kept)
+
+
+def _path_chromedriver_is_stale(chrome_path: str) -> bool:
+    """True when the ``PATH`` chromedriver cannot drive the installed Chrome.
+
+    Chromedriver only supports the Chrome sharing its major version.
+    Unknown versions count as compatible — never mask a driver we cannot
+    read.
+    """
+    driver = shutil.which("chromedriver")
+    if driver is None:
+        return False
+    driver_major = _binary_major_version(driver)
+    chrome_major = _binary_major_version(chrome_path)
+    if driver_major is None or chrome_major is None:
+        return False
+    return driver_major != chrome_major
+
+
+def _start_chrome(options: Options, path_override) -> webdriver.Chrome:
+    """Start ``webdriver.Chrome``, under a temporary ``PATH`` override if given."""
+    if path_override is None:
+        return webdriver.Chrome(options=options)
+    original = os.environ.get("PATH", "")
+    os.environ["PATH"] = path_override
+    try:
+        return webdriver.Chrome(options=options)
+    finally:
+        os.environ["PATH"] = original
+
+
+def create_driver(visible: bool) -> webdriver.Chrome:
+    """Start a Chrome WebDriver via selenium-manager, or raise ``FetchError``.
+
+    A chromedriver on PATH whose version cannot drive the installed Chrome
+    is masked out of PATH for the startup call, so selenium-manager
+    resolves a matching driver instead of failing on the stale one (and
+    stops warning about it). An unexplained startup failure retries once
+    with the mask applied before giving up.
+    """
+    options = create_chrome_options(visible)
+    masked_path = _path_without_chromedriver()
+    mask_first = (masked_path is not None
+                  and _path_chromedriver_is_stale(options.binary_location))
+    try:
+        driver = _start_chrome(options, masked_path if mask_first else None)
     except WebDriverException as error:
-        raise FetchError(f"{_DRIVER_HELP} ({error.msg or error})") from error
+        if mask_first or masked_path is None:
+            raise FetchError(f"{_DRIVER_HELP} ({error.msg or error})") from error
+        try:
+            driver = _start_chrome(options, masked_path)
+        except WebDriverException as retry_error:
+            raise FetchError(f"{_DRIVER_HELP} "
+                             f"({retry_error.msg or retry_error})") from retry_error
     driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT_S)
     return driver
 
@@ -143,8 +227,23 @@ class BrowserFetcher:
             self._wait_until_ready(driver)
             html = driver.page_source
         except WebDriverException as error:
+            self._discard_dead_driver()
             raise FetchError(f"{url}: {error.msg or error}") from error
         return html_to_page(html, url)
+
+    def _discard_dead_driver(self) -> None:
+        """Drop the driver when its session no longer answers.
+
+        A fetch failure can mean a dead browser (window closed by hand,
+        Chrome crashed) or just a bad page. Probe the session: one that
+        still answers is kept, so the window stays open; a dead one is
+        discarded so the next fetch starts a fresh browser instead of
+        failing forever.
+        """
+        try:
+            self.driver.window_handles
+        except WebDriverException:
+            self.close()
 
     def close(self) -> None:
         """Quit the driver if it was started; safe to call repeatedly."""
@@ -167,6 +266,7 @@ if __name__ == "__main__":
 
         page_source = "<html><title>T</title><body>" \
             "<p>The capital of France is Paris today.</p></body></html>"
+        window_handles = ["w0"]
 
         def __init__(self):
             self.got = []
@@ -184,6 +284,16 @@ if __name__ == "__main__":
         def quit(self):
             self.quit_count += 1
 
+    class _DeadDriver(_FakeDriver):
+        """A driver whose session died: every call raises."""
+
+        @property
+        def window_handles(self):
+            raise WebDriverException("invalid session id")
+
+        def get(self, url):
+            raise WebDriverException("disconnected")
+
     fetcher = make_fetcher()
     assert fetcher.driver is None, "driver must be lazy"
     fake = _FakeDriver()
@@ -196,4 +306,15 @@ if __name__ == "__main__":
     fetcher.close()
     fetcher.close()  # idempotent
     assert fake.quit_count == 1, fake.quit_count
+
+    dead_fetcher = make_fetcher()
+    dead = _DeadDriver()
+    dead_fetcher.driver = dead
+    try:
+        dead_fetcher.fetch_page("https://example.com/")
+        raise AssertionError("expected FetchError from a dead session")
+    except FetchError:
+        pass
+    assert dead_fetcher.driver is None, "dead driver must be discarded"
+    assert dead.quit_count == 1, dead.quit_count
     print("smoke OK")
