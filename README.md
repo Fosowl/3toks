@@ -179,7 +179,9 @@ point `[voice] tts_model_path` at the `.onnx`. The microphone is
 hard-muted during playback plus `post_speak_delay` seconds of reverb
 decay. Install both sides at once with `3toks[voice]`; either side alone
 also works (voice-in/text-out or type-in/spoken-out). Set
-`[voice] enabled = true` to start the TUI already listening.
+`[voice] enabled = true` to start the TUI already listening. `/setup`
+includes an optional voice step that opens the vosk/piper model pages,
+asks for the model paths, and sanity-checks them.
 
 **Camera — `3toks[camera]`** (opencv-python). Registers the `look` agent
 when the configured model is vision-capable. One JPEG frame (device
