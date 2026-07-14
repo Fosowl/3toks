@@ -145,6 +145,17 @@ the list is the router's fallback** when the model's choice is invalid or
 unparseable (`threetoks/agents/router.py`), so keep a cheap, safe default
 (`casual`) first. Names must stay unique — the registry test enforces this.
 
+Agents gated on an optional capability register through
+`optional_agents(services, model)` instead: `light` appears only when a
+GPIO relay is live on `services.relay` (Raspberry Pi `relay` extra) and
+`look` only when `services.capture_frame` is set (camera extra) AND the
+model name passes `is_vision_model` (a name-mark heuristic in
+`threetoks/backend/base.py` — extend `_VISION_MODEL_MARKS` when new
+vision families appear). List any such agent's name in
+`OPTIONAL_AGENT_NAMES` so `/model` can re-derive the set at runtime.
+Import the agent module lazily inside `optional_agents` — the registry
+must import on a bare install.
+
 An agent may itself route further: the `code` agent front-doors four modes
 (navigate / edit / compute / author) through `threetoks/code/route.py` —
 deterministic pre-checks first, one one-token menu otherwise (measured in

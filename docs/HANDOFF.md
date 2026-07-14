@@ -175,6 +175,19 @@ separately; historical: 6-7/10 answers, ~11s/task).
   a test. Modules end with `if __name__ == "__main__":` smokes.
 - Memory files live at ~/.claude/.../memory/ (threetoks-framework.md).
 
+## 4b. Multi-provider + voice/camera/relay (2026-07-14)
+
+DESIGN.md §19 has the full entry. Short version: `[llm] provider` picks
+ollama (default) or a chat API (`backend/providers.py`, stdlib-only);
+optional extras `stt`/`tts`/`voice`/`camera`/`relay` light up voice mode
+(`/voice`, `threetoks/voice/`), a `look` vision agent, and a Pi `light`
+agent — all lazily imported, all offline-tested (`tests/test_providers`,
+`test_policy_chat`, `test_voice_*`, `test_camera`, `test_look_agent`,
+`test_relay`, `test_light_agent`). Info-flow maps: `docs/info-flow/`.
+The wizard now carries un-asked config sections through re-runs
+(previously `/setup` silently reset `[code]`; would have reset the new
+sections too).
+
 ## 5. Known issues & environment caveats
 
 - **Search fragility is the #1 practical limiter**: searxng engine

@@ -528,3 +528,38 @@ Live re-run of the failing trace with the search layer still dead: 4
 model calls and an honest unavailability answer when the model names no
 usable site, or 11 calls and a judged-good answer when the site-ask
 lands on a fetchable page — versus 85 calls of theater before.
+
+## 19. Multi-provider transports and hardware extras (2026-07-14)
+
+Integrated (adapted, not copied) from the reference voice-assistant
+project: chat-API providers, voice in/out, camera vision, Pi relay.
+
+- **Chat transports** (`backend/providers.py`, stdlib urllib like the
+  Ollama backend — zero new required deps). `Policy._call` dispatches on
+  a callable `chat` attribute: chat backends get un-templated
+  `ChatPrompt(system, user, prefill)` parts and the node's own stops;
+  the raw path keeps family templates + family stops. One
+  `OpenAIChatBackend` covers openai/openrouter/together/deepseek/
+  google-compat/lm-studio/custom via a registry; `AnthropicBackend` is
+  separate because its native trailing-assistant prefill preserves the
+  measured prefill discipline. OpenAI-shaped prefill is a documented
+  degraded mode: hint line in the user turn + echo strip on the reply;
+  decisions over chat carry `mode: chat` in traces. Supported, not
+  recommended — the measured token math remains the local raw path.
+- **Voice** (`voice/`, extras `stt`/`tts`/`voice`). Transcripts pass
+  three gates, cheapest first: hallucination list and both-direction
+  n-gram echo filter (free), then a two-semantic-option pertinence menu
+  (~1 token) — the reference's COHERENT/GIBBERISH free-text prompt and
+  its persona-specific "fix the text" second call were replaced/dropped.
+  TTS pre-synthesizes all sentences, then hard-mutes the mic for
+  playback + reverb decay via instance callbacks (the reference's global
+  singleton and swallowed callback exceptions were deliberately not
+  ported).
+- **Camera + relay agents** (extras `camera`/`relay`). `node.images`
+  rides `GenOpts.images` (raw base64; each backend adds its own wire
+  framing; Ollama uses the `images` field). `look` registers only for
+  vision-capable model names; `light` only on ARM Linux with RPi.GPIO —
+  both via `optional_agents`, re-derived on `/model`. The light agent
+  settles clear phrasings by regex with zero model calls; the reference
+  tools.py bug (boolean-negating an "on"/"off" string) was fixed, and
+  8-bit PCM decode underflow in the reference TTS was corrected.

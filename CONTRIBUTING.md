@@ -21,10 +21,12 @@ Dev install, with the optional extras (web search + browser fetching):
 
 ```sh
 uv pip install -e ".[web,browser]"   # or: pip install -e ".[web,browser]"
+uv pip install -e ".[web,voice,camera,relay]"   # voice/vision/GPIO features
 ```
 
-The core package is stdlib-only; `web`/`browser` extras are imported lazily
-so a bare install still runs the TUI (with the web agent disabled). Run the
+The core package is stdlib-only; every extra (`web`, `browser`, `stt`,
+`tts`, `voice`, `camera`, `relay`) is imported lazily so a bare install
+still runs the TUI (with the corresponding features disabled). Run the
 TUI or a one-shot query to sanity-check your environment:
 
 ```sh
