@@ -827,6 +827,10 @@ def _error_hint(error: Exception) -> str | None:
     if isinstance(error, (ConnectionError, urllib.error.URLError)):
         return ("is Ollama running? start it and pull the model: "
                 "ollama pull qwen2.5:1.5b-instruct")
+    if "API_KEY" in str(error):
+        return ("export the key in your shell (and your shell profile, so "
+                "it survives a new terminal), or set [llm] provider = "
+                "ollama in config.ini")
     return None
 
 
@@ -933,6 +937,19 @@ def _make_retriever(config, provider):
     return Retriever(provider, cache_path=config.code.snippet_cache)
 
 
+def _warn_bad_config(sink) -> None:
+    """Say so when the config file was ignored and defaults took over.
+
+    A file that fails to parse degrades to the built-in defaults rather
+    than raising, which is otherwise invisible: the session simply runs
+    on a config the user did not write (see config.config_problem).
+    """
+    from threetoks.config import config_problem
+    problem = config_problem()
+    if problem:
+        sink(fg(AMBER, problem, _color_enabled()))
+
+
 def _make_relay(config, sink):
     """A live Relay on a Raspberry Pi with the extra installed, else None."""
     from threetoks.relay import relay_available
@@ -973,6 +990,7 @@ def build_state(model: str = None, sink=print):
     from threetoks.trace import Tracer
 
     config = load_config()
+    _warn_bad_config(sink)
     provider = _make_provider(config, sink)
     services = Services(provider=provider,
                         files_root=Path(config.files.root),
@@ -1016,7 +1034,11 @@ def main(model: str = None) -> None:
             print()
             print(dim("setup cancelled — nothing saved", _color_enabled()))
             return
-    state = build_state(model)
+    try:
+        state = build_state(model)
+    except RuntimeError as error:  # e.g. a provider without its API key
+        print(render_error(error, _color_enabled()))
+        return
     print(build_banner(state.model, len(state.specs), state.enabled))
     if state.voice_config is not None and state.voice_config.enabled:
         print(handle_command(state, "/voice on"))

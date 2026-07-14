@@ -441,15 +441,40 @@ def save_config(config: ThreetoksConfig, path: str = None) -> str:
     return target
 
 
+def config_problem(path: str = None) -> str | None:
+    """Why the resolved config file was ignored wholesale, else None.
+
+    ``load_config`` never raises: a malformed file degrades to the
+    built-in defaults. That silence hides typos — one bad line (a comment
+    that lost its ``#``) makes configparser reject the WHOLE file, so
+    EVERY setting silently reverts. Callers show this message at startup
+    so a broken edit is visible instead of mysterious. Returns None when
+    the file parses or does not exist.
+    """
+    resolved = _resolve_path(path)
+    if not os.path.isfile(resolved):
+        return None
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        parser.read(resolved, encoding="utf-8")
+    except (OSError, configparser.Error) as error:
+        detail = " ".join(str(error).split())
+        return (f"⚠ {resolved} was ignored — every setting fell back to "
+                f"its default. {detail}")
+    return None
+
+
 def load_config(path: str = None) -> ThreetoksConfig:
     """Load configuration from ``path`` / env / cwd, else pure defaults.
 
     A missing file is not an error: it yields the built-in defaults. An
     unreadable or malformed file also degrades to defaults rather than
-    raising, so a broken edit never takes the agent down. Interpolation is
-    off: a literal ``%`` in a value (URL escapes, ``%APPDATA%`` paths) is
-    data, not a template — with it on, ``.get()`` would raise at build
-    time, outside this guard.
+    raising, so a broken edit never takes the agent down — but it is not
+    silent: callers surface :func:`config_problem` at startup, because a
+    wholesale fallback is otherwise indistinguishable from a config that
+    simply says the defaults. Interpolation is off: a literal ``%`` in a
+    value (URL escapes, ``%APPDATA%`` paths) is data, not a template —
+    with it on, ``.get()`` would raise at build time, outside this guard.
     """
     parser = configparser.ConfigParser(interpolation=None)
     resolved = _resolve_path(path)
@@ -497,7 +522,20 @@ if __name__ == "__main__":
     assert sections.relay.pin == 27, sections.relay
     bad = load_config("/nonexistent/threetoks.ini")
     assert bad.llm.provider == DEFAULT_PROVIDER  # bad/missing -> default
+    assert config_problem(section_path) is None      # parses fine
+    assert config_problem("/nonexistent/threetoks.ini") is None  # absent
     os.unlink(section_path)
+
+    with tempfile.NamedTemporaryFile("w", suffix=".ini",
+                                     delete=False) as handle:
+        # a comment that lost its '#' — configparser rejects the file
+        handle.write("g not a comment\n[llm]\nmodel = mine\n")
+        broken_path = handle.name
+    assert load_config(broken_path).llm.model == DEFAULT_MODEL  # silent...
+    problem = config_problem(broken_path)                       # ...but seen
+    assert problem and broken_path in problem, problem
+    assert "\n" not in problem, problem  # one line: the TUI prints it raw
+    os.unlink(broken_path)
     os.unlink(temp_path)
     assert user_config_path("nt").endswith(
         os.path.join("threetoks", "config.ini")), user_config_path("nt")

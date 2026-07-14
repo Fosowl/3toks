@@ -190,7 +190,7 @@ class ChatBackend(Protocol):
 _VISION_MODEL_MARKS = ("vision", "llava", "gpt-4o", "gpt-4-turbo", "gpt-4.1",
                        "gpt-5", "gemini", "claude-3", "claude-4",
                        "claude-opus", "claude-sonnet", "claude-haiku",
-                       "pixtral", "yi-vision", "glm-4v", "internvl",
+                       "pixtral", "yi-vision", "glm-4v", "glm-5v", "internvl",
                        "molmo", "minicpm-v", "moondream")
 _QWEN_VL_PATTERN = re.compile(r"qwen[\w.-]*vl(?![a-z])")
 
@@ -238,6 +238,8 @@ if __name__ == "__main__":
     assert is_vision_model("gpt-4o-mini")
     assert is_vision_model("claude-sonnet-4-5")
     assert is_vision_model("llava:7b")
+    assert is_vision_model("z-ai/glm-5v-turbo")   # the v marks vision
+    assert not is_vision_model("z-ai/glm-4-32b")  # no v: text only
     assert is_vision_model("qwen2.5vl:7b") and is_vision_model("qwen2-vl-72b")
     assert not is_vision_model("qwen2.5:1.5b-instruct")
     assert not is_vision_model("mistral:7b")

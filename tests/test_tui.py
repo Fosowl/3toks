@@ -569,6 +569,50 @@ class FakeSpecWithRun:
     run: object
 
 
+class StartupFailureTest(unittest.TestCase):
+    """A misconfigured provider must read as a message, not a traceback."""
+
+    def _main_with_build_error(self, error):
+        shown = []
+        with mock.patch("threetoks.config.find_config_path",
+                        return_value="config.ini"), \
+                mock.patch.object(tui, "build_state", side_effect=error), \
+                mock.patch.object(tui, "repl") as repl, \
+                mock.patch("builtins.print", side_effect=shown.append):
+            tui.main()  # must not raise
+        return "\n".join(shown), repl
+
+    def test_missing_api_key_prints_a_panel_and_skips_the_repl(self):
+        error = RuntimeError("provider 'openrouter' needs the "
+                             "OPENROUTER_API_KEY environment variable")
+        out, repl = self._main_with_build_error(error)
+        self.assertIn("OPENROUTER_API_KEY", out)
+        self.assertIn("export the key", out)  # actionable hint
+        repl.assert_not_called()
+
+    def test_api_key_hint_names_the_ollama_escape_hatch(self):
+        hint = tui._error_hint(RuntimeError("needs the OPENAI_API_KEY"))
+        self.assertIn("provider = ollama", hint)
+
+
+class BadConfigWarningTest(unittest.TestCase):
+    """A config that failed to parse must be announced, not swallowed."""
+
+    def test_parse_failure_is_printed_at_startup(self):
+        shown = []
+        with mock.patch("threetoks.config.config_problem",
+                        return_value="⚠ /cfg.ini was ignored — fell back"):
+            tui._warn_bad_config(shown.append)
+        self.assertEqual(len(shown), 1)
+        self.assertIn("was ignored", shown[0])
+
+    def test_healthy_config_prints_nothing(self):
+        shown = []
+        with mock.patch("threetoks.config.config_problem", return_value=None):
+            tui._warn_bad_config(shown.append)
+        self.assertEqual(shown, [])
+
+
 class ModelSwapOptionalAgentsTest(unittest.TestCase):
     """Regression: /model must re-derive the capability agents."""
 

@@ -13,9 +13,9 @@ import unittest
 from unittest import mock
 
 from threetoks import config
-from threetoks.config import (CONFIG_ENV_VAR, ThreetoksConfig, find_config_path,
-                             load_config, onboarding_target, save_config,
-                             user_config_path)
+from threetoks.config import (CONFIG_ENV_VAR, ThreetoksConfig, config_problem,
+                             find_config_path, load_config, onboarding_target,
+                             save_config, user_config_path)
 
 
 def _write_ini(text: str) -> str:
@@ -327,6 +327,42 @@ class SaveConfigTest(unittest.TestCase):
             with mock.patch.dict(os.environ, {CONFIG_ENV_VAR: env_target}):
                 self.assertEqual(onboarding_target(), env_target)
                 self.assertEqual(save_config(ThreetoksConfig()), env_target)
+
+
+class ConfigProblemTest(unittest.TestCase):
+    """A file that parses to nothing must not fail silently."""
+
+    def test_valid_file_and_absent_file_report_no_problem(self):
+        path = _write_ini("[llm]\nmodel = mine\n")
+        self.addCleanup(os.unlink, path)
+        self.assertIsNone(config_problem(path))
+        self.assertIsNone(config_problem("/nonexistent/threetoks.ini"))
+
+    def test_comment_missing_its_hash_is_reported_not_swallowed(self):
+        # exactly the real break: a leading '#' clobbered by an editor
+        path = _write_ini("g ThreeToks configuration\n[llm]\nmodel = mine\n")
+        self.addCleanup(os.unlink, path)
+        self.assertEqual(load_config(path).llm.model, config.DEFAULT_MODEL)
+        problem = config_problem(path)
+        self.assertIsNotNone(problem)
+        self.assertIn(path, problem)
+        self.assertIn("fell back", problem)
+
+    def test_message_is_one_line(self):
+        path = _write_ini("junk\n[llm]\nmodel = mine\n")
+        self.addCleanup(os.unlink, path)
+        self.assertNotIn("\n", config_problem(path))
+
+    def test_duplicate_section_is_reported(self):
+        path = _write_ini("[llm]\nmodel = a\n[llm]\nmodel = b\n")
+        self.addCleanup(os.unlink, path)
+        self.assertIsNotNone(config_problem(path))
+
+    def test_it_follows_the_same_resolution_order_as_load_config(self):
+        path = _write_ini("g broken\n[llm]\nmodel = mine\n")
+        self.addCleanup(os.unlink, path)
+        with mock.patch.dict(os.environ, {CONFIG_ENV_VAR: path}):
+            self.assertIn(path, config_problem())  # no argument: resolves
 
 
 if __name__ == "__main__":
