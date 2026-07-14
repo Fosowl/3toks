@@ -185,7 +185,13 @@ class Policy:
 
     def _record(self, episode: Episode, node, perm: tuple[int, ...],
                 attempt: int, result: GenResult, decision: Decision) -> None:
-        """Trace one attempt."""
+        """Trace one attempt.
+
+        ``done_reason`` rides along as the only thing separating a wrong
+        answer from one the node's token cap cut off (``length``) — the
+        shape a chat transport hits when it spends the cap on preamble
+        instead of the digit raw-mode prefill would have forced.
+        """
         resolved = self._resolve_picks(node, decision)
         self.tracer.record({
             **({"resolved": resolved} if resolved else {}),
@@ -194,6 +200,7 @@ class Policy:
             "step": episode.step_count, "node": node.kind,
             "question": node.question[:120], "perm": list(perm),
             "attempt": attempt, "raw_text": result.text,
+            "done_reason": result.done_reason,
             "value": decision.value, "valid": decision.valid,
             "prompt_tokens": result.prompt_tokens,
             "out_tokens": result.out_tokens, "wall_s": round(result.wall_s, 3)})
@@ -212,10 +219,13 @@ if __name__ == "__main__":
             return GenResult(self.scripted.pop(0), 10, 2, 0.01, "stop")
 
     backend = _FakeBackend(["garbage", " 2"])
-    policy = Policy(backend, PolicyConfig(ModelSpec("m", FAMILY_R1)))
+    events = []
+    policy = Policy(backend, PolicyConfig(ModelSpec("m", FAMILY_R1)),
+                    Tracer(None, on_event=events.append))
     episode = Episode("SYS", "t")
     decision = policy.decide(episode, MenuNode("Pick.", ["a", "b", "c"]))
     assert decision.valid and decision.value in {"a", "b", "c"}
     assert len(backend.prompts) == 2, "retry ladder should have re-asked"
     assert backend.prompts[0].endswith("ANSWER:")
+    assert all("done_reason" in event for event in events), events
     print("smoke OK")

@@ -116,7 +116,8 @@ Slash commands in the TUI: `/help`, `/agents` (list registered agents),
 `/deep N` (set research rounds), `/browser http|plain|stealth`,
 `/model NAME` (swap the policy model), `/voice on|off|debug` (talk instead
 of typing; `debug` traces what the microphone hears and why each gate
-dropped it), `/setup` (re-run the config wizard), `/quit`.
+dropped it), `/debug [on|off]` (show the raw model answer and finish
+reason under each decision), `/setup` (re-run the config wizard), `/quit`.
 
 Adding an agent is one new module plus one line in the registry — see
 [docs/AGENTS.md](docs/AGENTS.md) for the contract and a minimal example.
@@ -154,7 +155,12 @@ prefill is used), so those decisions run in a degraded mode that leans on
 instruction-following and strips any echoed prefill; bigger cloud models
 handle this fine, but the token math and the measured accuracy numbers in
 this README all describe the local raw-mode path. Decisions made over a
-chat transport are tagged `mode: chat` in traces.
+chat transport are tagged `mode: chat` in traces. When a chat provider
+answers with unparseable decisions (every ticker line renders `—`),
+`/debug on` shows each raw completion and its finish reason — `length`
+means the node's token cap truncated the reply before the model answered
+(the caps are tuned for raw-mode prefill, so a chatty or reasoning model
+spends them on preamble).
 
 ## Voice, camera, and relay (optional)
 

@@ -117,6 +117,81 @@ class TickerFormatTest(unittest.TestCase):
         self.assertIn("—", line)
 
 
+class DebugLineTest(unittest.TestCase):
+    """The /debug line that makes an unparseable decision explain itself."""
+
+    def _event(self, **overrides):
+        event = {"node": "menu", "valid": False, "raw_text": "",
+                 "done_reason": "length", "attempt": 0}
+        return {**event, **overrides}
+
+    def test_empty_completion_is_visible_as_quotes(self):
+        # The user's failure shape: the cap was spent before any digit.
+        line = tui.build_debug_line(self._event(), enabled=False)
+        self.assertIn("''", line)
+
+    def test_shows_done_reason_and_one_based_attempt(self):
+        line = tui.build_debug_line(self._event(attempt=2), enabled=False)
+        self.assertIn("length", line)
+        self.assertIn("attempt 3", line)
+
+    def test_raw_text_is_shown_and_stays_one_line(self):
+        line = tui.build_debug_line(
+            self._event(raw_text="Sure!\nLet me"), enabled=False)
+        self.assertIn("Sure!", line)
+        self.assertIn("\\n", line)  # repr keeps the newline visible
+        self.assertEqual(len(line.splitlines()), 1)
+
+    def test_long_raw_text_is_clipped_with_an_ellipsis(self):
+        line = tui.build_debug_line(self._event(raw_text="z" * 400),
+                                    enabled=False)
+        self.assertIn("…", line)
+        self.assertNotIn("z" * (tui.RAW_CLIP + 1), line)
+
+    def test_no_escape_when_disabled(self):
+        self.assertNotIn("\x1b",
+                         tui.build_debug_line(self._event(), enabled=False))
+
+    def test_missing_keys_do_not_crash(self):
+        line = tui.build_debug_line({}, enabled=False)
+        self.assertIn("''", line)
+        self.assertIn("attempt 1", line)
+
+
+class TickerCounterDebugTest(unittest.TestCase):
+    """The extra raw line is printed only while /debug is on."""
+
+    def _emit(self, debug: bool) -> list:
+        state = make_state(enabled=False)
+        state.debug = debug
+        printed = []
+        counter = tui._TickerCounter(state, printed.append)
+        counter({"node": "menu", "valid": False, "out_tokens": 3,
+                 "wall_s": 0.2, "attempt": 0, "done_reason": "length",
+                 "raw_text": "Okay, the user wants"})
+        return printed
+
+    def test_debug_off_prints_only_the_ticker_line(self):
+        printed = self._emit(debug=False)
+        self.assertEqual(len(printed), 1)
+        self.assertNotIn("length", printed[0])
+
+    def test_debug_on_appends_the_raw_answer_line(self):
+        printed = self._emit(debug=True)
+        self.assertEqual(len(printed), 2)
+        self.assertIn("—", printed[0])        # the decision that failed
+        self.assertIn("length", printed[1])   # ... and why it failed
+        self.assertIn("Okay, the user wants", printed[1])
+
+    def test_tallies_are_unaffected_by_debug(self):
+        state = make_state(enabled=False)
+        state.debug = True
+        counter = tui._TickerCounter(state, lambda _line: None)
+        counter({"node": "menu", "valid": True, "out_tokens": 2,
+                 "wall_s": 0.1, "attempt": 0})
+        self.assertEqual((counter.decisions, counter.tokens), (1, 2))
+
+
 class NoColorTest(unittest.TestCase):
     def test_ticker_has_no_escape_when_disabled(self):
         event = {"node": "menu", "value": "x", "valid": True,
@@ -312,6 +387,40 @@ class SlashCommandTest(unittest.TestCase):
     def test_help_shows_the_voice_arguments(self):
         reply = tui.handle_command(make_state(enabled=False), "/help")
         self.assertIn("/voice [on|off|debug]", reply)
+
+    def test_help_lists_debug_apart_from_voice_debug(self):
+        # Two unrelated features; /help must not blur them together.
+        reply = tui.handle_command(make_state(enabled=False), "/help")
+        self.assertIn("/debug [on|off]", reply)
+        self.assertIn("raw model answer", reply)
+        self.assertIn("/voice [on|off|debug]", reply)
+
+    def test_debug_bare_reports_the_current_state(self):
+        state = make_state(enabled=False)
+        self.assertIn("debug is off", tui.handle_command(state, "/debug"))
+        state.debug = True
+        self.assertIn("debug is on", tui.handle_command(state, "/debug"))
+
+    def test_debug_on_and_off_set_the_flag(self):
+        state = make_state(enabled=False)
+        self.assertFalse(state.debug)  # off by default
+        tui.handle_command(state, "/debug on")
+        self.assertTrue(state.debug)
+        tui.handle_command(state, "/debug off")
+        self.assertFalse(state.debug)
+
+    def test_debug_garbage_argument_reports_usage(self):
+        state = make_state(enabled=False)
+        reply = tui.handle_command(state, "/debug loud")
+        self.assertIn("usage: /debug [on|off]", reply)
+        self.assertFalse(state.debug)
+
+    def test_debug_is_independent_of_voice_debug(self):
+        state = make_state(enabled=False)
+        tui.handle_command(state, "/debug on")
+        reply = tui.handle_command(state, "/voice debug")
+        self.assertIn("voice is off", reply)  # no live session to trace
+        self.assertTrue(state.debug)          # ... and /debug stays on
 
     def test_agents_lists_registered_specs(self):
         reply = tui.handle_command(make_state(enabled=False), "/agents")

@@ -56,6 +56,8 @@ FAST_S, STEADY_S = 0.4, 1.2 # decision-speed thresholds for bar color
 SHORT_TEXT_CLIP = 40
 PICKED_LINE_CLIP = 70
 QUESTION_CLIP = 48
+RAW_CLIP = 120              # /debug: raw completion clipped to this
+UNDER_INDENT = " " * 12     # column where a ticker line's value starts
 SIGN_OFF = "⌁ mesh offline — tokens saved, see you"
 _KIND_LABELS = {"menu": "menu", "pick_many": "pick", "short_text": "text"}
 
@@ -122,7 +124,7 @@ def _compress_value(event: dict) -> str:
 
 def _resolved_lines(event: dict, enabled: bool) -> list[str]:
     """One dim line per picked sentence, printed under a pick event."""
-    return [dim(f"            · {_clip(text, PICKED_LINE_CLIP)}", enabled)
+    return [dim(f"{UNDER_INDENT}· {_clip(text, PICKED_LINE_CLIP)}", enabled)
             for text in event.get("resolved") or []]
 
 
@@ -168,6 +170,38 @@ def build_ticker_line(event: dict, enabled: bool = True) -> str:
             + fg(CYAN, value, enabled) + pad
             + dim(f"{tokens}t·{wall:.2f}s", enabled))
     return "\n".join([line] + _resolved_lines(event, enabled))
+
+
+def _clip_repr(text, limit: int) -> str:
+    """``repr`` of ``text``, clipped to ``limit`` chars with an ellipsis.
+
+    The quotes make an empty or whitespace-only completion visible (``''``,
+    ``'\\n'``) where a bare string would look like a rendering bug; the
+    ellipsis sits outside them so it never reads as characters the model
+    actually emitted.
+    """
+    raw = str(text or "")
+    if len(raw) <= limit:
+        return repr(raw)
+    return repr(raw[:limit]) + "…"
+
+
+def build_debug_line(event: dict, enabled: bool = True) -> str:
+    """One dim line under the ticker showing the model's RAW answer.
+
+    Printed for every decision while ``/debug`` is on, aligned under the
+    ticker's value column like a resolved pick. It exists to make a ``—``
+    (unparseable) decision explain itself: ``done: length`` means the
+    node's token cap ended the completion before the model got to its
+    digit — the failure mode of a chat transport, where the ``ANSWER:``
+    prefill is only a hint and a chatty model spends the cap on preamble.
+    ``attempt`` is 1-based, so it counts up to the retry ladder's length.
+    """
+    raw = _clip_repr(event.get("raw_text"), RAW_CLIP)
+    reason = event.get("done_reason") or "?"
+    attempt = _num(event.get("attempt"), int) + 1
+    return dim(f"{UNDER_INDENT}· raw {raw} · done: {reason}"
+               f" · attempt {attempt}", enabled)
 
 
 def _wrap(text: str, width: int, indent: str = "") -> list[str]:
@@ -407,6 +441,8 @@ class ReplState:
     voice_config: object = None  # [voice] config section for /voice on
     llm_provider: str = "ollama"  # LLM transport name (NOT services.provider,
     # which is the web SearchProvider); families are raw-mode only
+    debug: bool = False     # /debug: show each decision's raw model answer
+    # (NOT voice.debug, which traces microphone transcripts)
 
 
 def _cmd_help(state: ReplState, arg: str) -> str:
@@ -418,6 +454,7 @@ def _cmd_help(state: ReplState, arg: str) -> str:
         ("/browser MODE [on-screen]", "fetch via http|plain|stealth"),
         ("/model NAME", "swap the deciding model"),
         ("/voice [on|off|debug]", "talk instead of typing (voice extras)"),
+        ("/debug [on|off]", "show the raw model answer per decision"),
         ("/setup", "re-run the config wizard"),
         ("/quit", "leave the mesh"),
     ]
@@ -634,6 +671,30 @@ def _cmd_voice(state: ReplState, arg: str) -> str:
     return _voice_on(state)
 
 
+_DEBUG_ARGS = ("", "on", "off")  # accepted /debug arguments
+
+
+def _cmd_debug(state: ReplState, arg: str) -> str:
+    """Toggle the raw-answer line under every ticker decision.
+
+    Distinct from ``/voice debug``, which traces microphone transcripts:
+    this one shows what the model actually completed, so a decision that
+    renders ``—`` names its own cause instead of just looking broken.
+    Bare ``/debug`` reports the current state.
+    """
+    want = arg.strip().lower()
+    if want not in _DEBUG_ARGS:
+        return fg(AMBER, "usage: /debug [on|off]", state.enabled)
+    if want == "":
+        status = "on" if state.debug else "off"
+        return dim(f"debug is {status}", state.enabled)
+    state.debug = want == "on"
+    if not state.debug:
+        return dim("debug off", state.enabled)
+    return dim("debug on — raw model answer under each decision",
+               state.enabled)
+
+
 def _cmd_quit(state: ReplState, arg: str) -> str:
     """Flip the running flag so the loop exits after this command."""
     state.running = False
@@ -642,7 +703,8 @@ def _cmd_quit(state: ReplState, arg: str) -> str:
 
 _COMMANDS = {"/help": _cmd_help, "/agents": _cmd_agents, "/deep": _cmd_deep,
              "/browser": _cmd_browser, "/model": _cmd_model,
-             "/voice": _cmd_voice, "/setup": _cmd_setup, "/quit": _cmd_quit}
+             "/voice": _cmd_voice, "/debug": _cmd_debug,
+             "/setup": _cmd_setup, "/quit": _cmd_quit}
 
 
 def handle_command(state: ReplState, line: str) -> str:
@@ -680,13 +742,19 @@ class _TickerCounter:
         self.retries = 0
 
     def __call__(self, event: dict) -> None:
-        """Trace ``on_event`` hook: print one ticker line, update tallies."""
+        """Trace ``on_event`` hook: print one ticker line, update tallies.
+
+        With ``/debug`` on, each ticker line is followed by the raw
+        completion it was parsed from.
+        """
         self.decisions += 1
         self.tokens += int(event.get("out_tokens", 0) or 0)
         self.model_seconds += _num(event.get("wall_s"), float)
         if _num(event.get("attempt"), int) > 0:
             self.retries += 1
         self.sink(build_ticker_line(event, self.state.enabled))
+        if self.state.debug:
+            self.sink(build_debug_line(event, self.state.enabled))
 
     def stats(self, seconds: float) -> dict:
         """Tallies plus the task wall time, ready for the task report."""
@@ -1051,24 +1119,32 @@ def main(model: str = None) -> None:
             state.memory.dump(state.memory_path)
 
 
+# Demo ticker events; the last one is a decision truncated by the node's
+# token cap, the failure /debug exists to explain.
+_DEMO_EVENTS = (
+    {"node": "menu", "value": "open result 2: Anthropic pricing",
+     "valid": True, "out_tokens": 2, "wall_s": 0.31},
+    {"node": "pick_many", "value": [3, 7], "valid": True, "resolved":
+     ["Opus pricing was updated in June.", "Input tokens cost $15/M."],
+     "out_tokens": 5, "wall_s": 0.62},
+    {"tag": "curate", "node": "menu", "value": "keep note 3",
+     "valid": True, "out_tokens": 1, "wall_s": 0.18},
+    {"node": "short_text", "value": "anthropic api price per token",
+     "valid": True, "out_tokens": 8, "wall_s": 1.55},
+    {"node": "menu", "valid": False, "out_tokens": 3, "wall_s": 0.22,
+     "attempt": 2, "done_reason": "length",
+     "raw_text": "Okay, so the user is asking me to"},
+)
+
+
 def _demo() -> None:
     """Non-interactive render of every TUI piece for eyeballing."""
     enabled = _color_enabled()
     print(build_banner("qwen2.5:1.5b-instruct", 2, enabled))
     print()
-    events = [
-        {"node": "menu", "value": "open result 2: Anthropic pricing",
-         "valid": True, "out_tokens": 2, "wall_s": 0.31},
-        {"node": "pick_many", "value": [3, 7], "valid": True, "resolved":
-         ["Opus pricing was updated in June.", "Input tokens cost $15/M."],
-         "out_tokens": 5, "wall_s": 0.62},
-        {"tag": "curate", "node": "menu", "value": "keep note 3",
-         "valid": True, "out_tokens": 1, "wall_s": 0.18},
-        {"node": "short_text", "value": "anthropic api price per token",
-         "valid": True, "out_tokens": 8, "wall_s": 1.55},
-    ]
-    for event in events:
+    for event in _DEMO_EVENTS:
         print(build_ticker_line(event, enabled))
+    print(build_debug_line(_DEMO_EVENTS[-1], enabled))  # as /debug on shows it
     print(dim(f"  {ZAP} routed {CHEVRON} ", enabled)
           + fg(VIOLET, "web", enabled))
     print()
