@@ -16,6 +16,13 @@ dependencies = []
 [project.optional-dependencies]
 web = ["requests", "beautifulsoup4", "markdownify"]
 browser = ["selenium>=4.6"]
+stt = ["vosk", "sounddevice"]
+tts = ["piper-tts", "sounddevice", "numpy"]
+voice = ["3toks[stt,tts]"]
+camera = ["opencv-python"]
+relay = [
+    "RPi.GPIO; platform_machine == 'aarch64' or platform_machine == 'armv7l' or platform_machine == 'armv6l'",
+]
 
 [project.scripts]
 threetoks = "threetoks.tui:main"

@@ -563,5 +563,38 @@ class FakeSpecWithRun:
     run: object
 
 
+class ModelSwapOptionalAgentsTest(unittest.TestCase):
+    """Regression: /model must re-derive the capability agents."""
+
+    def test_swap_to_vision_model_registers_look_and_back_out(self):
+        state = make_state()
+        state.services.capture_frame = lambda: "b64"
+        tui.handle_command(state, "/model llava:7b")
+        self.assertIn("look", [spec.name for spec in state.specs])
+        tui.handle_command(state, "/model qwen2.5:1.5b-instruct")
+        self.assertNotIn("look", [spec.name for spec in state.specs])
+
+    def test_light_survives_model_swaps_when_relay_is_wired(self):
+        state = make_state()
+        state.services.relay = object()
+        tui.handle_command(state, "/model qwen2.5:1.5b-instruct")
+        self.assertIn("light", [spec.name for spec in state.specs])
+
+    def test_without_capabilities_specs_stay_untouched(self):
+        state = make_state()
+        before = list(state.specs)
+        tui.handle_command(state, "/model qwen2.5:1.5b-instruct")
+        self.assertEqual(state.specs, before)
+
+    def test_family_notice_only_applies_to_the_ollama_provider(self):
+        raw = make_state()
+        self.assertIn("unknown template family",
+                      tui.handle_command(raw, "/model gpt-4o-mini"))
+        chat = make_state()
+        chat.llm_provider = "openrouter"
+        self.assertNotIn("unknown template family",
+                         tui.handle_command(chat, "/model gpt-4o-mini"))
+
+
 if __name__ == "__main__":
     unittest.main()

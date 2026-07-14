@@ -9,10 +9,15 @@ import importlib
 import sys
 import unittest
 
-EXTRAS = ("requests", "bs4", "markdownify", "selenium")
+EXTRAS = ("requests", "bs4", "markdownify", "selenium",
+          "vosk", "sounddevice", "piper", "numpy", "cv2", "RPi")
 CORE_MODULES = ("threetoks.cli", "threetoks.tui", "threetoks.research",
                 "threetoks.agents", "threetoks.memory",
-                "threetoks.web.vertical", "threetoks.web.target")
+                "threetoks.web.vertical", "threetoks.web.target",
+                "threetoks.backend.providers", "threetoks.voice.stt",
+                "threetoks.voice.tts", "threetoks.voice.session",
+                "threetoks.camera", "threetoks.relay",
+                "threetoks.agents.light", "threetoks.agents.look")
 
 
 class _BlockExtras:
