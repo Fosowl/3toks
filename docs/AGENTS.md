@@ -174,11 +174,17 @@ the reason for each one:
    Never ask the model to summarize or restate source content — that
    reintroduces hallucination risk the numbered-pointer design exists to
    remove.
-4. **Answers are extractive by default.** When notes exist, offer a final
-   `PickManyNode` over the collected notes and join the chosen ones
-   verbatim as the answer; only fall back to a free-text `ShortTextNode`
-   synthesis step when there are no notes to point at. Eval data showed
-   free synthesis garbles facts the notes already hold.
+4. **Answers are grounded generation over curated notes.** When notes
+   exist, rank them down with a curation `PickManyNode` (pick order =
+   ranking), then run ONE short `ShortTextNode` generation with the notes
+   on screen that answers the task in plain words — the web and files
+   verticals share this shape. Never dump picked notes verbatim as the
+   default answer (a live files run answered "what are these files?" with
+   naked code lines), and never generate without the notes visible:
+   ungrounded synthesis garbles facts the notes already hold (eval data).
+   If the generation keeps bleeding menu digits, fall back to quoting the
+   task-closest notes (`rank_by_overlap`) — the fallback stays aimed at
+   the goal, not at store order.
 5. **Budgets and guards are mandatory, not optional.** Every multi-step
    agent needs: a step budget (`max_steps` passed to `run_episode`, or an
    equivalent `steps_left` counter), a forced-answer trigger a few steps

@@ -96,7 +96,7 @@ registered agent (`casual`).
 |---|---|---|
 | `casual` | small talk, quick replies | canned-reply bank ranked by keyword overlap; exact hint match answers with zero model calls; falls through to a bounded free-text reply only when nothing fits |
 | `web` | research questions using internet search | thin wrapper over the judged deep-research loop (below); full vertical with search, page reading, link following, notes |
-| `files` | questions about local files/folders | read-only explorer sandboxed under `services.files_root`; same menu/notes/answer shape as the web vertical |
+| `files` | questions about local files/folders | explorer sandboxed under `services.files_root`; same menu/notes/answer shape as the web vertical; can run a one-line shell command once a deterministic deny-list and a fresh one-token safety judge both clear it |
 
 Slash commands in the TUI: `/help`, `/agents` (list registered agents),
 `/deep N` (set research rounds), `/browser on|off`, `/model NAME` (swap the

@@ -1,21 +1,26 @@
-"""Files agent: read-only exploration of local files and folders.
+"""Files agent: exploration of local files and folders.
 
 A Vertical mirroring the web-research one (threetoks/web/vertical.py):
 the harness owns everything deterministic (listing, sandboxing, reading,
 chunking, note storage, loop guards); the model only answers menus, picks
-line numbers to note, and points at the notes that answer.
+line numbers to note, writes the odd shell command, and phrases the final
+answer from the notes.
 
 State machine: DIR -> FILE -> (auto note pass) -> ... -> ANSWER, rooted at
-services.files_root, which the agent never escapes.
+services.files_root, which the agent never escapes. Browsing is read-only;
+the one write-capable surface is the shell option, which runs only after a
+deterministic deny-list AND a fresh-context one-digit safety judge both
+clear the command.
 """
 import re
+import subprocess
 from pathlib import Path
 
 from threetoks.agents.base import AgentSpec
 from threetoks.engine import run_episode
 from threetoks.nodes import ESCAPE, MenuNode, PickManyNode, ShortTextNode
 from threetoks.render import Episode
-from threetoks.web.notes import NoteStore
+from threetoks.web.notes import NoteStore, rank_by_overlap
 
 AGENT_NAME = "files"
 AGENT_DESCRIPTION = ("browse files and folders on this machine — only "
@@ -27,20 +32,46 @@ MAX_FILES_OPENED = 4
 CHUNK_LINES = 25
 MAX_FILE_BYTES = 200_000
 NAME_CHARS = 60
-ANSWER_MAX_TOKENS = 48
-ANSWER_PICK_POOL = 9
+ANSWER_MAX_TOKENS = 80
+QUOTE_FALLBACK_NOTES = 2
 FORCE_ANSWER_AT_STEPS_LEFT = 3
 INITIAL_STEPS_LEFT = 40
 MAX_STEPS = 20
+
+MAX_SHELL_RUNS = 3
+SHELL_TIMEOUT_S = 10
+SHELL_LINE_CHARS = 200
+COMMAND_MAX_TOKENS = 24
 
 OPT_GO_UP = "go up to the parent folder"
 OPT_ANSWER = "answer the task now"
 OPT_BACK = "back to the folder"
 OPT_NEXT_CHUNK = "read more of this file"
+OPT_SHELL = "run a shell command to inspect files"
 FINAL_PREFILL = "FINAL ANSWER:"
+CMD_PREFILL = "COMMAND:"
 # A bare menu digit or comma-index list ("1" / "1,2,3") is menu-format
 # bleed, not an answer; a real numeric answer like "42" is fine.
 _MENU_BLEED = re.compile(r"\d|\d+(\s*,\s*\d+)+\s*,?")
+
+# Shell safety layer 1 (deterministic, free): no chaining, piping,
+# redirection, or substitution; no deny-listed write/execute/network
+# words anywhere in the command; no path that could leave the sandbox.
+_SHELL_META_RE = re.compile(r"[;&|<>`]|\$\(")
+_SHELL_DENY_WORDS = frozenset((
+    "rm", "rmdir", "mv", "cp", "dd", "ln", "touch", "mkdir", "chmod",
+    "chown", "chgrp", "kill", "pkill", "sudo", "su", "sh", "bash", "zsh",
+    "python", "python3", "perl", "ruby", "node", "xargs", "eval", "exec",
+    "curl", "wget", "ssh", "scp", "nc", "git", "make", "open", "tee"))
+
+# Shell safety layer 2: a fresh-context model judge. Two semantically
+# described options (never bare yes/no — design rule), one digit out.
+SHELL_JUDGE_PREFIX = ("You judge whether shell commands are safe to run. "
+                      "Only commands that read are safe.")
+OPT_CMD_SAFE = ("safe — only reads: lists, views, counts, or searches "
+                "files (like ls, cat, head, grep, wc, find)")
+OPT_CMD_UNSAFE = ("unsafe — writes, deletes, moves, or changes anything, "
+                  "runs programs, or touches the network")
 
 BINARY_SUFFIXES = frozenset({
     ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".pdf",
@@ -95,25 +126,65 @@ def _file_lines(path: Path) -> list[str]:
     return [line.strip() for line in text.splitlines() if line.strip()]
 
 
-class FileExplorerVertical:
-    """Drives one read-only file-exploration episode under a fixed root."""
+def dangerous_command(command: str) -> bool:
+    """Deterministic deny-list: block anything not plainly read-only.
 
-    def __init__(self, task: str, files_root: Path, notes: NoteStore):
+    Free pre-check before the model judge (design rule: deterministic
+    checks first). Rejects shell metacharacters, deny-listed words, and
+    any token that could leave the sandbox root ("/...", "~", "..").
+    """
+    if _SHELL_META_RE.search(command):
+        return True
+    for token in command.split():
+        if token.startswith(("/", "~")) or ".." in token:
+            return True
+    words = set(re.findall(r"[a-z0-9_]+", command.lower()))
+    return bool(words & _SHELL_DENY_WORDS)
+
+
+def command_is_safe(command: str, policy) -> bool:
+    """Fresh-context one-digit safety judge; fails closed.
+
+    A separate Episode sees ONLY the command — never the exploration
+    context — so text read from files cannot lobby the judge. Anything
+    but an explicit "safe" pick blocks the run.
+    """
+    episode = Episode(SHELL_JUDGE_PREFIX, f"$ {command}")
+    node = MenuNode(f"Judge this command: $ {command}",
+                    [OPT_CMD_SAFE, OPT_CMD_UNSAFE], escape=False)
+    node.tag = "cmdsafe"
+    decision = policy.decide(episode, node)
+    return decision.valid and decision.value == OPT_CMD_SAFE
+
+
+class FileExplorerVertical:
+    """Drives one file-exploration episode under a fixed sandbox root.
+
+    ``policy`` powers the fresh-context shell safety judge; without one
+    (older callers, tests) the shell option simply never appears.
+    """
+
+    def __init__(self, task: str, files_root: Path, notes: NoteStore,
+                 policy=None):
         self.task = task
         self.root = Path(files_root).resolve()
         self.cwd = self.root
         self.notes = notes
+        self.policy = policy
         self.episode = Episode(PREFIX, task)
         self.steps_left = INITIAL_STEPS_LEFT
         self.files_opened = 0
+        self.shell_runs = 0
         self.entries: list[Path] = []
         self.file_path: Path | None = None
         self.file_lines: list[str] = []
         self.chunk_start = 0
+        self.note_source = ""
         self.pending = None
         self.answer = None
         self.answer_retried = False
-        self._awaiting_answer_pick = False
+        self._first_bleed = ""
+        self._awaiting_curation = False
         self._option_map: dict[str, Path] = {}
         self._show_dir("> started at the root folder")
 
@@ -135,16 +206,19 @@ class FileExplorerVertical:
         """True when the queued node already belongs to the answer flow."""
         final_text = isinstance(self.pending, ShortTextNode) \
             and self.pending.prefill == FINAL_PREFILL
-        return final_text or (self._awaiting_answer_pick
+        return final_text or (self._awaiting_curation
                               and isinstance(self.pending, PickManyNode))
 
     def apply(self, node, decision):
         """Execute one decision; invalid decisions map to the escape path."""
         value = decision.value if decision.valid else ESCAPE
-        if isinstance(node, PickManyNode) and self._awaiting_answer_pick:
-            self._apply_answer_pick(decision.value if decision.valid else [])
+        if isinstance(node, PickManyNode) and self._awaiting_curation:
+            self._apply_curation(decision.value if decision.valid else [])
         elif isinstance(node, PickManyNode):
             self._apply_notes(decision.value if decision.valid else [])
+        elif isinstance(node, ShortTextNode) \
+                and node.prefill == CMD_PREFILL:
+            self._handle_command(decision.value if decision.valid else "")
         elif isinstance(node, ShortTextNode):
             self._accept_answer(decision.value if decision.valid else "")
         else:
@@ -154,7 +228,8 @@ class FileExplorerVertical:
         """Episode outcome with note provenance."""
         return {"task": self.task, "answer": self.answer,
                 "notes": self.notes.render(),
-                "files_opened": self.files_opened}
+                "files_opened": self.files_opened,
+                "shell_runs": self.shell_runs}
 
     # ------------------------------------------------------------ menus
 
@@ -162,16 +237,28 @@ class FileExplorerVertical:
         options = list(self._build_open_options())
         if self.cwd != self.root:
             options.append(OPT_GO_UP)
+        if self._shell_available():
+            options.append(OPT_SHELL)
         if self.notes.count():
             options.append(OPT_ANSWER)
         return MenuNode("What next?", options or [OPT_ANSWER])
 
+    def _shell_available(self) -> bool:
+        """Shell needs a policy (for the safety judge) and budget left."""
+        return self.policy is not None and self.shell_runs < MAX_SHELL_RUNS
+
     def _build_open_options(self):
-        """Up to MAX_OPEN_OPTIONS openable entries, mapped for opening."""
+        """Openable entries, mapped for opening; capped to fit the menu.
+
+        The cap shrinks by one when the shell option is on the menu so
+        the worst case (opens + go up + shell + answer + escape) stays
+        within the 9-line menu limit.
+        """
         self._option_map = {}
+        cap = MAX_OPEN_OPTIONS - (1 if self._shell_available() else 0)
         if self.files_opened >= MAX_FILES_OPENED:
             self.entries = [e for e in self.entries if e.is_dir()]
-        for entry in self.entries[:MAX_OPEN_OPTIONS]:
+        for entry in self.entries[:cap]:
             text = f"open: {entry.name[:NAME_CHARS]}"
             self._option_map[text] = entry
             yield text
@@ -188,46 +275,77 @@ class FileExplorerVertical:
     # ------------------------------------------------------------ answer flow
 
     def _answer_flow(self):
-        """Answer extractively from notes; free-text only without notes."""
-        if self.notes.count():
-            self.episode.open_observation(
-                f"NOTES COLLECTED:\n{self.notes.render()}",
-                "> moving to final answer")
-            self.file_path = None
-            self._awaiting_answer_pick = True
-            pool = self.notes.texts()[:ANSWER_PICK_POOL]
-            return PickManyNode(
-                f"Which notes directly answer this question: {self.task}",
-                len(pool), max_picks=2, items=pool)
+        """Curate the notes (once), then phrase the answer from them.
+
+        Mirrors the web vertical's harvest→curate→synthesise shape:
+        quoting raw notes verbatim answered "what are these files?" with
+        naked code lines — a short generation grounded ONLY in the notes
+        states what they mean, in plain words aimed at the task.
+        """
+        if self._needs_curation():
+            return self._curate_node()
         return self._synthesis_node()
 
-    def _synthesis_node(self) -> ShortTextNode:
-        """Free-text fallback when there are no notes to quote."""
-        self.episode.open_observation("NOTES COLLECTED:\n(none)",
-                                      "> moving to final answer")
-        self.file_path = None
-        self._awaiting_answer_pick = False
-        return ShortTextNode(
-            f"Answer this question directly in one short sentence "
-            f"(words, not a menu number): {self.task}",
-            FINAL_PREFILL, max_tokens=ANSWER_MAX_TOKENS)
+    def _needs_curation(self) -> bool:
+        """True when the note store is big enough to be worth ranking."""
+        from threetoks.research import CURATE_KEEP  # deferred: keeps import light
+        return self.notes.count() > CURATE_KEEP
 
-    def _apply_answer_pick(self, picked: list[int]) -> None:
-        """Quote the chosen notes verbatim as the final answer."""
-        self._awaiting_answer_pick = False
-        texts = self.notes.texts()[:ANSWER_PICK_POOL]
-        chosen = [texts[i - 1] for i in picked if 1 <= i <= len(texts)]
-        if chosen:
-            self.answer = "\n".join(chosen)
-            return
+    def _curate_node(self) -> PickManyNode:
+        """PICK_MANY that ranks notes to the best CURATE_KEEP, most first."""
+        from threetoks.research import (  # deferred: keeps import light
+            build_curate_node, curation_pool)
+        self.notes = curation_pool(self.notes)
+        self.episode.open_observation(
+            f"NOTES COLLECTED:\n{self.notes.render()}",
+            "> curating the strongest evidence")
+        self.file_path = None
+        self._awaiting_curation = True
+        return build_curate_node(self.task, self.notes.texts())
+
+    def _apply_curation(self, picked: list[int]) -> None:
+        """Replace the store with the ranked selection, then synthesise."""
+        from threetoks.research import CURATE_KEEP  # deferred: keeps import light
+        self._awaiting_curation = False
+        ranking = picked or list(range(1, CURATE_KEEP + 1))
+        self.notes = self.notes.select(ranking)
         self.pending = self._synthesis_node()
 
+    def _synthesis_node(self) -> ShortTextNode:
+        """Generate the answer from the (curated) notes, or "(no answer)".
+
+        Notes are shown WITHOUT their "(source: ...)" tags — a live run
+        showed the 1.5b copying the tags into the answer text.
+        """
+        body = "\n".join(f"[{i}] {t}"
+                         for i, t in enumerate(self.notes.texts(), 1)) \
+            or "(none)"
+        self.episode.open_observation(f"NOTES COLLECTED:\n{body}",
+                                      "> moving to final answer")
+        self.file_path = None
+        return ShortTextNode(
+            f"Using ONLY the notes above, write one or two short plain "
+            f"sentences that answer: {self.task}. Reply with words.",
+            FINAL_PREFILL, max_tokens=ANSWER_MAX_TOKENS)
+
     def _accept_answer(self, text: str) -> None:
-        """Accept a free-text answer, retrying once on menu-format bleed."""
-        stripped = text.strip()
-        if stripped and _MENU_BLEED.fullmatch(stripped) \
-                and not self.answer_retried:
+        """Accept a synthesised answer, retrying once on menu-format bleed.
+
+        On a second bleed the generation is abandoned: with notes the
+        answer falls back to quoting the notes closest to the task (still
+        real evidence), otherwise "(no answer)". A persistently repeated
+        single digit is accepted — it may be a real numeric answer.
+        """
+        bleed = bool(text) and bool(_MENU_BLEED.fullmatch(text.strip()))
+        if bleed and self.answer_retried:
+            repeated_digit = (text.strip() == self._first_bleed
+                              and len(text.strip()) == 1)
+            self.answer = text.strip() if repeated_digit \
+                else self._quote_fallback()
+            return
+        if bleed:
             self.answer_retried = True
+            self._first_bleed = text.strip()
             self.pending = ShortTextNode(
                 f"That was a number, not an answer. In plain words, "
                 f"state the answer to: {self.task}",
@@ -235,11 +353,19 @@ class FileExplorerVertical:
             return
         self.answer = text or "(no answer)"
 
+    def _quote_fallback(self) -> str:
+        """Quote the notes closest to the task when synthesis keeps bleeding."""
+        top = rank_by_overlap(self.notes.texts(), self.task,
+                              QUOTE_FALLBACK_NOTES)
+        return "\n".join(top) if top else "(no answer)"
+
     # ------------------------------------------------------------ transitions
 
     def _apply_menu(self, value: str) -> None:
         if value == OPT_ANSWER:
             self.pending = self._answer_flow()
+        elif value == OPT_SHELL:
+            self.pending = self._command_node()
         elif value == OPT_GO_UP or (value == ESCAPE and not self.file_path):
             self._go_up()
         elif value == OPT_NEXT_CHUNK:
@@ -255,7 +381,7 @@ class FileExplorerVertical:
     def _apply_notes(self, picked: list[int]) -> None:
         chunk = self._chunk()
         for idx in picked:
-            self.notes.add(chunk[idx - 1], str(self.file_path),
+            self.notes.add(chunk[idx - 1], self.note_source,
                            self.chunk_start + idx)
         self.episode.log_session(f"> noted {len(picked)} lines")
         self.pending = None
@@ -279,8 +405,66 @@ class FileExplorerVertical:
             self.pending = None
             return
         self.file_path, self.file_lines, self.chunk_start = path, lines, 0
+        self.note_source = str(path)
         self.files_opened += 1
         self._show_file_chunk(f"> opened file '{path.name[:NAME_CHARS]}'")
+        self._queue_note_pass()
+
+    # ------------------------------------------------------------ shell
+
+    def _command_node(self) -> ShortTextNode:
+        """Bounded free-text proposal for one read-only shell command."""
+        return ShortTextNode(
+            "Write ONE read-only shell command (like ls, cat, grep, wc, "
+            "find) that helps answer the task. No pipes or redirection.",
+            CMD_PREFILL, max_tokens=COMMAND_MAX_TOKENS)
+
+    def _handle_command(self, text: str) -> None:
+        """Run a proposed command only past both safety layers.
+
+        Deterministic deny-list first (free), then the fresh-context
+        model judge; either rejection just logs. Every proposal burns one
+        shell run, so a looping proposer cannot stall the episode.
+        """
+        self.shell_runs += 1
+        command = text.strip().strip("`").strip()
+        if not command or dangerous_command(command):
+            self.episode.log_session("> command blocked (looked unsafe)")
+            self.pending = None
+            return
+        if not command_is_safe(command, self.policy):
+            self.episode.log_session("> command blocked by the safety judge")
+            self.pending = None
+            return
+        self._run_command(command)
+
+    def _run_command(self, command: str) -> None:
+        """Execute an approved command in the sandbox root, show its output.
+
+        Output lines are numbered and get the same note pass as a file
+        chunk, so command results can be quoted with provenance.
+        """
+        try:
+            proc = subprocess.run(command, shell=True, cwd=self.root,
+                                  capture_output=True, text=True,
+                                  errors="replace", timeout=SHELL_TIMEOUT_S)
+            raw = proc.stdout or proc.stderr
+        except (OSError, subprocess.SubprocessError):
+            self.episode.log_session(f"> command failed: {command[:40]}")
+            self.pending = None
+            return
+        lines = [line.strip()[:SHELL_LINE_CHARS]
+                 for line in raw.splitlines() if line.strip()]
+        self.file_path = None
+        self.file_lines = lines[:CHUNK_LINES] or ["(no output)"]
+        self.chunk_start = 0
+        self.note_source = f"$ {command}"
+        numbered = "\n".join(f"[{i}] {s}"
+                             for i, s in enumerate(self.file_lines, 1))
+        self.episode.open_observation(
+            f"COMMAND OUTPUT of '$ {command[:NAME_CHARS]}':\n{numbered}",
+            f"> ran command '{command[:NAME_CHARS]}'")
+        self.pending = None
         self._queue_note_pass()
 
     def _go_up(self) -> None:
@@ -340,7 +524,8 @@ class FileExplorerVertical:
 
 def run(task: str, services, policy) -> dict:
     """Explore files under services.files_root and answer the task."""
-    vertical = FileExplorerVertical(task, services.files_root, NoteStore())
+    vertical = FileExplorerVertical(task, services.files_root, NoteStore(),
+                                    policy=policy)
     result = run_episode(vertical, policy, max_steps=MAX_STEPS)
     result["agent"] = AGENT_NAME
     return result
@@ -357,20 +542,42 @@ if __name__ == "__main__":
     from threetoks.services import Services
 
     class _Backend:
-        def __init__(self, texts):
-            self.texts = list(texts)
+        """Menus answered by option label (permutation-proof); rest scripted."""
+
+        def __init__(self, script):
+            self.script = list(script)
 
         def complete(self, model, raw_prompt, opts):
-            return GenResult(self.texts.pop(0) if self.texts else " 9",
-                             5, 2, 0.0, "stop")
+            kind, payload = self.script.pop(0)
+            if kind == "menu":
+                match = re.search(rf"(\d+) = {re.escape(payload)}",
+                                  raw_prompt)
+                return GenResult(f" {match.group(1)}" if match else " 9",
+                                 5, 2, 0.0, "stop")
+            return GenResult(f" {payload}", 5, 2, 0.0, "stop")
+
+    assert dangerous_command("rm -rf .")
+    assert dangerous_command("cat x.txt > y.txt")
+    assert dangerous_command("cat ../secret")
+    assert not dangerous_command("wc -l data.csv")
 
     with tempfile.TemporaryDirectory() as root:
         (Path(root) / "facts.txt").write_text(
             "The tower is 42 meters tall.\n", encoding="utf-8")
-        policy = Policy(_Backend([" 1", " 1", " 2", " 1"]),
+        script = [("menu", "open: facts.txt"), ("pick", "1"),
+                  ("menu", OPT_ANSWER),
+                  ("text", "The tower is 42 meters tall.")]
+        policy = Policy(_Backend(script),
                         PolicyConfig(ModelSpec("m", FAMILY_CHATML)))
         outcome = SPEC.run("how tall is the tower?",
                            Services(files_root=Path(root)), policy)
         assert outcome["agent"] == "files", outcome
         assert "42 meters" in (outcome["answer"] or ""), outcome
+
+        judge = Policy(_Backend([("menu", "safe")]),
+                       PolicyConfig(ModelSpec("m", FAMILY_CHATML)))
+        assert command_is_safe("wc -l facts.txt", judge)
+        judge = Policy(_Backend([("menu", "unsafe")]),
+                       PolicyConfig(ModelSpec("m", FAMILY_CHATML)))
+        assert not command_is_safe("wc -l facts.txt", judge)
     print("smoke OK")
