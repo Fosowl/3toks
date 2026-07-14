@@ -190,7 +190,11 @@ vision model deliberately, e.g. `ollama pull llava` + `/model llava`.
 **Relay — `3toks[relay]`** (RPi.GPIO, installs only on ARM). On a
 Raspberry Pi, registers the `light` agent driving an active-low relay
 board on BCM pin `[relay] pin` (default 17). On any other machine the
-extra installs nothing and the agent stays unregistered.
+extra installs nothing and the agent stays unregistered. The light agent
+is intentionally minimal — treat it as the **template for your own Pi
+hardware tools**; the step-by-step recipe (hardware module, agent,
+registration, packaging, tests) is in
+[docs/AGENTS.md](docs/AGENTS.md#hardware-agents-raspberry-pi-the-light-agent-is-a-template).
 
 ## Deep research
 
