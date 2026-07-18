@@ -40,10 +40,11 @@ class Policy:
     """Turns (episode, node) into a Decision via the backend."""
 
     def __init__(self, backend: LLMBackend, config: PolicyConfig,
-                 tracer: Tracer | None = None):
+                 tracer: Tracer | None = None, debug: bool = False):
         self.backend = backend
         self.config = config
         self.tracer = tracer or Tracer(None)
+        self.debug = debug
         chat = getattr(backend, "chat", None)  # chat-API vs raw transport
         self._chat = chat if callable(chat) else None
 
@@ -133,14 +134,32 @@ class Policy:
                            temperature=temperature,
                            stop=tuple(getattr(node, "stop", ())),
                            num_ctx=self.config.num_ctx, images=images)
-            return self._chat(self.config.spec.name,
-                              ChatPrompt(system, user, prefill), opts)
+            result = self._chat(self.config.spec.name,
+                                ChatPrompt(system, user, prefill), opts)
+            if self.debug:
+                self._debug_dump(ChatPrompt(system, user, prefill), result)
+            return result
         prompt = build_raw_prompt(self.config.spec, user, system=system,
                                   prefill=prefill)
         opts = GenOpts(max_tokens=node.max_tokens, temperature=temperature,
                        stop=self._stops(node), num_ctx=self.config.num_ctx,
                        images=images)
-        return self.backend.complete(self.config.spec.name, prompt, opts)
+        result = self.backend.complete(self.config.spec.name, prompt, opts)
+        if self.debug:
+            self._debug_dump(prompt, result)
+        return result
+
+    def _debug_dump(self, prompt, result: GenResult) -> None:
+        """Emit a debug event with the full prompt and result text."""
+        prompt_text = prompt.user if isinstance(prompt, ChatPrompt) else str(prompt)
+        self.tracer.record({
+            "debug": True,
+            "prompt_text": prompt_text,
+            "result_text": result.text,
+            "prompt_tokens": result.prompt_tokens,
+            "out_tokens": result.out_tokens,
+            "done_reason": result.done_reason,
+        })
 
     def _stops(self, node) -> tuple[str, ...]:
         """The node's stop sequences plus the family's end-of-turn token.
@@ -163,6 +182,8 @@ class Policy:
         opts = GenOpts(max_tokens=budget, temperature=temperature,
                        stop=(THINK_STOP,), num_ctx=self.config.num_ctx)
         result = self.backend.complete(self.config.spec.name, prompt, opts)
+        if self.debug:
+            self._debug_dump(prompt, result)
         return f"<think>\n{result.text}\n{THINK_STOP}\n\n"
 
     def _permutation(self, node, step: int, attempt: int) -> tuple[int, ...]:

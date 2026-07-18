@@ -57,9 +57,27 @@ SHORT_TEXT_CLIP = 40
 PICKED_LINE_CLIP = 70
 QUESTION_CLIP = 48
 RAW_CLIP = 120              # /debug: raw completion clipped to this
+DEBUG_PROMPT_CLIP = 200     # /debug: prompt text clipped to this
+DEBUG_RESULT_CLIP = 120     # /debug: result text clipped to this
 UNDER_INDENT = " " * 12     # column where a ticker line's value starts
 SIGN_OFF = "⌁ mesh offline — tokens saved, see you"
 _KIND_LABELS = {"menu": "menu", "pick_many": "pick", "short_text": "text"}
+
+
+def build_debug_tokens_line(event: dict, enabled: bool = True) -> str:
+    """One dim line showing the full prompt and result tokens for a model call.
+
+    Printed for every LLM request while ``/debug`` is on, aligned under the
+    ticker's value column. Shows the clipped prompt text, result text, and
+    token counts.
+    """
+    prompt = _clip_repr(event.get("prompt_text"), DEBUG_PROMPT_CLIP)
+    result = _clip_repr(event.get("result_text"), DEBUG_RESULT_CLIP)
+    pt = _num(event.get("prompt_tokens"), int)
+    ot = _num(event.get("out_tokens"), int)
+    reason = event.get("done_reason") or "?"
+    return dim(f"{UNDER_INDENT}· in {prompt} → out {result}"
+               f" · {pt}pt/{ot}ot · {reason}", enabled)
 
 
 def _color_enabled(stream=None) -> bool:
@@ -675,7 +693,7 @@ _DEBUG_ARGS = ("", "on", "off")  # accepted /debug arguments
 
 
 def _cmd_debug(state: ReplState, arg: str) -> str:
-    """Toggle the raw-answer line under every ticker decision.
+    """Toggle the raw-answer and token-dump lines under every ticker decision.
 
     Distinct from ``/voice debug``, which traces microphone transcripts:
     this one shows what the model actually completed, so a decision that
@@ -689,9 +707,11 @@ def _cmd_debug(state: ReplState, arg: str) -> str:
         status = "on" if state.debug else "off"
         return dim(f"debug is {status}", state.enabled)
     state.debug = want == "on"
+    if state.policy is not None and hasattr(state.policy, "debug"):
+        state.policy.debug = state.debug
     if not state.debug:
         return dim("debug off", state.enabled)
-    return dim("debug on — raw model answer under each decision",
+    return dim("debug on — raw model answer + token dump under each decision",
                state.enabled)
 
 
@@ -745,8 +765,13 @@ class _TickerCounter:
         """Trace ``on_event`` hook: print one ticker line, update tallies.
 
         With ``/debug`` on, each ticker line is followed by the raw
-        completion it was parsed from.
+        completion it was parsed from, and a token-level dump of the
+        full prompt and result for every model call.
         """
+        if event.get("debug"):
+            if self.state.debug:
+                self.sink(build_debug_tokens_line(event, self.state.enabled))
+            return
         self.decisions += 1
         self.tokens += int(event.get("out_tokens", 0) or 0)
         self.model_seconds += _num(event.get("wall_s"), float)
@@ -1072,7 +1097,8 @@ def build_state(model: str = None, sink=print):
     if provider is None:  # bare install: never route to the web agent
         specs = [spec for spec in specs if spec.name != "web"]
     factory = lambda name: Policy(make_backend(config.llm),
-                                  make_policy_config(name), Tracer(None))
+                                  make_policy_config(name), Tracer(None),
+                                  debug=state.debug)
     if config.llm.provider == "ollama":  # families only exist in raw mode
         notice = unknown_family_notice(chosen_model)
         if notice:

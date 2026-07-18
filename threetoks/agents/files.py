@@ -51,8 +51,9 @@ OPT_SHELL = "run a shell command to inspect files"
 FINAL_PREFILL = "FINAL ANSWER:"
 CMD_PREFILL = "COMMAND:"
 # A bare menu digit or comma-index list ("1" / "1,2,3") is menu-format
-# bleed, not an answer; a real numeric answer like "42" is fine.
-_MENU_BLEED = re.compile(r"\d|\d+(\s*,\s*\d+)+\s*,?")
+# bleed, not an answer; a real numeric answer like "1989" is fine.
+_MENU_BLEED = re.compile(
+    r"^\d{1,3}$|^\d{5,}$|^\d+(\s*,\s*\d+)+\s*,?$")
 
 # Shell safety layer 1 (deterministic, free): no chaining, piping,
 # redirection, or substitution; no deny-listed write/execute/network

@@ -166,6 +166,16 @@ class AnswerFlowTest(unittest.TestCase):
         vertical.apply(vertical.next_node(), _text("3"))
         self.assertEqual(vertical.result()["answer"], "3")
 
+    def test_multi_digit_bleed_gets_retry(self):
+        """Two-digit numbers like '10' are caught as bleed in files too."""
+        vertical = self._vertical_with_notes(
+            ["Paris is in France.", FACT])
+        vertical.apply(vertical.next_node(), _menu(OPT_ANSWER))
+        vertical.apply(vertical.next_node(), _text("10"))   # bleed once
+        vertical.apply(vertical.next_node(), _text("10"))   # bleed again
+        answer = vertical.result()["answer"]
+        self.assertTrue(answer.startswith(FACT), answer)
+
 
 class GuardTest(unittest.TestCase):
     def test_hidden_file_is_not_listed(self):

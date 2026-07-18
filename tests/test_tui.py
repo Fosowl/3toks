@@ -192,6 +192,65 @@ class TickerCounterDebugTest(unittest.TestCase):
         self.assertEqual((counter.decisions, counter.tokens), (1, 2))
 
 
+class DebugTokensLineTest(unittest.TestCase):
+    """The token-level dump line under every LLM call while /debug is on."""
+
+    def _event(self, **overrides):
+        event = {"debug": True,
+                 "prompt_text": "Pick one\n1 = go\nReply with ONE digit.",
+                 "result_text": " 1",
+                 "prompt_tokens": 42, "out_tokens": 2,
+                 "done_reason": "stop"}
+        return {**event, **overrides}
+
+    def test_shows_prompt_result_and_token_counts(self):
+        line = tui.build_debug_tokens_line(self._event(), enabled=False)
+        self.assertIn("Pick one", line)
+        self.assertIn("' 1'", line)
+        self.assertIn("42pt/2ot", line)
+        self.assertIn("stop", line)
+
+    def test_clips_long_prompt_and_result(self):
+        line = tui.build_debug_tokens_line(
+            self._event(prompt_text="x" * 500, result_text="y" * 300),
+            enabled=False)
+        self.assertIn("…", line)
+        self.assertNotIn("x" * (tui.DEBUG_PROMPT_CLIP + 1), line)
+        self.assertNotIn("y" * (tui.DEBUG_RESULT_CLIP + 1), line)
+
+    def test_no_escape_when_disabled(self):
+        self.assertNotIn(
+            "\x1b", tui.build_debug_tokens_line(self._event(), enabled=False))
+
+    def test_missing_keys_do_not_crash(self):
+        line = tui.build_debug_tokens_line({}, enabled=False)
+        self.assertIn("''", line)
+        self.assertIn("0pt/0ot", line)
+
+
+class TickerCounterDebugTokensTest(unittest.TestCase):
+    """Debug events are printed when /debug is on, skipped when off."""
+
+    def _emit(self, debug: bool) -> list:
+        state = make_state(enabled=False)
+        state.debug = debug
+        printed = []
+        counter = tui._TickerCounter(state, printed.append)
+        counter({"debug": True, "prompt_text": "hi", "result_text": "yo",
+                 "prompt_tokens": 5, "out_tokens": 1, "done_reason": "stop"})
+        return printed
+
+    def test_debug_tokens_off_prints_nothing(self):
+        self.assertEqual(self._emit(debug=False), [])
+
+    def test_debug_tokens_on_prints_the_dump_line(self):
+        printed = self._emit(debug=True)
+        self.assertEqual(len(printed), 1)
+        self.assertIn("hi", printed[0])
+        self.assertIn("yo", printed[0])
+        self.assertIn("5pt/1ot", printed[0])
+
+
 class NoColorTest(unittest.TestCase):
     def test_ticker_has_no_escape_when_disabled(self):
         event = {"node": "menu", "value": "x", "valid": True,
