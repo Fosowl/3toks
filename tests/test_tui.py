@@ -55,7 +55,7 @@ def make_state(**overrides):
         specs=[FakeSpec("casual", "small talk"),
                FakeSpec("web", "internet research")],
         policy=object(),
-        model="qwen2.5:1.5b-instruct",
+        model="qwen3.5:2b",
         policy_factory=factory,
         enabled=overrides.get("enabled", True),
     )
@@ -115,6 +115,140 @@ class TickerFormatTest(unittest.TestCase):
                                      enabled=False)
         self.assertIn("menu", line)
         self.assertIn("—", line)
+
+
+class DebugLineTest(unittest.TestCase):
+    """The /debug line that makes an unparseable decision explain itself."""
+
+    def _event(self, **overrides):
+        event = {"node": "menu", "valid": False, "raw_text": "",
+                 "done_reason": "length", "attempt": 0}
+        return {**event, **overrides}
+
+    def test_empty_completion_is_visible_as_quotes(self):
+        # The user's failure shape: the cap was spent before any digit.
+        line = tui.build_debug_line(self._event(), enabled=False)
+        self.assertIn("''", line)
+
+    def test_shows_done_reason_and_one_based_attempt(self):
+        line = tui.build_debug_line(self._event(attempt=2), enabled=False)
+        self.assertIn("length", line)
+        self.assertIn("attempt 3", line)
+
+    def test_raw_text_is_shown_and_stays_one_line(self):
+        line = tui.build_debug_line(
+            self._event(raw_text="Sure!\nLet me"), enabled=False)
+        self.assertIn("Sure!", line)
+        self.assertIn("\\n", line)  # repr keeps the newline visible
+        self.assertEqual(len(line.splitlines()), 1)
+
+    def test_long_raw_text_is_clipped_with_an_ellipsis(self):
+        line = tui.build_debug_line(self._event(raw_text="z" * 400),
+                                    enabled=False)
+        self.assertIn("…", line)
+        self.assertNotIn("z" * (tui.RAW_CLIP + 1), line)
+
+    def test_no_escape_when_disabled(self):
+        self.assertNotIn("\x1b",
+                         tui.build_debug_line(self._event(), enabled=False))
+
+    def test_missing_keys_do_not_crash(self):
+        line = tui.build_debug_line({}, enabled=False)
+        self.assertIn("''", line)
+        self.assertIn("attempt 1", line)
+
+
+class TickerCounterDebugTest(unittest.TestCase):
+    """The extra raw line is printed only while /debug is on."""
+
+    def _emit(self, debug: bool) -> list:
+        state = make_state(enabled=False)
+        state.debug = debug
+        printed = []
+        counter = tui._TickerCounter(state, printed.append)
+        counter({"node": "menu", "valid": False, "out_tokens": 3,
+                 "wall_s": 0.2, "attempt": 0, "done_reason": "length",
+                 "raw_text": "Okay, the user wants"})
+        return printed
+
+    def test_debug_off_prints_only_the_ticker_line(self):
+        printed = self._emit(debug=False)
+        self.assertEqual(len(printed), 1)
+        self.assertNotIn("length", printed[0])
+
+    def test_debug_on_appends_the_raw_answer_line(self):
+        printed = self._emit(debug=True)
+        self.assertEqual(len(printed), 2)
+        self.assertIn("—", printed[0])        # the decision that failed
+        self.assertIn("length", printed[1])   # ... and why it failed
+        self.assertIn("Okay, the user wants", printed[1])
+
+    def test_tallies_are_unaffected_by_debug(self):
+        state = make_state(enabled=False)
+        state.debug = True
+        counter = tui._TickerCounter(state, lambda _line: None)
+        counter({"node": "menu", "valid": True, "out_tokens": 2,
+                 "wall_s": 0.1, "attempt": 0})
+        self.assertEqual((counter.decisions, counter.tokens), (1, 2))
+
+
+class DebugTokensLineTest(unittest.TestCase):
+    """The token-level dump line under every LLM call while /debug is on."""
+
+    def _event(self, **overrides):
+        event = {"debug": True,
+                 "prompt_text": "Pick one\n1 = go\nReply with ONE digit.",
+                 "result_text": " 1",
+                 "prompt_tokens": 42, "out_tokens": 2,
+                 "done_reason": "stop"}
+        return {**event, **overrides}
+
+    def test_shows_prompt_result_and_token_counts(self):
+        line = tui.build_debug_tokens_line(self._event(), enabled=False)
+        self.assertIn("Pick one", line)
+        self.assertIn("' 1'", line)
+        self.assertIn("42pt/2ot", line)
+        self.assertIn("stop", line)
+
+    def test_clips_long_prompt_and_result(self):
+        line = tui.build_debug_tokens_line(
+            self._event(prompt_text="x" * 500, result_text="y" * 300),
+            enabled=False)
+        self.assertIn("…", line)
+        self.assertNotIn("x" * (tui.DEBUG_PROMPT_CLIP + 1), line)
+        self.assertNotIn("y" * (tui.DEBUG_RESULT_CLIP + 1), line)
+
+    def test_no_escape_when_disabled(self):
+        self.assertNotIn(
+            "\x1b", tui.build_debug_tokens_line(self._event(), enabled=False))
+
+    def test_missing_keys_do_not_crash(self):
+        line = tui.build_debug_tokens_line({}, enabled=False)
+        self.assertIn("''", line)
+        self.assertIn("0pt/0ot", line)
+
+
+class TickerCounterDebugTokensTest(unittest.TestCase):
+    """Debug events are printed when /debug is on, skipped when off."""
+
+    def _emit(self, debug: bool) -> list:
+        state = make_state(enabled=False)
+        state.debug = debug
+        printed = []
+        counter = tui._TickerCounter(state, printed.append)
+        counter({"debug": True, "prompt_text": "hi", "result_text": "yo",
+                 "prompt_tokens": 5, "out_tokens": 1, "done_reason": "stop"})
+        return printed
+
+    def test_debug_tokens_off_prints_nothing(self):
+        self.assertEqual(self._emit(debug=False), [])
+
+    def test_debug_tokens_on_prints_the_dump_line(self):
+        printed = self._emit(debug=True)
+        self.assertEqual(len(printed), 1)
+        self.assertIn("hi", printed[0])
+        self.assertIn("yo", printed[0])
+        self.assertIn("5pt/1ot", printed[0])
 
 
 class NoColorTest(unittest.TestCase):
@@ -309,6 +443,44 @@ class SlashCommandTest(unittest.TestCase):
                      "/quit"):
             self.assertIn(name, reply)
 
+    def test_help_shows_the_voice_arguments(self):
+        reply = tui.handle_command(make_state(enabled=False), "/help")
+        self.assertIn("/voice [on|off|debug]", reply)
+
+    def test_help_lists_debug_apart_from_voice_debug(self):
+        # Two unrelated features; /help must not blur them together.
+        reply = tui.handle_command(make_state(enabled=False), "/help")
+        self.assertIn("/debug [on|off]", reply)
+        self.assertIn("raw model answer", reply)
+        self.assertIn("/voice [on|off|debug]", reply)
+
+    def test_debug_bare_reports_the_current_state(self):
+        state = make_state(enabled=False)
+        self.assertIn("debug is off", tui.handle_command(state, "/debug"))
+        state.debug = True
+        self.assertIn("debug is on", tui.handle_command(state, "/debug"))
+
+    def test_debug_on_and_off_set_the_flag(self):
+        state = make_state(enabled=False)
+        self.assertFalse(state.debug)  # off by default
+        tui.handle_command(state, "/debug on")
+        self.assertTrue(state.debug)
+        tui.handle_command(state, "/debug off")
+        self.assertFalse(state.debug)
+
+    def test_debug_garbage_argument_reports_usage(self):
+        state = make_state(enabled=False)
+        reply = tui.handle_command(state, "/debug loud")
+        self.assertIn("usage: /debug [on|off]", reply)
+        self.assertFalse(state.debug)
+
+    def test_debug_is_independent_of_voice_debug(self):
+        state = make_state(enabled=False)
+        tui.handle_command(state, "/debug on")
+        reply = tui.handle_command(state, "/voice debug")
+        self.assertIn("voice is off", reply)  # no live session to trace
+        self.assertTrue(state.debug)          # ... and /debug stays on
+
     def test_agents_lists_registered_specs(self):
         reply = tui.handle_command(make_state(enabled=False), "/agents")
         self.assertIn("casual", reply)
@@ -423,6 +595,8 @@ class SlashCommandTest(unittest.TestCase):
         wizard.assert_called_once_with()
         self.assertIn("saved", reply)
         self.assertIn(saved, reply)
+        # /voice on re-reads the file, so it applies without a restart.
+        self.assertIn("/voice on", reply)
 
     def test_setup_warns_when_a_cwd_config_shadows_the_saved_file(self):
         state = make_state(enabled=False)
@@ -561,6 +735,83 @@ class FakeSpecWithRun:
     name: str
     description: str
     run: object
+
+
+class StartupFailureTest(unittest.TestCase):
+    """A misconfigured provider must read as a message, not a traceback."""
+
+    def _main_with_build_error(self, error):
+        shown = []
+        with mock.patch("threetoks.config.find_config_path",
+                        return_value="config.ini"), \
+                mock.patch.object(tui, "build_state", side_effect=error), \
+                mock.patch.object(tui, "repl") as repl, \
+                mock.patch("builtins.print", side_effect=shown.append):
+            tui.main()  # must not raise
+        return "\n".join(shown), repl
+
+    def test_missing_api_key_prints_a_panel_and_skips_the_repl(self):
+        error = RuntimeError("provider 'openrouter' needs the "
+                             "OPENROUTER_API_KEY environment variable")
+        out, repl = self._main_with_build_error(error)
+        self.assertIn("OPENROUTER_API_KEY", out)
+        self.assertIn("export the key", out)  # actionable hint
+        repl.assert_not_called()
+
+    def test_api_key_hint_names_the_ollama_escape_hatch(self):
+        hint = tui._error_hint(RuntimeError("needs the OPENAI_API_KEY"))
+        self.assertIn("provider = ollama", hint)
+
+
+class BadConfigWarningTest(unittest.TestCase):
+    """A config that failed to parse must be announced, not swallowed."""
+
+    def test_parse_failure_is_printed_at_startup(self):
+        shown = []
+        with mock.patch("threetoks.config.config_problem",
+                        return_value="⚠ /cfg.ini was ignored — fell back"):
+            tui._warn_bad_config(shown.append)
+        self.assertEqual(len(shown), 1)
+        self.assertIn("was ignored", shown[0])
+
+    def test_healthy_config_prints_nothing(self):
+        shown = []
+        with mock.patch("threetoks.config.config_problem", return_value=None):
+            tui._warn_bad_config(shown.append)
+        self.assertEqual(shown, [])
+
+
+class ModelSwapOptionalAgentsTest(unittest.TestCase):
+    """Regression: /model must re-derive the capability agents."""
+
+    def test_swap_to_vision_model_registers_look_and_back_out(self):
+        state = make_state()
+        state.services.capture_frame = lambda: "b64"
+        tui.handle_command(state, "/model llava:7b")
+        self.assertIn("look", [spec.name for spec in state.specs])
+        tui.handle_command(state, "/model qwen3.5:2b")
+        self.assertNotIn("look", [spec.name for spec in state.specs])
+
+    def test_light_survives_model_swaps_when_relay_is_wired(self):
+        state = make_state()
+        state.services.relay = object()
+        tui.handle_command(state, "/model qwen3.5:2b")
+        self.assertIn("light", [spec.name for spec in state.specs])
+
+    def test_without_capabilities_specs_stay_untouched(self):
+        state = make_state()
+        before = list(state.specs)
+        tui.handle_command(state, "/model qwen3.5:2b")
+        self.assertEqual(state.specs, before)
+
+    def test_family_notice_only_applies_to_the_ollama_provider(self):
+        raw = make_state()
+        self.assertIn("unknown template family",
+                      tui.handle_command(raw, "/model gpt-4o-mini"))
+        chat = make_state()
+        chat.llm_provider = "openrouter"
+        self.assertNotIn("unknown template family",
+                         tui.handle_command(chat, "/model gpt-4o-mini"))
 
 
 if __name__ == "__main__":

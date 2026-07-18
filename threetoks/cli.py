@@ -7,7 +7,7 @@ import argparse
 import time
 
 from threetoks.backend.base import FAMILY_R1, ModelSpec, detect_family
-from threetoks.backend.ollama import OllamaBackend
+from threetoks.backend.providers import make_backend
 from threetoks.config import load_config
 from threetoks.engine import run_episode  # noqa: F401 (eval harness imports)
 from threetoks.policy import Policy, PolicyConfig
@@ -20,7 +20,7 @@ from threetoks.web.vertical import WebResearchVertical
 # The web extras (requests, bs4, markdownify) are OPTIONAL: everything
 # that touches them imports lazily so the core runs on a bare install.
 
-DEFAULT_MODEL = "qwen2.5:1.5b-instruct"
+DEFAULT_MODEL = "qwen3.5:2b"
 DEFAULT_MAX_STEPS = 25
 
 # E1 winner ("menu_picker") extended to cover all three reply shapes.
@@ -96,7 +96,7 @@ def main() -> None:
     from threetoks.web.search import auto_provider
     search_mod.MIN_SEARCH_INTERVAL_S = config.search.min_interval_s
     args = build_parser(config).parse_args()
-    policy = Policy(OllamaBackend(), make_policy_config(args.model),
+    policy = Policy(make_backend(config.llm), make_policy_config(args.model),
                     Tracer(args.trace))
     page_fetch, fetcher = make_fetch_page(config)
     services = Services(provider=auto_provider(), fetch_page=page_fetch,

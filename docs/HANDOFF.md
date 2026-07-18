@@ -60,7 +60,7 @@ gitignored; recon in docs/recon-agenticseek.md).
 
 ## 2. Experimentally validated facts (Phase 0 — spikes/*/REPORT.md)
 
-- **Policy model = `qwen2.5:1.5b-instruct` for ALL nodes.** E1: 76.7% menu
+- **Policy model = `qwen3.5:2b` for ALL nodes.** E1: 76.7% menu
   accuracy / 0.285s / 3 tok. `deepseek-r1:1.5b` DISQUALIFIED (23-26% all
   variants, escape-biased; also bad at picks in E3). R1 raw-mode think
   suppression (`<think>\n\n</think>\n\n` + prefill) stays supported in the
@@ -174,6 +174,19 @@ separately; historical: 6-7/10 answers, ~11s/task).
   tests/test_agents_core.py ScriptedBackend); every behavior change ships
   a test. Modules end with `if __name__ == "__main__":` smokes.
 - Memory files live at ~/.claude/.../memory/ (threetoks-framework.md).
+
+## 4b. Multi-provider + voice/camera/relay (2026-07-14)
+
+DESIGN.md §19 has the full entry. Short version: `[llm] provider` picks
+ollama (default) or a chat API (`backend/providers.py`, stdlib-only);
+optional extras `stt`/`tts`/`voice`/`camera`/`relay` light up voice mode
+(`/voice`, `threetoks/voice/`), a `look` vision agent, and a Pi `light`
+agent — all lazily imported, all offline-tested (`tests/test_providers`,
+`test_policy_chat`, `test_voice_*`, `test_camera`, `test_look_agent`,
+`test_relay`, `test_light_agent`). Info-flow maps: `docs/info-flow/`.
+The wizard now carries un-asked config sections through re-runs
+(previously `/setup` silently reset `[code]`; would have reset the new
+sections too).
 
 ## 5. Known issues & environment caveats
 

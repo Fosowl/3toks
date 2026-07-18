@@ -102,7 +102,7 @@ class RenormalizeIndentFallbackTest(unittest.TestCase):
     """function_source's second chance for whole-body indent drift (E8)."""
 
     def test_recovers_a_body_drifted_to_five_spaces(self):
-        # Live qwen2.5:1.5b-instruct drift: docstring + every body line at 5.
+        # Live qwen3.5:2b drift: docstring + every body line at 5.
         drifted = '"""doc"""\n     start = (p - 1) * s\n     return start'
         source = gates.function_source("f", "p, s", drifted)
         self.assertIsNotNone(source)

@@ -13,7 +13,7 @@ Usage (run from the repo root so ``threetoks`` is importable):
 ``--backend scripted`` exercises the exact same code path with a canned
 offline backend (no Ollama, no network) — useful for iterating on the
 harness itself; the real numbers in REPORT.md come from ``--backend ollama``
-against the live qwen2.5:1.5b-instruct server.
+against the live qwen3.5:2b server.
 """
 import argparse
 import json
@@ -30,7 +30,7 @@ from threetoks.trace import Tracer
 SPIKE_DIR = Path(__file__).parent
 BENCHMARK_PATH = SPIKE_DIR / "benchmark.jsonl"
 FIXTURES_ROOT = SPIKE_DIR / "fixtures"
-MODEL_NAME = "qwen2.5:1.5b-instruct"
+MODEL_NAME = "qwen3.5:2b"
 
 
 class ScriptedBackend:

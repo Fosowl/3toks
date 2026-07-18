@@ -5,18 +5,20 @@ from threetoks.backend.base import FAMILY_R1, GenResult, ModelSpec
 from threetoks.nodes import MenuNode, PickManyNode
 from threetoks.policy import TEMPERATURE_LADDER, Policy, PolicyConfig
 from threetoks.render import Episode
+from threetoks.trace import Tracer
 
 
 class FakeBackend:
     """Scripted backend that records every prompt and option set."""
 
-    def __init__(self, scripted_texts):
+    def __init__(self, scripted_texts, done_reason="stop"):
         self.scripted = list(scripted_texts)
+        self.done_reason = done_reason
         self.calls = []
 
     def complete(self, model, raw_prompt, opts):
         self.calls.append((raw_prompt, opts))
-        return GenResult(self.scripted.pop(0), 10, 2, 0.01, "stop")
+        return GenResult(self.scripted.pop(0), 10, 2, 0.01, self.done_reason)
 
 
 def make_policy(backend, **overrides):
@@ -106,6 +108,42 @@ class VotingTest(unittest.TestCase):
             Episode("S", "t"), PickManyNode("Which?", 10))
         self.assertEqual(len(backend.calls), 1)
         self.assertEqual(decision.value, [3, 7])
+
+
+class TraceDoneReasonTest(unittest.TestCase):
+    """The completion's finish reason must survive into the trace event.
+
+    It is what separates a wrong answer from a truncated one: a chat
+    provider that spends the node's 3-token cap on preamble stops with
+    ``length`` and never reaches its digit, which the TUI's /debug line
+    then shows instead of a bare "—".
+    """
+
+    def _traced(self, texts, done_reason):
+        events = []
+        backend = FakeBackend(texts, done_reason=done_reason)
+        policy = Policy(backend, PolicyConfig(ModelSpec("m", FAMILY_R1)),
+                        Tracer(None, on_event=events.append))
+        policy.decide(Episode("S", "t"), MenuNode("Pick.", ["a", "b"]))
+        return events
+
+    def test_truncated_completions_trace_length(self):
+        events = self._traced(["Okay, so the"] * 3, "length")
+        self.assertEqual(len(events), 3)  # whole ladder, nothing parsed
+        self.assertEqual([event["done_reason"] for event in events],
+                         ["length"] * 3)
+        self.assertFalse(any(event["valid"] for event in events))
+
+    def test_ordinary_completion_traces_its_own_reason(self):
+        [event] = self._traced([" 1"], "stop")
+        self.assertEqual(event["done_reason"], "stop")
+
+    def test_existing_event_keys_are_untouched(self):
+        [event] = self._traced([" 1"], "stop")
+        for key in ("step", "node", "question", "perm", "attempt",
+                    "raw_text", "value", "valid", "prompt_tokens",
+                    "out_tokens", "wall_s"):
+            self.assertIn(key, event)
 
 
 class NonMenuNodeTest(unittest.TestCase):

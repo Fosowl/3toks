@@ -145,6 +145,53 @@ the list is the router's fallback** when the model's choice is invalid or
 unparseable (`threetoks/agents/router.py`), so keep a cheap, safe default
 (`casual`) first. Names must stay unique — the registry test enforces this.
 
+Agents gated on an optional capability register through
+`optional_agents(services, model)` instead: `light` appears only when a
+GPIO relay is live on `services.relay` (Raspberry Pi `relay` extra) and
+`look` only when `services.capture_frame` is set (camera extra) AND the
+model name passes `is_vision_model` (a name-mark heuristic in
+`threetoks/backend/base.py` — extend `_VISION_MODEL_MARKS` when new
+vision families appear). List any such agent's name in
+`OPTIONAL_AGENT_NAMES` so `/model` can re-derive the set at runtime.
+Import the agent module lazily inside `optional_agents` — the registry
+must import on a bare install.
+
+## Hardware agents (Raspberry Pi): the light agent is a template
+
+The `light` agent is deliberately minimal — it exists as the worked
+example for wiring ANY physical tool (fan, servo, sensor, second relay)
+into the mesh. The recipe, with `threetoks/relay.py` +
+`threetoks/agents/light.py` as the reference at every step:
+
+1. **Hardware module** (`threetoks/yourtool.py`): one class owning the
+   device. Import the hardware library lazily inside `__init__` and
+   accept an injectable stand-in for tests (see `Relay(pin, gpio=None)`).
+   Action methods return short spoken strings — never booleans dressed
+   as strings. Add a pure availability gate like `relay_available()`
+   (platform + `find_spec` checks, zero import side effects).
+2. **Agent module** (`threetoks/agents/yourtool.py`): a module-level
+   `SPEC = AgentSpec(name, one-line description, run)`. Inside
+   `run(task, services, policy)`: a guard clause answers when the device
+   is absent; a word-boundary regex settles clear phrasings with ZERO
+   model calls (status-style questions must never drive the hardware);
+   anything else spends exactly ONE MenuNode of semantically described
+   options, escape last. Answers are one spoken-length sentence — voice
+   mode reads them aloud.
+3. **Services field**: add `yourtool: object = None` to
+   `threetoks/services.py`; construct it in `tui.build_state` behind the
+   availability gate, degrading to `None` with a notice on failure (see
+   `_make_relay`).
+4. **Registration**: extend `optional_agents()` (lazy import) and add
+   the agent's name to `OPTIONAL_AGENT_NAMES`.
+5. **Packaging**: a new extra in `pyproject.toml`; if the dependency is
+   Pi-only, gate it on architecture the way `relay` does
+   (`"RPi.GPIO; platform_machine == 'aarch64' or ..."`).
+6. **Tests + smoke**: offline only — a fake device recording calls
+   (`tests/test_relay.py`), agent tests asserting the regex paths never
+   consult the backend (`tests/test_light_agent.py`), your module listed
+   in `tests/test_lazy_extras.py`, and an `if __name__ == "__main__":`
+   smoke block that passes with no hardware library installed.
+
 An agent may itself route further: the `code` agent front-doors four modes
 (navigate / edit / compute / author) through `threetoks/code/route.py` —
 deterministic pre-checks first, one one-token menu otherwise (measured in

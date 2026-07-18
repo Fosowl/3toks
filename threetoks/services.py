@@ -18,6 +18,8 @@ class Services:
     max_research_rounds: int = DEFAULT_RESEARCH_ROUNDS
     recalled: list = field(default_factory=list)  # memories the selector chose
     retriever: object = None           # code retrieval-as-repair (opt-in)
+    relay: object = None               # GPIO light Relay (Pi relay extra)
+    capture_frame: object = None       # callable -> base64 JPEG (camera extra)
 
 
 if __name__ == "__main__":

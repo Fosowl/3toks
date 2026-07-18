@@ -1,8 +1,8 @@
-"""Run scenarios against the real settled policy model (qwen2.5:1.5b-instruct
+"""Run scenarios against the real settled policy model (qwen3.5:2b
 via Ollama) -- every menu pick and every span regeneration is a real model
 decision, no scripting.
 
-Requires Ollama running at http://localhost:11434 with qwen2.5:1.5b-instruct
+Requires Ollama running at http://localhost:11434 with qwen3.5:2b
 pulled. Does not start/stop/manage the server.
 
     python3 spikes/e8_edit_vertical/run_live.py             # all 5 scenarios
@@ -30,7 +30,7 @@ from threetoks.engine import run_episode  # noqa: E402
 from threetoks.policy import Policy, PolicyConfig  # noqa: E402
 from threetoks.trace import Tracer  # noqa: E402
 
-MODEL_NAME = "qwen2.5:1.5b-instruct"
+MODEL_NAME = "qwen3.5:2b"
 # E1's winning menu-selector system prompt (threetoks/cli.py SYSTEM_CHATML),
 # reused verbatim -- this spike does not invent its own menu-steering prompt.
 SYSTEM_CHATML = (

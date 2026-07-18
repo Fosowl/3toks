@@ -95,7 +95,7 @@ class SpliceGateTest(unittest.TestCase):
         ast.parse(candidate)                     # whole file still parses
 
     def test_replace_splice_fn_recovers_from_indent_drift(self):
-        """qwen2.5:1.5b-instruct live output observed in E8: every
+        """qwen3.5:2b live output observed in E8: every
         continuation line indented one column deeper (5 spaces) than the
         prefill's 4 -- would break ast.parse without renormalize_indent."""
         fn = edit_ops.replace_splice_fn(self.SOURCE, 1, 2, "f", "x")

@@ -29,7 +29,7 @@ menu-centric web/files verticals, and the correct one given the evidence below.
 | Can it plan in a rigid format? | one-shot parse 0.20–0.40, iterative **0.00** | No. Force the shape at the harness; loose-parse; cap 3–4 methods. |
 | Can it grade its own code? | ~75% correct asserts → **~25% wrong expectations** | No gating on model tests. Gate on harness anchor asserts only. |
 | Does error-feedback repair beat blind retry? | **0/2 vs 1/2** (small N) | Resample-first ladder (like E4), not a feedback loop. |
-| instruct vs coder (1.5b each) | tie on every axis | Use `qwen2.5:1.5b-instruct`; drop the coder model. |
+| instruct vs coder (1.5b each) | tie on every axis | Use `qwen3.5:2b`; drop the coder model. |
 
 The naive fear ("can a 1.5b write code?") is answered *yes*. The real risk
 concentrates in **PLAN quality** and **self-testing** — so the design spends

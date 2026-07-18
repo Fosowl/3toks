@@ -51,11 +51,12 @@ LINKS_SHOWN = 6
 # Menu-format bleed: an "answer" that is a bare menu digit or a comma
 # list of indices ("1" / "1,2,3") violates the words-contract; a real
 # numeric answer like "1989" is fine.
-_MENU_BLEED_RE = re.compile(r"\d|\d+(\s*,\s*\d+)+\s*,?")
+_MENU_BLEED_RE = re.compile(
+    r"^\d{1,3}$|^\d{5,}$|^\d+(\s*,\s*\d+)+\s*,?$")
 OPT_BACK = "back to the search results"
 OPT_NEW_SEARCH = "search with different words"
 OPT_ANSWER = "answer the task now"
-FINAL_PREFILL = "FINAL ANSWER:"
+FINAL_PREFILL = "FINAL ANSWER: It"
 
 PREFIX = """You control a research agent by answering menus.
 Rules: reply with exactly ONE digit for ACTIONS menus; reply with numbers

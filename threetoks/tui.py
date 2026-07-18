@@ -56,8 +56,28 @@ FAST_S, STEADY_S = 0.4, 1.2 # decision-speed thresholds for bar color
 SHORT_TEXT_CLIP = 40
 PICKED_LINE_CLIP = 70
 QUESTION_CLIP = 48
+RAW_CLIP = 120              # /debug: raw completion clipped to this
+DEBUG_PROMPT_CLIP = 200     # /debug: prompt text clipped to this
+DEBUG_RESULT_CLIP = 120     # /debug: result text clipped to this
+UNDER_INDENT = " " * 12     # column where a ticker line's value starts
 SIGN_OFF = "⌁ mesh offline — tokens saved, see you"
 _KIND_LABELS = {"menu": "menu", "pick_many": "pick", "short_text": "text"}
+
+
+def build_debug_tokens_line(event: dict, enabled: bool = True) -> str:
+    """One dim line showing the full prompt and result tokens for a model call.
+
+    Printed for every LLM request while ``/debug`` is on, aligned under the
+    ticker's value column. Shows the clipped prompt text, result text, and
+    token counts.
+    """
+    prompt = _clip_repr(event.get("prompt_text"), DEBUG_PROMPT_CLIP)
+    result = _clip_repr(event.get("result_text"), DEBUG_RESULT_CLIP)
+    pt = _num(event.get("prompt_tokens"), int)
+    ot = _num(event.get("out_tokens"), int)
+    reason = event.get("done_reason") or "?"
+    return dim(f"{UNDER_INDENT}· in {prompt} → out {result}"
+               f" · {pt}pt/{ot}ot · {reason}", enabled)
 
 
 def _color_enabled(stream=None) -> bool:
@@ -122,7 +142,7 @@ def _compress_value(event: dict) -> str:
 
 def _resolved_lines(event: dict, enabled: bool) -> list[str]:
     """One dim line per picked sentence, printed under a pick event."""
-    return [dim(f"            · {_clip(text, PICKED_LINE_CLIP)}", enabled)
+    return [dim(f"{UNDER_INDENT}· {_clip(text, PICKED_LINE_CLIP)}", enabled)
             for text in event.get("resolved") or []]
 
 
@@ -168,6 +188,38 @@ def build_ticker_line(event: dict, enabled: bool = True) -> str:
             + fg(CYAN, value, enabled) + pad
             + dim(f"{tokens}t·{wall:.2f}s", enabled))
     return "\n".join([line] + _resolved_lines(event, enabled))
+
+
+def _clip_repr(text, limit: int) -> str:
+    """``repr`` of ``text``, clipped to ``limit`` chars with an ellipsis.
+
+    The quotes make an empty or whitespace-only completion visible (``''``,
+    ``'\\n'``) where a bare string would look like a rendering bug; the
+    ellipsis sits outside them so it never reads as characters the model
+    actually emitted.
+    """
+    raw = str(text or "")
+    if len(raw) <= limit:
+        return repr(raw)
+    return repr(raw[:limit]) + "…"
+
+
+def build_debug_line(event: dict, enabled: bool = True) -> str:
+    """One dim line under the ticker showing the model's RAW answer.
+
+    Printed for every decision while ``/debug`` is on, aligned under the
+    ticker's value column like a resolved pick. It exists to make a ``—``
+    (unparseable) decision explain itself: ``done: length`` means the
+    node's token cap ended the completion before the model got to its
+    digit — the failure mode of a chat transport, where the ``ANSWER:``
+    prefill is only a hint and a chatty model spends the cap on preamble.
+    ``attempt`` is 1-based, so it counts up to the retry ladder's length.
+    """
+    raw = _clip_repr(event.get("raw_text"), RAW_CLIP)
+    reason = event.get("done_reason") or "?"
+    attempt = _num(event.get("attempt"), int) + 1
+    return dim(f"{UNDER_INDENT}· raw {raw} · done: {reason}"
+               f" · attempt {attempt}", enabled)
 
 
 def _wrap(text: str, width: int, indent: str = "") -> list[str]:
@@ -403,6 +455,12 @@ class ReplState:
     memory: object = None   # MemoryStore for this session, or None if disabled
     memory_path: str = ""   # where memory is dumped when the session ends
     browser_visible: bool = False  # config default for /browser visibility
+    voice: object = None    # live VoiceSession, or None for keyboard input
+    voice_config: object = None  # [voice] config section for /voice on
+    llm_provider: str = "ollama"  # LLM transport name (NOT services.provider,
+    # which is the web SearchProvider); families are raw-mode only
+    debug: bool = False     # /debug: show each decision's raw model answer
+    # (NOT voice.debug, which traces microphone transcripts)
 
 
 def _cmd_help(state: ReplState, arg: str) -> str:
@@ -413,6 +471,8 @@ def _cmd_help(state: ReplState, arg: str) -> str:
         ("/deep N", "set research rounds to N"),
         ("/browser MODE [on-screen]", "fetch via http|plain|stealth"),
         ("/model NAME", "swap the deciding model"),
+        ("/voice [on|off|debug]", "talk instead of typing (voice extras)"),
+        ("/debug [on|off]", "show the raw model answer per decision"),
         ("/setup", "re-run the config wizard"),
         ("/quit", "leave the mesh"),
     ]
@@ -439,14 +499,28 @@ def _cmd_deep(state: ReplState, arg: str) -> str:
     return dim(f"deep research rounds = {arg.strip()}", state.enabled)
 
 
+def _refresh_optional_agents(state: ReplState, model: str) -> None:
+    """Re-derive the capability agents for ``model`` (look needs vision)."""
+    from threetoks.agents import OPTIONAL_AGENT_NAMES, optional_agents
+    kept = [spec for spec in state.specs
+            if spec.name not in OPTIONAL_AGENT_NAMES]
+    state.specs = kept + optional_agents(state.services, model)
+
+
 def _cmd_model(state: ReplState, arg: str) -> str:
-    """Rebuild the policy for a new model name via the policy factory."""
+    """Rebuild the policy for a new model name via the policy factory.
+
+    The optional agents are re-derived too: swapping to/from a
+    vision-capable model registers/unregisters the ``look`` agent.
+    """
     name = arg.strip()
     if not name:
         return fg(AMBER, "usage: /model NAME", state.enabled)
     state.model = name
     state.policy = state.policy_factory(name)
-    notice = unknown_family_notice(name)
+    _refresh_optional_agents(state, name)
+    notice = unknown_family_notice(name) if state.llm_provider == "ollama" \
+        else None
     if notice:
         return fg(AMBER, notice, state.enabled)
     return dim(f"model = {name}", state.enabled)
@@ -530,8 +604,115 @@ def _cmd_setup(state: ReplState, arg: str) -> str:
     if find_config_path() != path:
         return fg(AMBER, f"saved — {path}, but {find_config_path()} takes "
                   "precedence here and will be read instead", state.enabled)
-    return dim(f"saved — {path} (applies next start; /model and /browser "
-               "change this session)", state.enabled)
+    return dim(f"saved — {path} (applies next start; /model, /browser and "
+               "/voice on pick up changes this session)", state.enabled)
+
+
+_VOICE_ARGS = ("", "on", "off", "debug")  # accepted /voice arguments
+
+
+def _close_voice(state: ReplState) -> None:
+    """Stop any live voice session and return to keyboard input."""
+    if state.voice is not None:
+        state.voice.close()
+        state.voice = None
+
+
+def _reload_voice_config(state: ReplState) -> None:
+    """Re-read the saved ``[voice]`` section so a fresh /setup applies now.
+
+    Without this the session would keep the config captured at startup and
+    ``/voice on`` would ignore paths the user just saved. ``load_config``
+    is total — a missing or malformed file degrades to the built-in
+    defaults rather than raising, exactly as the next start would — so the
+    guard here only covers genuinely unexpected errors, and keeps the
+    startup section when one happens.
+    """
+    try:
+        from threetoks.config import load_config
+        state.voice_config = load_config().voice
+    except Exception:  # noqa: BLE001 - a bad config must not block voice
+        return
+
+
+def _toggle_voice_debug(state: ReplState) -> str:
+    """Flip per-transcript tracing on the live session; report the state."""
+    if state.voice is None:
+        return dim("voice is off — /voice on first", state.enabled)
+    state.voice.debug = not state.voice.debug
+    status = "on" if state.voice.debug else "off"
+    return dim(f"voice debug {status}", state.enabled)
+
+
+def _voice_on(state: ReplState) -> str:
+    """Build a session from the freshly reloaded config; report the notes.
+
+    The config is only re-read on the off-to-on edge, so a live session
+    is told how to pick up a change rather than being left to imply it
+    already did.
+    """
+    if state.voice is not None:
+        return dim("voice is already on — /voice off then on to re-read "
+                   "the config", state.enabled)
+    _reload_voice_config(state)
+    from threetoks.voice.session import make_voice_session
+    try:
+        state.voice, notes = make_voice_session(state.voice_config)
+    except Exception as error:  # noqa: BLE001 - optional extras, any failure
+        return fg(AMBER, f"voice unavailable: {error}", state.enabled)
+    rows = [dim("voice on — speak; Ctrl-C returns to the keyboard",
+                state.enabled)]
+    rows.extend(fg(AMBER, note, state.enabled) for note in notes)
+    return "\n".join(rows)
+
+
+def _cmd_voice(state: ReplState, arg: str) -> str:
+    """Toggle voice mode: microphone in and/or spoken answers out.
+
+    ``/voice on`` re-reads the saved ``[voice]`` config, then builds a
+    session from whichever voice extras are installed (stt and tts degrade
+    independently); ``/voice off`` returns to the keyboard; ``/voice
+    debug`` traces raw transcripts and gate drops; bare ``/voice`` reports
+    the current state. Failures surface as a styled message.
+    """
+    want = arg.strip().lower()
+    if want not in _VOICE_ARGS:
+        return fg(AMBER, "usage: /voice [on|off|debug]", state.enabled)
+    if want == "":
+        status = "on" if state.voice is not None else "off"
+        return dim(f"voice is {status}", state.enabled)
+    if want == "off":
+        _close_voice(state)
+        return dim("voice off — keyboard input", state.enabled)
+    if want == "debug":
+        return _toggle_voice_debug(state)
+    return _voice_on(state)
+
+
+_DEBUG_ARGS = ("", "on", "off")  # accepted /debug arguments
+
+
+def _cmd_debug(state: ReplState, arg: str) -> str:
+    """Toggle the raw-answer and token-dump lines under every ticker decision.
+
+    Distinct from ``/voice debug``, which traces microphone transcripts:
+    this one shows what the model actually completed, so a decision that
+    renders ``—`` names its own cause instead of just looking broken.
+    Bare ``/debug`` reports the current state.
+    """
+    want = arg.strip().lower()
+    if want not in _DEBUG_ARGS:
+        return fg(AMBER, "usage: /debug [on|off]", state.enabled)
+    if want == "":
+        status = "on" if state.debug else "off"
+        return dim(f"debug is {status}", state.enabled)
+    state.debug = want == "on"
+    if state.policy is not None and hasattr(state.policy, "debug"):
+        state.policy.debug = state.debug
+    if not state.debug:
+        return dim("debug off", state.enabled)
+    return dim("debug on — raw model answer + token dump under each decision",
+               state.enabled)
 
 
 def _cmd_quit(state: ReplState, arg: str) -> str:
@@ -542,6 +723,7 @@ def _cmd_quit(state: ReplState, arg: str) -> str:
 
 _COMMANDS = {"/help": _cmd_help, "/agents": _cmd_agents, "/deep": _cmd_deep,
              "/browser": _cmd_browser, "/model": _cmd_model,
+             "/voice": _cmd_voice, "/debug": _cmd_debug,
              "/setup": _cmd_setup, "/quit": _cmd_quit}
 
 
@@ -580,13 +762,24 @@ class _TickerCounter:
         self.retries = 0
 
     def __call__(self, event: dict) -> None:
-        """Trace ``on_event`` hook: print one ticker line, update tallies."""
+        """Trace ``on_event`` hook: print one ticker line, update tallies.
+
+        With ``/debug`` on, each ticker line is followed by the raw
+        completion it was parsed from, and a token-level dump of the
+        full prompt and result for every model call.
+        """
+        if event.get("debug"):
+            if self.state.debug:
+                self.sink(build_debug_tokens_line(event, self.state.enabled))
+            return
         self.decisions += 1
         self.tokens += int(event.get("out_tokens", 0) or 0)
         self.model_seconds += _num(event.get("wall_s"), float)
         if _num(event.get("attempt"), int) > 0:
             self.retries += 1
         self.sink(build_ticker_line(event, self.state.enabled))
+        if self.state.debug:
+            self.sink(build_debug_line(event, self.state.enabled))
 
     def stats(self, seconds: float) -> dict:
         """Tallies plus the task wall time, ready for the task report."""
@@ -613,6 +806,8 @@ def _run_task(state: ReplState, task: str, route, sink) -> None:
                              elapsed)
     sink(render_result(result, state.enabled))
     sink(render_task_report(counter.stats(elapsed), state.enabled))
+    if state.voice is not None:  # speak AFTER the panel so text never lags
+        state.voice.speak(str(result.get("answer") or ""))
 
 
 def _recall_context(state: ReplState, task: str, sink) -> None:
@@ -647,6 +842,58 @@ def _read_line(read_input, prompt: str):
         return None
 
 
+def _debug_sink(state: ReplState, sink):
+    """A dim per-event writer while voice debug is on, else None."""
+    if not state.voice.debug:
+        return None
+    return lambda line: sink(dim("  · voice: " + line, state.enabled))
+
+
+def _listen_line(state: ReplState, read_input, prompt: str, sink):
+    """Block on the microphone until a pertinent transcript arrives.
+
+    Gated-out transcripts show as a dim ignored line; an accepted one is
+    echoed like typed input. In debug mode every raw transcript, gate
+    drop, and pertinence verdict is traced too. Ctrl-C while listening
+    turns voice mode off and falls back to one keyboard read instead of
+    quitting; any other failure (backend down mid-gate, audio device
+    gone) renders as an error panel and does the same — the session must
+    always survive.
+    """
+    from threetoks.voice.session import HEARD
+    sink(dim(f"  {ZAP} listening {CHEVRON} speak now (Ctrl-C for keyboard)",
+             state.enabled))
+    debug_sink = _debug_sink(state, sink)
+    while state.running:
+        try:
+            gated = state.voice.listen(state.policy, debug_sink)
+        except KeyboardInterrupt:
+            _close_voice(state)
+            sink(dim("voice off — keyboard input", state.enabled))
+            return _read_line(read_input, prompt)
+        except Exception as error:  # noqa: BLE001 - never unwind the REPL
+            sink(render_error(error, state.enabled))
+            _close_voice(state)
+            sink(dim("voice off — keyboard input", state.enabled))
+            return _read_line(read_input, prompt)
+        if gated is None:
+            continue
+        kind, text = gated
+        if kind == HEARD:
+            sink(dim(f"  {ZAP} heard {CHEVRON} ", state.enabled)
+                 + fg(CYAN, text, state.enabled))
+            return text
+        sink(dim(f"  · ignored: {text}", state.enabled))
+    return None
+
+
+def _next_line(state: ReplState, read_input, prompt: str, sink):
+    """One user input line: keyboard, or the microphone in voice mode."""
+    if state.voice is None or not state.voice.hears:
+        return _read_line(read_input, prompt)
+    return _listen_line(state, read_input, prompt, sink)
+
+
 def _dispatch(state: ReplState, line: str, sink) -> None:
     """Handle one non-empty input line: slash command or research task."""
     if line.startswith("/"):
@@ -666,13 +913,17 @@ def _error_hint(error: Exception) -> str | None:
     import urllib.error
     if isinstance(error, FileNotFoundError):
         return ("a data file is missing — reinstall: uv tool install "
-                "--force 'threetoks[web,browser] @ <repo root>'")
+                "--force '3toks[web,browser] @ <repo root>'")
     if isinstance(error, ImportError):
         return ("missing optional dependency — install the extras: "
-                "pip install 'threetoks[web,browser]'")
+                "pip install '3toks[web,browser]'")
     if isinstance(error, (ConnectionError, urllib.error.URLError)):
         return ("is Ollama running? start it and pull the model: "
-                "ollama pull qwen2.5:1.5b-instruct")
+                "ollama pull qwen3.5:2b")
+    if "API_KEY" in str(error):
+        return ("export the key in your shell (and your shell profile, so "
+                "it survives a new terminal), or set [llm] provider = "
+                "ollama in config.ini")
     return None
 
 
@@ -696,7 +947,7 @@ def repl(state: ReplState, read_input=input, sink=print) -> None:
     """The interactive loop: banner already shown; read, dispatch, repeat."""
     prompt = prompt_text(state.enabled)
     while state.running:
-        line = _read_line(read_input, prompt)
+        line = _next_line(state, read_input, prompt, sink)
         if line is None:
             sink("\n" + gradient(SIGN_OFF, state.enabled))
             return
@@ -716,7 +967,7 @@ def _make_provider(config, sink):
         from threetoks.web.search import auto_provider
     except ImportError:
         sink(dim("  web extras missing — web agent disabled "
-                 "(install: uv tool install 'threetoks[web]')",
+                 "(install: uv tool install '3toks[web]')",
                  _color_enabled()))
         return None
     search_mod.MIN_SEARCH_INTERVAL_S = config.search.min_interval_s
@@ -764,7 +1015,7 @@ def unknown_family_notice(model: str) -> str | None:
             "ChatML, which may silently degrade generations. Known "
             "families: qwen/smollm (chatml), gemma, llama3, "
             "mistral/mixtral/llama2, phi3, deepseek-r1. The measured "
-            "policy model is qwen2.5:1.5b-instruct.")
+            "policy model is qwen3.5:2b.")
 
 
 def _make_retriever(config, provider):
@@ -779,6 +1030,40 @@ def _make_retriever(config, provider):
     return Retriever(provider, cache_path=config.code.snippet_cache)
 
 
+def _warn_bad_config(sink) -> None:
+    """Say so when the config file was ignored and defaults took over.
+
+    A file that fails to parse degrades to the built-in defaults rather
+    than raising, which is otherwise invisible: the session simply runs
+    on a config the user did not write (see config.config_problem).
+    """
+    from threetoks.config import config_problem
+    problem = config_problem()
+    if problem:
+        sink(fg(AMBER, problem, _color_enabled()))
+
+
+def _make_relay(config, sink):
+    """A live Relay on a Raspberry Pi with the extra installed, else None."""
+    from threetoks.relay import relay_available
+    if not relay_available():
+        return None
+    from threetoks.relay import Relay
+    try:
+        return Relay(pin=config.relay.pin)
+    except Exception as error:  # noqa: BLE001 - hardware; degrade, don't die
+        sink(fg(AMBER, f"  relay unavailable: {error}", _color_enabled()))
+        return None
+
+
+def _make_capture(config):
+    """A camera-frame callable when opencv is installed, else None."""
+    from threetoks.camera import camera_available, capture_jpeg_b64
+    if not camera_available():
+        return None
+    return lambda: capture_jpeg_b64(config.camera.index)
+
+
 def build_state(model: str = None, sink=print):
     """Assemble live Services/specs/policy from the resolved config file.
 
@@ -788,8 +1073,8 @@ def build_state(model: str = None, sink=print):
     """
     from pathlib import Path
 
-    from threetoks.agents import default_agents
-    from threetoks.backend.ollama import OllamaBackend
+    from threetoks.agents import default_agents, optional_agents
+    from threetoks.backend.providers import make_backend
     from threetoks.cli import make_policy_config
     from threetoks.config import load_config
     from threetoks.memory import MemoryStore
@@ -798,28 +1083,41 @@ def build_state(model: str = None, sink=print):
     from threetoks.trace import Tracer
 
     config = load_config()
+    _warn_bad_config(sink)
     provider = _make_provider(config, sink)
     services = Services(provider=provider,
                         files_root=Path(config.files.root),
                         max_research_rounds=config.research.max_rounds,
-                        retriever=_make_retriever(config, provider))
+                        retriever=_make_retriever(config, provider),
+                        relay=_make_relay(config, sink),
+                        capture_frame=_make_capture(config))
     fetcher = _initial_fetcher(config, services, sink)
-    specs = default_agents(services)
+    chosen_model = model or config.llm.model
+    specs = default_agents(services) + optional_agents(services, chosen_model)
     if provider is None:  # bare install: never route to the web agent
         specs = [spec for spec in specs if spec.name != "web"]
-    factory = lambda name: Policy(OllamaBackend(), make_policy_config(name),
-                                  Tracer(None))
-    chosen_model = model or config.llm.model
-    notice = unknown_family_notice(chosen_model)
-    if notice:
-        sink(notice)
+    factory = lambda name: Policy(make_backend(config.llm),
+                                  make_policy_config(name), Tracer(None),
+                                  debug=False)
+    if config.llm.provider == "ollama":  # families only exist in raw mode
+        notice = unknown_family_notice(chosen_model)
+        if notice:
+            sink(notice)
     policy = factory(chosen_model)
     memory = MemoryStore.load(config.memory.path) if config.memory.enabled \
         else None
-    return ReplState(services, specs, policy, chosen_model, factory,
+    state = ReplState(services, specs, policy, chosen_model, factory,
                      enabled=_color_enabled(), fetcher=fetcher,
                      memory=memory, memory_path=config.memory.path,
-                     browser_visible=config.browser.visible)
+                     browser_visible=config.browser.visible,
+                     voice_config=config.voice,
+                     llm_provider=config.llm.provider)
+    # Re-bind the factory so future model swaps inherit the current debug flag
+    state.policy_factory = lambda name: Policy(make_backend(config.llm),
+                                                make_policy_config(name),
+                                                Tracer(None),
+                                                debug=state.debug)
+    return state
 
 
 def main(model: str = None) -> None:
@@ -836,34 +1134,49 @@ def main(model: str = None) -> None:
             print()
             print(dim("setup cancelled — nothing saved", _color_enabled()))
             return
-    state = build_state(model)
+    try:
+        state = build_state(model)
+    except RuntimeError as error:  # e.g. a provider without its API key
+        print(render_error(error, _color_enabled()))
+        return
     print(build_banner(state.model, len(state.specs), state.enabled))
+    if state.voice_config is not None and state.voice_config.enabled:
+        print(handle_command(state, "/voice on"))
     try:
         repl(state)
     finally:
+        _close_voice(state)
         _close_active_fetcher(state)
         if state.memory is not None:
             state.memory.dump(state.memory_path)
 
 
+# Demo ticker events; the last one is a decision truncated by the node's
+# token cap, the failure /debug exists to explain.
+_DEMO_EVENTS = (
+    {"node": "menu", "value": "open result 2: Anthropic pricing",
+     "valid": True, "out_tokens": 2, "wall_s": 0.31},
+    {"node": "pick_many", "value": [3, 7], "valid": True, "resolved":
+     ["Opus pricing was updated in June.", "Input tokens cost $15/M."],
+     "out_tokens": 5, "wall_s": 0.62},
+    {"tag": "curate", "node": "menu", "value": "keep note 3",
+     "valid": True, "out_tokens": 1, "wall_s": 0.18},
+    {"node": "short_text", "value": "anthropic api price per token",
+     "valid": True, "out_tokens": 8, "wall_s": 1.55},
+    {"node": "menu", "valid": False, "out_tokens": 3, "wall_s": 0.22,
+     "attempt": 2, "done_reason": "length",
+     "raw_text": "Okay, so the user is asking me to"},
+)
+
+
 def _demo() -> None:
     """Non-interactive render of every TUI piece for eyeballing."""
     enabled = _color_enabled()
-    print(build_banner("qwen2.5:1.5b-instruct", 2, enabled))
+    print(build_banner("qwen3.5:2b", 2, enabled))
     print()
-    events = [
-        {"node": "menu", "value": "open result 2: Anthropic pricing",
-         "valid": True, "out_tokens": 2, "wall_s": 0.31},
-        {"node": "pick_many", "value": [3, 7], "valid": True, "resolved":
-         ["Opus pricing was updated in June.", "Input tokens cost $15/M."],
-         "out_tokens": 5, "wall_s": 0.62},
-        {"tag": "curate", "node": "menu", "value": "keep note 3",
-         "valid": True, "out_tokens": 1, "wall_s": 0.18},
-        {"node": "short_text", "value": "anthropic api price per token",
-         "valid": True, "out_tokens": 8, "wall_s": 1.55},
-    ]
-    for event in events:
+    for event in _DEMO_EVENTS:
         print(build_ticker_line(event, enabled))
+    print(build_debug_line(_DEMO_EVENTS[-1], enabled))  # as /debug on shows it
     print(dim(f"  {ZAP} routed {CHEVRON} ", enabled)
           + fg(VIOLET, "web", enabled))
     print()

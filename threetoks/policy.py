@@ -9,8 +9,9 @@ Owns everything that makes tiny-model decisions reliable:
 import random
 from dataclasses import dataclass
 
-from threetoks.backend.base import (FAMILY_R1, GenOpts, GenResult, LLMBackend,
-                                   ModelSpec, build_raw_prompt, family_stops)
+from threetoks.backend.base import (FAMILY_R1, ChatPrompt, GenOpts, GenResult,
+                                   LLMBackend, ModelSpec, build_raw_prompt,
+                                   family_stops)
 from threetoks.nodes import Decision
 from threetoks.render import Episode
 from threetoks.trace import Tracer
@@ -39,10 +40,13 @@ class Policy:
     """Turns (episode, node) into a Decision via the backend."""
 
     def __init__(self, backend: LLMBackend, config: PolicyConfig,
-                 tracer: Tracer | None = None):
+                 tracer: Tracer | None = None, debug: bool = False):
         self.backend = backend
         self.config = config
         self.tracer = tracer or Tracer(None)
+        self.debug = debug
+        chat = getattr(backend, "chat", None)  # chat-API vs raw transport
+        self._chat = chat if callable(chat) else None
 
     def decide(self, episode: Episode, node, think_budget: int = 0) -> Decision:
         """Run voting (menus, if configured) or the retry ladder."""
@@ -92,14 +96,8 @@ class Policy:
 
     def _generate_plain(self, user: str, node) -> GenResult:
         """One completion at vote temperature, no think phase."""
-        prompt = build_raw_prompt(self.config.spec, user,
-                                  system=self.config.system,
-                                  prefill=node.prefill)
-        opts = GenOpts(max_tokens=node.max_tokens,
-                       temperature=VOTE_TEMPERATURE,
-                       stop=self._stops(node),
-                       num_ctx=self.config.num_ctx)
-        return self.backend.complete(self.config.spec.name, prompt, opts)
+        return self._call(user, self.config.system, node.prefill, node,
+                          VOTE_TEMPERATURE)
 
     def _generate(self, user: str, node, attempt: int,
                   think_budget: int) -> GenResult:
@@ -107,21 +105,61 @@ class Policy:
 
         A node may pin its own temperature (``node.temperature``); the
         coding vertical uses this to resample a method body with diversity
-        on a repair pass rather than climbing the attempt ladder.
+        on a repair pass rather than climbing the attempt ladder. The
+        think phase needs raw-mode prompt surgery, so it never runs over
+        a chat transport.
         """
         override = getattr(node, "temperature", None)
         temperature = override if override is not None else \
             TEMPERATURE_LADDER[min(attempt, len(TEMPERATURE_LADDER) - 1)]
         prefix = ""
-        if think_budget > 0 and self.config.spec.family == FAMILY_R1:
+        if think_budget > 0 and self.config.spec.family == FAMILY_R1 \
+                and self._chat is None:
             prefix = self._think(user, think_budget, temperature)
         system = getattr(node, "system", None) or self.config.system
+        return self._call(user, system, prefix + node.prefill, node,
+                          temperature)
+
+    def _call(self, user: str, system: str, prefill: str, node,
+              temperature: float) -> GenResult:
+        """One completion via the chat or raw transport.
+
+        Chat backends get un-templated parts and only the node's own
+        stops (end-of-turn is the API's job); the raw path renders the
+        family template and must let the family stops ride along.
+        """
+        images = tuple(getattr(node, "images", ()))
+        if self._chat is not None:
+            opts = GenOpts(max_tokens=node.max_tokens,
+                           temperature=temperature,
+                           stop=tuple(getattr(node, "stop", ())),
+                           num_ctx=self.config.num_ctx, images=images)
+            result = self._chat(self.config.spec.name,
+                                ChatPrompt(system, user, prefill), opts)
+            if self.debug:
+                self._debug_dump(ChatPrompt(system, user, prefill), result)
+            return result
         prompt = build_raw_prompt(self.config.spec, user, system=system,
-                                  prefill=prefix + node.prefill)
+                                  prefill=prefill)
         opts = GenOpts(max_tokens=node.max_tokens, temperature=temperature,
-                       stop=self._stops(node),
-                       num_ctx=self.config.num_ctx)
-        return self.backend.complete(self.config.spec.name, prompt, opts)
+                       stop=self._stops(node), num_ctx=self.config.num_ctx,
+                       images=images)
+        result = self.backend.complete(self.config.spec.name, prompt, opts)
+        if self.debug:
+            self._debug_dump(prompt, result)
+        return result
+
+    def _debug_dump(self, prompt, result: GenResult) -> None:
+        """Emit a debug event with the full prompt and result text."""
+        prompt_text = prompt.user if isinstance(prompt, ChatPrompt) else str(prompt)
+        self.tracer.record({
+            "debug": True,
+            "prompt_text": prompt_text,
+            "result_text": result.text,
+            "prompt_tokens": result.prompt_tokens,
+            "out_tokens": result.out_tokens,
+            "done_reason": result.done_reason,
+        })
 
     def _stops(self, node) -> tuple[str, ...]:
         """The node's stop sequences plus the family's end-of-turn token.
@@ -144,6 +182,8 @@ class Policy:
         opts = GenOpts(max_tokens=budget, temperature=temperature,
                        stop=(THINK_STOP,), num_ctx=self.config.num_ctx)
         result = self.backend.complete(self.config.spec.name, prompt, opts)
+        if self.debug:
+            self._debug_dump(prompt, result)
         return f"<think>\n{result.text}\n{THINK_STOP}\n\n"
 
     def _permutation(self, node, step: int, attempt: int) -> tuple[int, ...]:
@@ -166,14 +206,22 @@ class Policy:
 
     def _record(self, episode: Episode, node, perm: tuple[int, ...],
                 attempt: int, result: GenResult, decision: Decision) -> None:
-        """Trace one attempt."""
+        """Trace one attempt.
+
+        ``done_reason`` rides along as the only thing separating a wrong
+        answer from one the node's token cap cut off (``length``) — the
+        shape a chat transport hits when it spends the cap on preamble
+        instead of the digit raw-mode prefill would have forced.
+        """
         resolved = self._resolve_picks(node, decision)
         self.tracer.record({
             **({"resolved": resolved} if resolved else {}),
             **({"tag": node.tag} if getattr(node, "tag", None) else {}),
+            **({"mode": "chat"} if self._chat is not None else {}),
             "step": episode.step_count, "node": node.kind,
             "question": node.question[:120], "perm": list(perm),
             "attempt": attempt, "raw_text": result.text,
+            "done_reason": result.done_reason,
             "value": decision.value, "valid": decision.valid,
             "prompt_tokens": result.prompt_tokens,
             "out_tokens": result.out_tokens, "wall_s": round(result.wall_s, 3)})
@@ -192,10 +240,13 @@ if __name__ == "__main__":
             return GenResult(self.scripted.pop(0), 10, 2, 0.01, "stop")
 
     backend = _FakeBackend(["garbage", " 2"])
-    policy = Policy(backend, PolicyConfig(ModelSpec("m", FAMILY_R1)))
+    events = []
+    policy = Policy(backend, PolicyConfig(ModelSpec("m", FAMILY_R1)),
+                    Tracer(None, on_event=events.append))
     episode = Episode("SYS", "t")
     decision = policy.decide(episode, MenuNode("Pick.", ["a", "b", "c"]))
     assert decision.valid and decision.value in {"a", "b", "c"}
     assert len(backend.prompts) == 2, "retry ladder should have re-asked"
     assert backend.prompts[0].endswith("ANSWER:")
+    assert all("done_reason" in event for event in events), events
     print("smoke OK")

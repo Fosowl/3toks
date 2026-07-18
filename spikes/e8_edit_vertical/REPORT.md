@@ -22,7 +22,7 @@ including the live model's failures.
 | Trusted-oracle gate: run a scenario's test before (must fail) and after (must pass) an edit | `oracle.py` | (d) |
 | Five fixture scenarios + the state machine that drives one episode | `scenarios.py`, `vertical.py` | (e) |
 | Offline scripted run (all 5) | `run_offline.py` | proves the state machine |
-| Live run against `qwen2.5:1.5b-instruct` | `run_live.py` | measures the real model |
+| Live run against `qwen3.5:2b` | `run_live.py` | measures the real model |
 | Token/decision measurement, delta-economics | `measure.py` | MEASURE |
 | Offline unittest for splice+gate machinery | `tests/test_edit_machinery.py` | required deliverable |
 
@@ -119,7 +119,7 @@ python3 spikes/e8_edit_vertical/run_offline.py
 # offline unittest for the splice+gate machinery
 python3 -m unittest spikes.e8_edit_vertical.tests.test_edit_machinery -v
 
-# live: real qwen2.5:1.5b-instruct via Ollama, every decision is real
+# live: real qwen3.5:2b via Ollama, every decision is real
 python3 spikes/e8_edit_vertical/run_live.py            # all 5
 python3 spikes/e8_edit_vertical/run_live.py 1 3         # just scenarios 1 and 3
 ```
@@ -133,7 +133,7 @@ Each module also has its own `if __name__ == "__main__":` smoke block
 ladder retries separately. "Output tokens" is summed across **every**
 attempt actually made (including retries that were later discarded) -- an
 honest accounting, not just the tokens that were finally kept. Whole-file
-token counts are the real `qwen2.5:1.5b-instruct` tokenizer's
+token counts are the real `qwen3.5:2b` tokenizer's
 `prompt_eval_count` for that file's text (one throwaway Ollama call per
 file, not a chars/4 guess) -- labelled `ollama-tokenizer` in the raw output.
 
@@ -152,7 +152,7 @@ accuracy measurement.
 | 4 normalize_whitespace (navigate+replace) | 5 | 14 | 144 | 0.097 | 90.3% |
 | 5 validate (disambiguate+replace) | 3 | 10 | 87 | 0.115 | 88.5% |
 
-### Live (qwen2.5:1.5b-instruct via Ollama, every decision real)
+### Live (qwen3.5:2b via Ollama, every decision real)
 
 **2 / 5 scenarios succeeded live.** Reproduced across two full runs (same
 pattern both times -- see failure narratives below).
@@ -311,7 +311,7 @@ free-lookup navigation stack, a splice-and-reparse-gate loop reusing the
 code vertical's own gates, a trusted before/after oracle, and a state
 machine that composes them -- all runnable end to end, offline and live,
 with reproducible measurements. It does **not** demonstrate that
-`qwen2.5:1.5b-instruct` can reliably pick the right operation or
+`qwen3.5:2b` can reliably pick the right operation or
 disambiguate ambiguous names; on this sample it picked correctly for the
 two most direct scenarios (unique-name lookup + a syntactically simple
 delete-vs-replace choice) and failed on the one requiring an

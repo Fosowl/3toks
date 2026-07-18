@@ -270,6 +270,17 @@ class GuardTest(unittest.TestCase):
         vertical.apply(final, Decision("short_text", "1989", "", valid=True))
         self.assertEqual(vertical.result()["answer"], "1989")
 
+    def test_multi_digit_menu_bleed_gets_retry(self):
+        """Two-digit numbers like '10' are caught as bleed, not leaked."""
+        vertical, _ = make_vertical()
+        vertical.steps_left = FORCE_ANSWER_AT_STEPS_LEFT
+        final = vertical.next_node()
+        vertical.apply(final, Decision("short_text", "10", "", valid=True))
+        retry = vertical.next_node()
+        self.assertIn("plain words", retry.question)
+        vertical.apply(retry, Decision("short_text", "10", "", valid=True))
+        self.assertEqual(vertical.result()["answer"], "(no answer)")
+
     def test_forced_next_node_is_idempotent(self):
         vertical, _ = make_vertical()
         vertical.steps_left = FORCE_ANSWER_AT_STEPS_LEFT

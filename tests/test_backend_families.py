@@ -63,7 +63,7 @@ class TemplateRenderingTest(unittest.TestCase):
 
 
 class DetectFamilyTest(unittest.TestCase):
-    KNOWN = {"qwen2.5:1.5b-instruct": FAMILY_CHATML,
+    KNOWN = {"qwen3.5:2b": FAMILY_CHATML,
              "smollm2:135m": FAMILY_CHATML,
              "gemma3:4b": FAMILY_GEMMA,
              "gemma2:2b": FAMILY_GEMMA,
@@ -86,7 +86,7 @@ class DetectFamilyTest(unittest.TestCase):
             self.assertFalse(known, tag)
 
     def test_unknown_tags_produce_a_notice_and_known_do_not(self):
-        self.assertIsNone(unknown_family_notice("qwen2.5:1.5b-instruct"))
+        self.assertIsNone(unknown_family_notice("qwen3.5:2b"))
         notice = unknown_family_notice("granite4:tiny")
         self.assertIn("granite4:tiny", notice)
         self.assertIn("ChatML", notice)
@@ -116,7 +116,7 @@ class FamilyStopMergingTest(unittest.TestCase):
     def test_menu_nodes_still_carry_the_family_stop(self):
         backend = _CapturingBackend()
         policy = Policy(backend, PolicyConfig(
-            ModelSpec("qwen2.5:1.5b-instruct", FAMILY_CHATML)))
+            ModelSpec("qwen3.5:2b", FAMILY_CHATML)))
         policy.decide(Episode("sys", "task"), MenuNode("q", ["a", "b"]))
         self.assertEqual(backend.opts.stop, ("<|im_end|>",))
 
