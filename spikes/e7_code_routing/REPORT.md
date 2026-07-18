@@ -69,7 +69,7 @@ From the repo root (needs `threetoks` importable, hence the `PYTHONPATH`):
 cd spikes/e7_code_routing
 PYTHONPATH="<repo_root>:." python3 -m unittest test_offline -v
 
-# live measurement (needs Ollama + qwen2.5:1.5b-instruct pulled)
+# live measurement (needs Ollama + qwen3.5:2b pulled)
 cd <repo_root>
 PYTHONPATH="$PWD:$PWD/spikes/e7_code_routing" \
     python3 spikes/e7_code_routing/measure.py --backend ollama \
@@ -96,7 +96,7 @@ pre-router miss below (see "Concrete failures").
 
 ## Measured numbers
 
-Live run: `qwen2.5:1.5b-instruct` via Ollama at `localhost:11434`,
+Live run: `qwen3.5:2b` via Ollama at `localhost:11434`,
 `threetoks.backend.base.FAMILY_CHATML`, default `PolicyConfig` (temperature
 ladder 0.0/0.0/0.4, `MenuNode` cap of 3 output tokens). 69 benchmark items,
 about 9 seconds wall time total for the whole run (all 21 model calls).

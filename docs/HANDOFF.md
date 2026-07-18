@@ -60,7 +60,7 @@ gitignored; recon in docs/recon-agenticseek.md).
 
 ## 2. Experimentally validated facts (Phase 0 — spikes/*/REPORT.md)
 
-- **Policy model = `qwen2.5:1.5b-instruct` for ALL nodes.** E1: 76.7% menu
+- **Policy model = `qwen3.5:2b` for ALL nodes.** E1: 76.7% menu
   accuracy / 0.285s / 3 tok. `deepseek-r1:1.5b` DISQUALIFIED (23-26% all
   variants, escape-biased; also bad at picks in E3). R1 raw-mode think
   suppression (`<think>\n\n</think>\n\n` + prefill) stays supported in the

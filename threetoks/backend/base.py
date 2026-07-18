@@ -10,7 +10,7 @@ survive that, multi-line generations derail (live failure: gemma3 under
 a ChatML template stubbed every method of a factorial). ``detect_family``
 maps known Ollama tag patterns to their template; an unknown tag falls
 back to ChatML with ``known=False`` so callers can warn instead of
-failing silently. The settled policy model remains qwen2.5:1.5b-instruct
+failing silently. The settled policy model remains qwen3.5:2b
 (DESIGN.md §11) — other families are supported, not recommended.
 """
 import re
@@ -207,7 +207,7 @@ if __name__ == "__main__":
     spec = ModelSpec("deepseek-r1:1.5b", FAMILY_R1)
     prompt = build_raw_prompt(spec, "Pick 1 or 2.", prefill="ANSWER:")
     assert prompt.endswith("</think>\n\nANSWER:") and R1_USER in prompt
-    chatml = build_raw_prompt(ModelSpec("qwen2.5:1.5b-instruct", FAMILY_CHATML),
+    chatml = build_raw_prompt(ModelSpec("qwen3.5:2b", FAMILY_CHATML),
                               "Pick 1 or 2.", system="s", prefill="ANSWER:")
     assert chatml.endswith("assistant\nANSWER:") and "<|im_start|>system" in chatml
 
@@ -226,7 +226,7 @@ if __name__ == "__main__":
                            system="s", prefill="A:")
     assert phi.endswith("<|assistant|>\nA:") and "<|system|>\ns<|end|>" in phi
 
-    assert detect_family("qwen2.5:1.5b-instruct") == (FAMILY_CHATML, True)
+    assert detect_family("qwen3.5:2b") == (FAMILY_CHATML, True)
     assert detect_family("gemma3:4b") == (FAMILY_GEMMA, True)
     assert detect_family("llama3.2:1b") == (FAMILY_LLAMA3, True)
     assert detect_family("mixtral:8x7b") == (FAMILY_MISTRAL, True)
@@ -241,7 +241,7 @@ if __name__ == "__main__":
     assert is_vision_model("z-ai/glm-5v-turbo")   # the v marks vision
     assert not is_vision_model("z-ai/glm-4-32b")  # no v: text only
     assert is_vision_model("qwen2.5vl:7b") and is_vision_model("qwen2-vl-72b")
-    assert not is_vision_model("qwen2.5:1.5b-instruct")
+    assert not is_vision_model("qwen3.5:2b")
     assert not is_vision_model("mistral:7b")
     assert GenOpts(max_tokens=3).images == ()
     assert ChatPrompt("s", "u").prefill == ""

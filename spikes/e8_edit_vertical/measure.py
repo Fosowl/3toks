@@ -20,7 +20,7 @@ for _p in (str(SPIKE_DIR), str(REPO_ROOT)):
 from threetoks.backend.base import FAMILY_CHATML, GenOpts, ModelSpec  # noqa: E402
 from threetoks.backend.ollama import OllamaBackend  # noqa: E402
 
-MODEL_NAME = "qwen2.5:1.5b-instruct"
+MODEL_NAME = "qwen3.5:2b"
 _HEURISTIC_CHARS_PER_TOKEN = 4
 
 _backend = OllamaBackend()

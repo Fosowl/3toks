@@ -49,11 +49,11 @@ if __name__ == "__main__":
     names = [spec.name for spec in specs]
     assert names == ["casual", "web", "files", "code"], names
     assert len(set(names)) == len(names), "names must be unique"
-    assert optional_agents(Services(), "qwen2.5:1.5b-instruct") == []
+    assert optional_agents(Services(), "qwen3.5:2b") == []
     wired = Services(relay=object(), capture_frame=lambda: "b64")
     extras = [spec.name for spec in optional_agents(wired, "llava:7b")]
     assert extras == ["light", "look"], extras
     text_only = [spec.name for spec in
-                 optional_agents(wired, "qwen2.5:1.5b-instruct")]
+                 optional_agents(wired, "qwen3.5:2b")]
     assert text_only == ["light"], text_only
     print("smoke OK")

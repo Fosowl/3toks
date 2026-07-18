@@ -168,7 +168,7 @@ def renormalize_indent(text: str) -> str:
     threetoks/code/gates.reconstruct already strips a stray leading space
     on the completion's FIRST line (E6: otherwise it lands at 5 spaces
     against the prefill's 4 and corrupts the module). Live E8 runs turned
-    up the same drift one level down: qwen2.5:1.5b-instruct sometimes
+    up the same drift one level down: qwen3.5:2b sometimes
     indents EVERY continuation line at 5 spaces instead of 4 (a docstring
     line, then a run of body lines, all shifted by one column), which
     `.lstrip()` on the whole string does not touch because it only trims
@@ -263,7 +263,7 @@ if __name__ == "__main__":
     ast.parse(with_helper)
 
     # live-observed drift: every continuation line indented one column too
-    # deep (5 spaces, not 4) -- a real qwen2.5:1.5b-instruct completion.
+    # deep (5 spaces, not 4) -- a real qwen3.5:2b completion.
     drifted = ('"""doc"""\n     start = (page - 1) * size\n'
               "     end = start + size\n     return items[start:end]")
     fixed = renormalize_indent(drifted)

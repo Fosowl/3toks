@@ -14,7 +14,7 @@ Requires Python 3.10+ and (for anything that talks to the model)
 [Ollama](https://ollama.com) running locally:
 
 ```sh
-ollama pull qwen2.5:1.5b-instruct
+ollama pull qwen3.5:2b
 ```
 
 Dev install, with the optional extras (web search + browser fetching):

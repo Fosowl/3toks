@@ -87,7 +87,7 @@ full re-ingest).
 
 ## 5. Model strategy (8GB M1) — settled by E1/E3
 
-- **Policy model for ALL nodes: `qwen2.5:1.5b-instruct`** (ChatML +
+- **Policy model for ALL nodes: `qwen3.5:2b`** (ChatML +
   `menu_picker` system prompt + prefill): 76.7% menu accuracy, 97.5%
   format compliance, 0.285s/decision (E1); 85% note-pick recall (E3).
   Single-model design — no model swapping on 8GB.
@@ -298,7 +298,7 @@ scan, a subprocess). So the vertical consults the model only through
 bounded *generations* (a plan, then one method body at a time) and verifies
 each deterministically. In v1 the core loop has almost no menus.
 
-**Measured (live qwen2.5:1.5b-instruct, M1 8GB):** per-method generation
+**Measured (live qwen3.5:2b, M1 8GB):** per-method generation
 83% first-try / 92% pass@3 (E5a); whole-module 4/6 goals working, 6/6
 always parse (E6). The file on disk always parses by construction — a body
 is stored only after ast checks; unfilled methods render as

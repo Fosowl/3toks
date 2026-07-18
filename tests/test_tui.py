@@ -55,7 +55,7 @@ def make_state(**overrides):
         specs=[FakeSpec("casual", "small talk"),
                FakeSpec("web", "internet research")],
         policy=object(),
-        model="qwen2.5:1.5b-instruct",
+        model="qwen3.5:2b",
         policy_factory=factory,
         enabled=overrides.get("enabled", True),
     )
@@ -789,19 +789,19 @@ class ModelSwapOptionalAgentsTest(unittest.TestCase):
         state.services.capture_frame = lambda: "b64"
         tui.handle_command(state, "/model llava:7b")
         self.assertIn("look", [spec.name for spec in state.specs])
-        tui.handle_command(state, "/model qwen2.5:1.5b-instruct")
+        tui.handle_command(state, "/model qwen3.5:2b")
         self.assertNotIn("look", [spec.name for spec in state.specs])
 
     def test_light_survives_model_swaps_when_relay_is_wired(self):
         state = make_state()
         state.services.relay = object()
-        tui.handle_command(state, "/model qwen2.5:1.5b-instruct")
+        tui.handle_command(state, "/model qwen3.5:2b")
         self.assertIn("light", [spec.name for spec in state.specs])
 
     def test_without_capabilities_specs_stay_untouched(self):
         state = make_state()
         before = list(state.specs)
-        tui.handle_command(state, "/model qwen2.5:1.5b-instruct")
+        tui.handle_command(state, "/model qwen3.5:2b")
         self.assertEqual(state.specs, before)
 
     def test_family_notice_only_applies_to_the_ollama_provider(self):

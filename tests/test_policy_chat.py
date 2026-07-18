@@ -33,7 +33,7 @@ class FakeRawBackend:
 
 
 def make_policy(backend, vote_k=1):
-    spec = ModelSpec("qwen2.5:1.5b-instruct", FAMILY_CHATML)
+    spec = ModelSpec("qwen3.5:2b", FAMILY_CHATML)
     return Policy(backend, PolicyConfig(spec, system="SYS", vote_k=vote_k))
 
 
@@ -45,7 +45,7 @@ class ChatDispatchTest(unittest.TestCase):
                                  MenuNode("Pick.", ["a", "b"]))
         self.assertTrue(decision.valid)
         model, prompt, opts = backend.calls[0]
-        self.assertEqual(model, "qwen2.5:1.5b-instruct")
+        self.assertEqual(model, "qwen3.5:2b")
         self.assertEqual(prompt.system, "SYS")
         self.assertEqual(prompt.prefill, "ANSWER:")
         self.assertIn("ACTIONS:", prompt.user)

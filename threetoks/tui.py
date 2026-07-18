@@ -919,7 +919,7 @@ def _error_hint(error: Exception) -> str | None:
                 "pip install '3toks[web,browser]'")
     if isinstance(error, (ConnectionError, urllib.error.URLError)):
         return ("is Ollama running? start it and pull the model: "
-                "ollama pull qwen2.5:1.5b-instruct")
+                "ollama pull qwen3.5:2b")
     if "API_KEY" in str(error):
         return ("export the key in your shell (and your shell profile, so "
                 "it survives a new terminal), or set [llm] provider = "
@@ -1015,7 +1015,7 @@ def unknown_family_notice(model: str) -> str | None:
             "ChatML, which may silently degrade generations. Known "
             "families: qwen/smollm (chatml), gemma, llama3, "
             "mistral/mixtral/llama2, phi3, deepseek-r1. The measured "
-            "policy model is qwen2.5:1.5b-instruct.")
+            "policy model is qwen3.5:2b.")
 
 
 def _make_retriever(config, provider):
@@ -1172,7 +1172,7 @@ _DEMO_EVENTS = (
 def _demo() -> None:
     """Non-interactive render of every TUI piece for eyeballing."""
     enabled = _color_enabled()
-    print(build_banner("qwen2.5:1.5b-instruct", 2, enabled))
+    print(build_banner("qwen3.5:2b", 2, enabled))
     print()
     for event in _DEMO_EVENTS:
         print(build_ticker_line(event, enabled))

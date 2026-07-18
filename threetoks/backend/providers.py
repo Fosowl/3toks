@@ -140,7 +140,8 @@ class OpenAIChatBackend:
                                                              opts))
         choice = (data.get("choices") or [{}])[0]
         usage = data.get("usage") or {}
-        raw_text = (choice.get("message") or {}).get("content") or ""
+        msg = choice.get("message") or {}
+        raw_text = msg.get("content") or msg.get("reasoning_content") or ""
         return GenResult(text=_strip_prefill(raw_text, prompt.prefill),
                          prompt_tokens=usage.get("prompt_tokens", 0),
                          out_tokens=usage.get("completion_tokens", 0),
@@ -163,6 +164,8 @@ class OpenAIChatBackend:
             payload["stop"] = list(opts.stop[:MAX_OPENAI_STOPS])
         if opts.seed is not None:
             payload["seed"] = opts.seed
+        if "openrouter.ai" in self.base_url:
+            payload["include_reasoning"] = False
         return payload
 
     def _post(self, path: str, payload: dict) -> dict:

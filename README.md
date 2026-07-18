@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 An extremely token-frugal agentic framework for small local LLMs.
-Target: a *useful* agent even on a 1.5b model on 4GB-class hardware, with
+Target: a *useful* agent even on a 1.5b model on <4GB-class hardware, with
 sub-second decision steps.
 
 Core idea: the harness walks a **tree of decisions** and renders each one as
@@ -20,7 +20,7 @@ same tree-of-menus engine.
 - Writing a new agent: [docs/AGENTS.md](docs/AGENTS.md)
 - Phase-0 experiments: `spikes/` (E1 menu accuracy, E2 KV-cache latency,
   E3 note-taking quality, E4 reformulation recovery)
-- Default policy model: `qwen2.5:1.5b-instruct` via Ollama, for all nodes.
+- Default policy model: `qwen3.5:2b` via Ollama, for all nodes.
   `deepseek-r1:1.5b` is supported (raw-mode think suppression) but is not
   used by default — see Phase-0 findings below.
 
@@ -69,7 +69,7 @@ with the default model pulled (a cloud provider instead of Ollama works
 too — see [LLM providers](#llm-providers)):
 
 ```sh
-ollama pull qwen2.5:1.5b-instruct
+ollama pull qwen3.5:2b
 ```
 
 Interactive CLI:
@@ -244,7 +244,7 @@ escalation ladder for recovering from misclicks, and the repository layout.
 ## Phase-0 findings
 
 Phase-0 picked the default policy model and the shape of the decision nodes
-from measured behavior, not guesswork: `qwen2.5:1.5b-instruct` answers menus
+from measured behavior, not guesswork: `qwen3.5:2b` answers menus
 at 76.7% accuracy versus 23-26% for `deepseek-r1:1.5b` (disqualifying it as
 policy model), the escape option had to be rendered as an ordinary last
 numbered choice rather than digit `0` (tiny models essentially never emit an

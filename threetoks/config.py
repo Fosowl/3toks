@@ -23,11 +23,11 @@ DEFAULT_CONFIG_NAME = "config.ini"
 
 # --- built-in defaults (mirrored, with comments, in config.ini) ----------
 # The settled policy model (CLAUDE.md / DESIGN.md §11): every decision node
-# runs qwen2.5:1.5b-instruct. The backend speaks ChatML and R1 templates
+# runs qwen3.5:2b. The backend speaks ChatML and R1 templates
 # only — a model outside those families (e.g. gemma3) gets a template it
 # cannot parse, and while menus survive (one digit), every multi-line code
 # generation fails to reconstruct (live failure: factorial fully stubbed).
-DEFAULT_MODEL = "qwen2.5:1.5b-instruct"
+DEFAULT_MODEL = "qwen3.5:2b"
 DEFAULT_LLM_HOST = "http://localhost:11434"
 DEFAULT_PROVIDER = "ollama"
 DEFAULT_API_BASE = ""
