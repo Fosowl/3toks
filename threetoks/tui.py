@@ -1098,7 +1098,7 @@ def build_state(model: str = None, sink=print):
         specs = [spec for spec in specs if spec.name != "web"]
     factory = lambda name: Policy(make_backend(config.llm),
                                   make_policy_config(name), Tracer(None),
-                                  debug=state.debug)
+                                  debug=False)
     if config.llm.provider == "ollama":  # families only exist in raw mode
         notice = unknown_family_notice(chosen_model)
         if notice:
@@ -1106,12 +1106,18 @@ def build_state(model: str = None, sink=print):
     policy = factory(chosen_model)
     memory = MemoryStore.load(config.memory.path) if config.memory.enabled \
         else None
-    return ReplState(services, specs, policy, chosen_model, factory,
+    state = ReplState(services, specs, policy, chosen_model, factory,
                      enabled=_color_enabled(), fetcher=fetcher,
                      memory=memory, memory_path=config.memory.path,
                      browser_visible=config.browser.visible,
                      voice_config=config.voice,
                      llm_provider=config.llm.provider)
+    # Re-bind the factory so future model swaps inherit the current debug flag
+    state.policy_factory = lambda name: Policy(make_backend(config.llm),
+                                                make_policy_config(name),
+                                                Tracer(None),
+                                                debug=state.debug)
+    return state
 
 
 def main(model: str = None) -> None:

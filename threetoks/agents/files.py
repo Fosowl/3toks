@@ -48,7 +48,7 @@ OPT_ANSWER = "answer the task now"
 OPT_BACK = "back to the folder"
 OPT_NEXT_CHUNK = "read more of this file"
 OPT_SHELL = "run a shell command to inspect files"
-FINAL_PREFILL = "FINAL ANSWER:"
+FINAL_PREFILL = "FINAL ANSWER: It"
 CMD_PREFILL = "COMMAND:"
 # A bare menu digit or comma-index list ("1" / "1,2,3") is menu-format
 # bleed, not an answer; a real numeric answer like "1989" is fine.
