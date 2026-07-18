@@ -7,7 +7,7 @@ An extremely token-frugal agentic framework for small local LLMs.
 **Primary Goal**: a *useful* agent even on a 1.5b model on <4GB-class hardware, with
 sub-second decision steps.
 
-**Secondary Goal** (In progress): [Colibri](https://github.com/JustVugg/colibri/tree/main) compatibility for fast glm-5.2 powered agentic AI running on the SSD with <16gb ram.
+**Secondary Goal** (In progress): [Colibri](https://github.com/JustVugg/colibri/tree/main) compatibility for fast glm-5.2 powered agentic AI running on the SSD with <16gb ram — status in [Colibri compatibility](#colibri-compatibility-work-in-progress).
 
 Core idea: the harness walks a **tree of decisions** and renders each one as
 a numbered menu; the model answers with **~3 tokens**. Everything
@@ -164,6 +164,61 @@ answers with unparseable decisions (every ticker line renders `—`),
 means the node's token cap truncated the reply before the model answered
 (the caps are tuned for raw-mode prefill, so a chatty or reasoning model
 spends them on preamble).
+
+## Colibri compatibility (work in progress)
+
+[Colibri](https://github.com/JustVugg/colibri/tree/main) is a
+llama.cpp-style engine that runs GLM-5.2 (744B MoE, int4) by streaming
+experts from SSD. The intended wiring needs no new code on the 3toks
+side — colibri's `coli serve` speaks the OpenAI chat API, so it plugs in
+as a `custom` provider:
+
+```ini
+[llm]
+provider = custom
+api_base = http://127.0.0.1:8000/v1
+model = glm-5.2-colibri     ; must match coli serve's --model-id
+```
+
+The pairing is a natural fit: 3toks' append-only prompts line up with
+colibri's per-slot KV prefix reuse (each step only prefills the new
+suffix — the expensive part on an SSD-bound engine), the 3-24-token
+answer caps are the friendliest possible workload for a 0.05-7 tok/s
+decoder, colibri leaves thinking off by default, reports token usage,
+and serializes generation exactly like 3toks' one-request-at-a-time
+loop.
+
+**Not working yet.** Two standard request parameters that 3toks sends
+are currently rejected with HTTP 400 by colibri's server, so every
+episode dies on the first decision:
+
+- `seed` — the chat path always includes it; colibri answers
+  "Per-request seeds are not supported yet."
+- `stop` — pick-many and short-text nodes send a `"\n"` stop sequence;
+  colibri answers "Custom stop sequences are not supported yet."
+  (menu-only episodes would survive, but every vertical uses short-text
+  nodes).
+
+The fix should be on the colibri side (accept `seed`, honor `stop`
+server-side); PR coming (just bought a new SSD so that I can actually run colibri and do proper testing); until it lands, a 3toks-side workaround (omitting both
+for this provider) may ship first.
+
+**Limitations that remain once it connects:**
+
+- It runs in the same degraded chat mode as every other chat provider
+  (see [LLM providers](#llm-providers)): prefill is a hint, not
+  pre-seeded, so single-digit reliability leans on GLM-5.2's
+  instruction-following. A future path to full raw-mode fidelity is
+  colibri's `/v1/completions` endpoint (raw string prompt, no template)
+  plus a GLM chat template in the family table.
+- The HTTP timeout is a fixed 120s and colibri's non-streaming
+  responses send nothing until generation completes; on slow-SSD
+  hardware a single decision can exceed that. A configurable timeout is
+  on the list.
+- Throughput expectations: colibri decodes at 0.05-7 tok/s depending on
+  hardware. A 3toks episode spends a handful of tokens per step, which
+  is exactly the point — but a multi-step episode is still minutes, not
+  seconds. Sub-second decision steps stay a local-Ollama property.
 
 ## Voice, camera, and relay (optional)
 
