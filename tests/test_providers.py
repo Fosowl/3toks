@@ -86,6 +86,13 @@ class MakeBackendTest(unittest.TestCase):
         self.assertEqual(backend.api_key, "")
         self.assertIn("1234", backend.base_url)
 
+    def test_send_seed_reaches_backend_and_defaults_on(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(make_backend(_Llm("lm-studio")).send_seed)
+            llm = _Llm("lm-studio")
+            llm.send_seed = False
+            self.assertFalse(make_backend(llm).send_seed)
+
     def test_custom_without_api_base_raises(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(RuntimeError, "api_base"):
@@ -113,6 +120,14 @@ class OpenAIChatBackendTest(unittest.TestCase):
         self.assertEqual(payload["max_tokens"], 3)
         self.assertEqual(payload["seed"], 7)
         self.assertNotIn("stop", payload)
+
+    def test_send_seed_off_omits_seed(self):
+        backend = _CannedOpenAI("https://api.example.test/v1", api_key="k",
+                                send_seed=False)
+        backend.chat("m", ChatPrompt("", "pick"), GenOpts(max_tokens=3,
+                                                          seed=7))
+        _, payload = backend.sent
+        self.assertNotIn("seed", payload)
 
     def test_no_system_and_no_prefill_stay_absent(self):
         (_, payload), _ = self.chat(ChatPrompt("", "pick"),

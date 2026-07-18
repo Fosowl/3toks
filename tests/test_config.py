@@ -33,6 +33,7 @@ class DefaultsTest(unittest.TestCase):
         self.assertEqual(cfg.llm.model, config.DEFAULT_MODEL)
         self.assertEqual(cfg.llm.host, config.DEFAULT_LLM_HOST)
         self.assertEqual(cfg.llm.vote_k, config.DEFAULT_VOTE_K)
+        self.assertTrue(cfg.llm.send_seed)
         self.assertEqual(cfg.browser.mode, config.DEFAULT_BROWSER_MODE)
         self.assertFalse(cfg.browser.visible)
         self.assertEqual(cfg.search.searxng_url, config.DEFAULT_SEARXNG_URL)
@@ -54,6 +55,7 @@ class ParsingTest(unittest.TestCase):
     def test_full_ini_overrides_every_field(self):
         path = _write_ini(
             "[llm]\nmodel = my-model\nhost = http://h:1\nvote_k = 3\n"
+            "send_seed = false\n"
             "[browser]\nmode = stealth\nvisible = true\n"
             "[search]\nsearxng_url = http://s:2\nmin_interval_s = 2.5\n"
             "[research]\nmax_rounds = 7\nmax_steps = 40\n"
@@ -65,6 +67,7 @@ class ParsingTest(unittest.TestCase):
         self.assertEqual(cfg.llm.model, "my-model")
         self.assertEqual(cfg.llm.host, "http://h:1")
         self.assertEqual(cfg.llm.vote_k, 3)
+        self.assertFalse(cfg.llm.send_seed)
         self.assertEqual(cfg.browser.mode, "stealth")
         self.assertTrue(cfg.browser.visible)
         self.assertEqual(cfg.search.searxng_url, "http://s:2")

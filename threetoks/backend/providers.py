@@ -66,7 +66,8 @@ def make_backend(llm):
                            "in config.ini")
     key = _require_key(key_env, llm.provider) if key_required \
         else os.environ.get(key_env, "")
-    return OpenAIChatBackend(base_url, api_key=key)
+    return OpenAIChatBackend(base_url, api_key=key,
+                             send_seed=getattr(llm, "send_seed", True))
 
 
 def _require_key(env_var: str, provider: str) -> str:
@@ -125,13 +126,16 @@ class OpenAIChatBackend:
     One class covers openai/openrouter/together/deepseek/google-compat/
     lm-studio/custom — they differ only in base URL and key env var (see
     OPENAI_COMPAT). Prefill is hinted and stripped, never native.
+    ``send_seed=False`` omits the sampling seed from requests, for
+    servers that reject the parameter.
     """
 
     def __init__(self, base_url: str, api_key: str = "",
-                 timeout_s: int = DEFAULT_TIMEOUT_S):
+                 timeout_s: int = DEFAULT_TIMEOUT_S, send_seed: bool = True):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout_s = timeout_s
+        self.send_seed = send_seed
 
     def chat(self, model: str, prompt: ChatPrompt, opts: GenOpts) -> GenResult:
         """Run one chat completion and map it onto GenResult."""
@@ -157,15 +161,22 @@ class OpenAIChatBackend:
         messages.append({"role": "user",
                          "content": _openai_content(_hinted_user(prompt),
                                                     opts.images)})
+        max_tokens = opts.max_tokens
         payload = {"model": model, "messages": messages,
-                   "max_tokens": opts.max_tokens,
+                   "max_tokens": max_tokens,
                    "temperature": opts.temperature}
         if opts.stop:
             payload["stop"] = list(opts.stop[:MAX_OPENAI_STOPS])
-        if opts.seed is not None:
+        if opts.seed is not None and self.send_seed:
             payload["seed"] = opts.seed
         if "openrouter.ai" in self.base_url:
             payload["include_reasoning"] = False
+            payload["transforms"] = ["strip-reasoning"]
+            # Thinking models burn tokens on internal reasoning before
+            # emitting content; give them headroom so the actual answer
+            # still fits within the cap.
+            if max_tokens < 12:
+                payload["max_tokens"] = max_tokens + 4
         return payload
 
     def _post(self, path: str, payload: dict) -> dict:
