@@ -3,8 +3,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 An extremely token-frugal agentic framework for small local LLMs.
-Target: a *useful* agent even on a 1.5b model on <4GB-class hardware, with
+
+**Primary Goal**: a *useful* agent even on a 1.5b model on <4GB-class hardware, with
 sub-second decision steps.
+
+**Secondary Goal** (In progress): [Colibri](https://github.com/JustVugg/colibri/tree/main) compatibility for fast glm-5.2 powered agentic AI running on the SSD with <16gb ram.
 
 Core idea: the harness walks a **tree of decisions** and renders each one as
 a numbered menu; the model answers with **~3 tokens**. Everything
