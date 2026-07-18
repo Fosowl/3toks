@@ -32,6 +32,7 @@ DEFAULT_LLM_HOST = "http://localhost:11434"
 DEFAULT_PROVIDER = "ollama"
 DEFAULT_API_BASE = ""
 DEFAULT_VOTE_K = 1
+DEFAULT_SEND_SEED = True
 DEFAULT_VOICE_ENABLED = False
 DEFAULT_VOICE_LANG = "en-us"
 DEFAULT_STT_MODEL_PATH = ""
@@ -68,6 +69,8 @@ class LlmConfig:
     ``provider`` picks the transport (ollama = local raw mode, the
     measured default; everything else is a chat API — supported, not
     recommended). ``api_base`` overrides the provider's default URL.
+    ``send_seed`` = false stops chat requests from carrying a sampling
+    seed, for OpenAI-shaped servers that reject the parameter.
     """
 
     model: str = DEFAULT_MODEL
@@ -75,6 +78,7 @@ class LlmConfig:
     provider: str = DEFAULT_PROVIDER
     api_base: str = DEFAULT_API_BASE
     vote_k: int = DEFAULT_VOTE_K
+    send_seed: bool = DEFAULT_SEND_SEED
 
 
 @dataclass(frozen=True)
@@ -229,7 +233,9 @@ def _build_config(parser: configparser.ConfigParser) -> ThreetoksConfig:
                                  DEFAULT_PROVIDER, PROVIDER_CHOICES),
             api_base=_get_str(parser, "llm", "api_base",
                               DEFAULT_API_BASE),
-            vote_k=_get_int(parser, "llm", "vote_k", DEFAULT_VOTE_K)),
+            vote_k=_get_int(parser, "llm", "vote_k", DEFAULT_VOTE_K),
+            send_seed=_get_bool(parser, "llm", "send_seed",
+                                DEFAULT_SEND_SEED)),
         browser=BrowserConfig(
             mode=_get_choice(parser, "browser", "mode",
                              DEFAULT_BROWSER_MODE, BROWSER_MODES),
@@ -339,11 +345,14 @@ _INI_TEMPLATE = """\
 # environment (OPENAI_API_KEY, ANTHROPIC_API_KEY, ... / LLM_API_KEY for
 # lm-studio and custom) and are supported, not recommended.
 # api_base overrides the provider's default URL (required for custom).
+# send_seed = false omits the sampling seed from chat requests, for
+# OpenAI-shaped servers that reject the parameter (e.g. colibri).
 model = {model}
 host = {host}
 provider = {provider}
 api_base = {api_base}
 vote_k = {vote_k}
+send_seed = {send_seed}
 
 [browser]
 # Page fetching: http (fast, bot-detectable) | plain | stealth (real Chrome).
@@ -408,6 +417,7 @@ def render_ini(config: ThreetoksConfig) -> str:
         model=config.llm.model, host=config.llm.host,
         provider=config.llm.provider, api_base=config.llm.api_base,
         vote_k=config.llm.vote_k,
+        send_seed=str(config.llm.send_seed).lower(),
         mode=config.browser.mode, visible=str(config.browser.visible).lower(),
         searxng_url=config.search.searxng_url,
         min_interval_s=config.search.min_interval_s,

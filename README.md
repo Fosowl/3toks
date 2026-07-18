@@ -68,8 +68,9 @@ time with `/setup` inside the TUI, or just edit the file.
 ## Quickstart
 
 The default setup requires [Ollama](https://ollama.com) running locally
-with the default model pulled (a cloud provider instead of Ollama works
-too — see [LLM providers](#llm-providers)):
+with the default model pulled (any other local server works too — see
+[LLM providers](#llm-providers); a cloud API is possible but optional —
+see [Cloud API providers](#cloud-api-providers-optional)):
 
 ```sh
 ollama pull qwen3.5:2b
@@ -127,21 +128,57 @@ Adding an agent is one new module plus one line in the registry — see
 
 ## LLM providers
 
-Ollama (local, raw mode) is the measured default and needs no keys. Any
-chat API can drive the same decision tree instead — set `[llm] provider`
-in `config.ini` and export the provider's API key:
+3toks is local-first: no account, no API key, nothing leaves your
+machine. Ollama (raw mode) is the measured default; any other local
+server that speaks the OpenAI chat API works too. Set `[llm] provider`
+in `config.ini`:
+
+| Provider | `provider =` | Mode |
+|---|---|---|
+| Ollama (default) | `ollama` | raw — the measured path |
+| LM Studio | `lm-studio` | chat, `localhost:1234` |
+| any local OpenAI-shaped server (llama.cpp, vLLM, [colibri](#colibri-compatibility-work-in-progress), ...) | `custom` + `api_base` | chat |
+
+```ini
+[llm]
+provider = custom
+api_base = http://127.0.0.1:8080/v1
+model = my-local-model
+```
+
+If your local server requires a key, export it as `LLM_API_KEY` —
+otherwise no environment setup is needed. All transports are
+stdlib-only, no SDKs to install.
+
+Raw mode is recommended over chat mode: it pre-seeds the assistant's
+reply (`ANSWER:`), which is what makes 1-token menu decisions reliable
+on tiny models. A chat API can't do that (Anthropic's native prefill is
+the exception), so chat-transport decisions run in a degraded mode that
+leans on instruction-following and strips any echoed prefill; bigger
+models handle this fine, but the token math and the measured accuracy
+numbers in this README all describe the local raw-mode path. Decisions
+made over a chat transport are tagged `mode: chat` in traces. When a
+chat provider answers with unparseable decisions (every ticker line
+renders `—`), `/debug on` shows each raw completion and its finish
+reason — `length` means the node's token cap truncated the reply before
+the model answered (the caps are tuned for raw-mode prefill, so a
+chatty or reasoning model spends them on preamble).
+
+## Cloud API providers (optional)
+
+Never required — everything above runs fully local. Cloud APIs exist
+for convenience: trying 3toks before pulling a local model, or checking
+how a bigger model handles the same decision tree. Set `[llm] provider`
+and export the provider's API key:
 
 | Provider | `provider =` | API key env var |
 |---|---|---|
-| Ollama (default) | `ollama` | — |
 | Anthropic | `anthropic` | `ANTHROPIC_API_KEY` |
 | OpenAI | `openai` | `OPENAI_API_KEY` |
 | OpenRouter | `openrouter` | `OPENROUTER_API_KEY` |
 | Together | `together` | `TOGETHER_API_KEY` |
 | DeepSeek | `deepseek` | `DEEPSEEK_API_KEY` |
 | Google (Gemini) | `google` | `GOOGLE_API_KEY` |
-| LM Studio | `lm-studio` | `LLM_API_KEY` (optional) |
-| any OpenAI-shaped URL | `custom` + `api_base` | `LLM_API_KEY` (optional) |
 
 ```ini
 [llm]
@@ -149,21 +186,9 @@ provider = openrouter
 model = qwen/qwen-2.5-7b-instruct
 ```
 
-Keys are read from the environment only, never from config files. The
-transports are stdlib-only — no SDKs to install. Chat providers are
-**supported, not recommended**: raw mode pre-seeds the assistant's reply
-(`ANSWER:`), which is what makes 1-token menu decisions reliable on tiny
-models. A chat API can't do that (Anthropic is the exception — its native
-prefill is used), so those decisions run in a degraded mode that leans on
-instruction-following and strips any echoed prefill; bigger cloud models
-handle this fine, but the token math and the measured accuracy numbers in
-this README all describe the local raw-mode path. Decisions made over a
-chat transport are tagged `mode: chat` in traces. When a chat provider
-answers with unparseable decisions (every ticker line renders `—`),
-`/debug on` shows each raw completion and its finish reason — `length`
-means the node's token cap truncated the reply before the model answered
-(the caps are tuned for raw-mode prefill, so a chatty or reasoning model
-spends them on preamble).
+Keys are read from the environment only, never from config files. Cloud
+providers run in the same chat mode described under
+[LLM providers](#llm-providers) — supported, not recommended.
 
 ## Colibri compatibility (work in progress)
 
@@ -178,6 +203,7 @@ as a `custom` provider:
 provider = custom
 api_base = http://127.0.0.1:8000/v1
 model = glm-5.2-colibri     ; must match coli serve's --model-id
+send_seed = false           ; colibri rejects the seed parameter
 ```
 
 The pairing is a natural fit: 3toks' append-only prompts line up with
@@ -188,20 +214,21 @@ decoder, colibri leaves thinking off by default, reports token usage,
 and serializes generation exactly like 3toks' one-request-at-a-time
 loop.
 
-**Not working yet.** Two standard request parameters that 3toks sends
-are currently rejected with HTTP 400 by colibri's server, so every
-episode dies on the first decision:
+**Partially working.** Colibri rejects two standard request parameters
+with HTTP 400:
 
-- `seed` — the chat path always includes it; colibri answers
-  "Per-request seeds are not supported yet."
-- `stop` — pick-many and short-text nodes send a `"\n"` stop sequence;
-  colibri answers "Custom stop sequences are not supported yet."
-  (menu-only episodes would survive, but every vertical uses short-text
-  nodes).
-
-The fix should be on the colibri side (accept `seed`, honor `stop`
-server-side); PR coming (just bought a new SSD so that I can actually run colibri and do proper testing); until it lands, a 3toks-side workaround (omitting both
-for this provider) may ship first.
+- `seed` — solved on the 3toks side: `send_seed = false` under `[llm]`
+  (shown above) omits it. The only cost is reproducibility of the
+  temperature-0.4 third retry; every other attempt runs at temperature
+  0, where a seed changes nothing. With it set, menu decisions complete
+  end-to-end against colibri's server.
+- `stop` — still blocking: pick-many and short-text nodes send a `"\n"`
+  stop sequence; colibri answers "Custom stop sequences are not
+  supported yet." Every vertical uses short-text nodes, so full
+  episodes need `stop` support on the colibri side — server-side
+  truncation would suffice, since the 3toks caps are 3-24 tokens. PR
+  coming (just bought a new SSD so that I can actually run colibri and
+  do proper testing).
 
 **Limitations that remain once it connects:**
 

@@ -133,7 +133,8 @@ class Policy:
             opts = GenOpts(max_tokens=node.max_tokens,
                            temperature=temperature,
                            stop=tuple(getattr(node, "stop", ())),
-                           num_ctx=self.config.num_ctx, images=images)
+                           num_ctx=self.config.num_ctx, images=images,
+                           seed=self.config.seed)
             result = self._chat(self.config.spec.name,
                                 ChatPrompt(system, user, prefill), opts)
             if self.debug:
