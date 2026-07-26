@@ -82,9 +82,19 @@ class TargetBelief:
         return f"TARGET SO FAR: {self.label}{detail}"
 
 
+# Wrapper quotes models love to add around exact-match queries; they
+# shrink results and defeat dedup, so both strip and normalize drop them.
+QUOTE_CHARS = "\"'“”‘’«»‹›"
+
+
+def strip_quotes(text: str) -> str:
+    """Drop wrapper quote characters (straight, typographic, guillemets)."""
+    return text.strip().strip(QUOTE_CHARS).strip()
+
+
 def normalize_query(query: str) -> str:
     """Canonical form for duplicate detection: case, quotes, spacing."""
-    return " ".join(query.strip().strip('"\'').lower().split())
+    return " ".join(strip_quotes(query).lower().split())
 
 
 def _content_words(text: str) -> set[str]:
@@ -179,7 +189,8 @@ def _adds_new_angle(query: str, subject_words: set[str],
 
 
 def strategy_queries(task: str, belief: TargetBelief,
-                     tried: list[str]) -> list[str]:
+                     tried: list[str],
+                     banned: set | frozenset | None = None) -> list[str]:
     """Harness-composed candidate queries for the requery menu.
 
     Composition beats free text here: templates add operators the tiny
@@ -188,7 +199,9 @@ def strategy_queries(task: str, belief: TargetBelief,
     the requery loop can never degenerate into task rewordings. Generic
     angles are offered only while the target is unlabelled; a labelled
     belief gets its own templates, and an exhausted list simply means
-    the caller falls back to a written query.
+    the caller falls back to a written query. ``banned`` carries
+    normalized keys of queries that already EXECUTED (not just proposed)
+    and must never come back.
     """
     subject = " ".join(subject_terms(task)) or task
     subject_words = {word.lower() for word in _TOKEN_RE.findall(subject)}
@@ -200,10 +213,13 @@ def strategy_queries(task: str, belief: TargetBelief,
         else _GENERIC_TEMPLATES
     candidates.extend(template.format(s=subject) for template in templates)
     tried_keys = {normalize_query(query) for query in tried}
+    banned = banned or set()
     fresh: list[str] = []
     for query in candidates:
-        if normalize_query(query) not in tried_keys \
-                and _adds_new_angle(query, subject_words, tried + fresh):
+        if normalize_query(query) in tried_keys \
+                or normalize_query(query) in banned:
+            continue
+        if _adds_new_angle(query, subject_words, tried + fresh):
             fresh.append(query)
     return fresh[:MAX_STRATEGIES]
 

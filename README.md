@@ -92,11 +92,14 @@ Optional, both improve web research quality:
 - **SearXNG** — run a local instance for better search results:
   `./start_search_engine.sh` (see
   [infra/searxng/README.md](infra/searxng/README.md)); auto-detected at
-  startup, falls back to scraping DuckDuckGo's HTML endpoint with no setup.
+  startup, falls back to scraping Bing, then DuckDuckGo's HTML endpoint,
+  with no setup. Required for the browser modes below.
 - **Selenium browser** — `/browser on` in the TUI drives a real (visible by
   default) Chrome window instead of plain HTTP fetch, for JS-rendered pages.
   Requires Chrome and `selenium` installed; `/browser off` reverts to plain
-  HTTP.
+  HTTP. The `plain`/`stealth` browser modes pair with the local SearXNG:
+  startup refuses them (with a pointer to `./start_search_engine.sh`) when
+  no instance answers.
 
 ## Agents
 
@@ -304,6 +307,12 @@ SearXNG's upstream engines and the DuckDuckGo HTML fallback rate-limit or
 degrade under heavy use; a run that fails to find an answer often reflects
 a bad search result page, not a bad decision by the model. Running a local
 SearXNG instance (see `infra/searxng/`) reduces but does not eliminate this.
+When the degradation is total the loop now says so instead of improvising:
+a search layer whose every hop is bot-walled ends the run with a "search
+unavailable" answer, and an episode where every page open failed ends with
+"could not open any web page" (each failed open also shows as a `fetch`
+line in the TUI ticker, with the reason), a non-zero CLI exit, and no
+answer synthesis from an empty note store.
 
 ## Architecture
 

@@ -4,6 +4,8 @@
         --trace trace.jsonl
 """
 import argparse
+import os
+import sys
 import time
 
 from threetoks.backend.base import FAMILY_R1, ModelSpec, detect_family
@@ -75,9 +77,20 @@ def make_fetch_page(config):
 
     ``http`` uses the module-level plain-HTTP :func:`fetch_page` and no
     fetcher to close. ``plain`` / ``stealth`` lazily import their Chrome
-    backend and return the live fetcher so the caller can close it.
+    backend and return the live fetcher so the caller can close it — but
+    only once a local SearXNG answers: browser mode exists for JS-heavy
+    pages found through search, so without the search engine the pairing
+    is pointless and startup refuses with a clear error.
     """
     mode = config.browser.mode
+    if mode in ("plain", "stealth"):
+        from threetoks.web import search as search_mod  # lazy: web extras
+        base_url = os.getenv(search_mod.SEARXNG_URL_ENV,
+                             search_mod.DEFAULT_SEARXNG_URL)
+        if not search_mod._searxng_answers(base_url):
+            raise SystemExit(
+                f"browser mode '{mode}' needs a local SearXNG, but none "
+                f"answers at {base_url} — run ./start_search_engine.sh first")
     if mode == "plain":
         from threetoks.web.browser import make_fetcher
         fetcher = make_fetcher(config.browser.visible)
@@ -113,6 +126,11 @@ def main() -> None:
     print(f"\nstats: {outcome['rounds']} rounds "
           f"(judged {'good' if outcome.get('judged_good') else 'exhausted'}), "
           f"queries: {outcome['queries']}, {elapsed:.1f}s")
+    if outcome.get("pages_unavailable"):
+        # Every page open failed: the printed answer is an error, not a
+        # synthesis — say so on stderr and fail the process honestly.
+        print(f"error: {outcome['answer']}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

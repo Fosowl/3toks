@@ -17,7 +17,8 @@ from dataclasses import dataclass
 from threetoks.nodes import ESCAPE, MenuNode, PickManyNode, ShortTextNode
 from threetoks.render import Episode
 from threetoks.web.notes import rank_by_overlap
-from threetoks.web.target import QUERY_TEMPERATURE, normalize_query
+from threetoks.web.target import (QUERY_TEMPERATURE, normalize_query,
+                                  strip_quotes, too_similar)
 
 MAX_RESULTS_SHOWN = 5
 MAX_SEARCHES = 3
@@ -32,6 +33,23 @@ MIN_KEPT_SENTENCES = 20
 MAX_KEPT_SENTENCES = 100
 INITIAL_STEPS_LEFT = 40
 
+# Written-query rejections (duplicates and paraphrases cost no search
+# budget but still count): after this many, "search with different words"
+# leaves the menus — the model clearly has no new angle left.
+MAX_REJECTED_QUERIES = 2
+
+# Honest dead-end answers: a dead search layer or an all-failed page
+# layer ends the episode with these instead of a synthesis from "(none)".
+SEARCH_UNAVAILABLE_ANSWER = ("web search is unavailable right now — "
+                             "every engine refused the query")
+PAGES_UNAVAILABLE_ANSWER = ("could not open any web page — check the "
+                            "network or browser")
+
+# When the search layer reports failure, the model gets ONE chance to
+# name likely sites directly; the reply is URL-mined into open options.
+SITES_PREFILL = "SITES:"
+MAX_SITE_SUGGESTIONS = 3
+
 # Harvest wide: note passes pick up to NOTE_MAX_PICKS sentences, and the
 # harness auto-walks AUTO_CHUNKS_PER_PAGE chunks per page (queuing a note
 # pass on each) before it hands control back to the page menu.
@@ -43,6 +61,24 @@ _ERROR_PAGE_RE = re.compile(
     r"error while loading|please reload|perform that action|"
     r"enable javascript|checking your browser|verify you are human|"
     r"rate limit", re.IGNORECASE)
+
+# URL mining for the sites fallback: scheme URLs always count; bare hosts
+# need a 3+-letter TLD so file names (README.md, node.js) stay out.
+_URL_RE = re.compile(
+    r"https?://[^\s,;\)\]\"'>]+|(?:[\w-]+\.)+[a-z]{3,}"
+    r"(?:/[^\s,;\)\]\"'>]*)?", re.IGNORECASE)
+
+
+def _extract_urls(text: str) -> list[str]:
+    """Mine URLs out of free text: https-normalized, order-kept, deduped."""
+    urls: list[str] = []
+    for match in _URL_RE.finditer(text):
+        url = match.group(0).rstrip("/.")
+        if not url.lower().startswith("http"):
+            url = "https://" + url
+        if url not in urls:
+            urls.append(url)
+    return urls
 
 OPT_NEXT_CHUNK = "read more of this page"
 OPT_LINKS = "follow a link on this page"
@@ -95,15 +131,21 @@ class WebResearchVertical:
                  initial_query: str | None = None,
                  context_lines: tuple[str, ...] = (),
                  seen_urls: set[str] | None = None,
-                 tried_queries: set[str] | None = None):
+                 tried_queries: set[str] | None = None,
+                 tracer=None):
         self.task = task
         self.provider = provider
         self.fetch_page = fetch_page
         self.notes = notes
+        self.tracer = tracer  # optional; fetch failures become trace events
         self.episode = Episode(PREFIX, task)
         self.steps_left = INITIAL_STEPS_LEFT
         self.searches_done = 0
         self.pages_opened = 0
+        self.pages_attempted = 0
+        self.pages_failed = 0
+        self._rejected_queries = 0
+        self._sites_asked = False
         # Shared MUTABLE sets when the caller passes them (deep_research
         # does, across rounds): a page or query exhausted in one round
         # must stay exhausted in every later round.
@@ -131,6 +173,13 @@ class WebResearchVertical:
         """Next decision node, or None when the episode is finished."""
         if self.answer is not None:
             return None
+        if self._pages_all_failed():
+            self.answer = PAGES_UNAVAILABLE_ANSWER
+            return None
+        if self._round_exhausted():
+            self.answer = SEARCH_UNAVAILABLE_ANSWER \
+                if self._search_layer_dead() else "(no answer)"
+            return None
         if self.steps_left <= FORCE_ANSWER_AT_STEPS_LEFT:
             if not self._pending_is_answer():
                 self.pending = self._answer_flow()
@@ -138,6 +187,47 @@ class WebResearchVertical:
         if self.pending is not None:
             return self.pending
         return self._page_menu() if self.page else self._results_menu()
+
+    def _round_exhausted(self) -> bool:
+        """Search budget spent with nothing openable and no notes: done.
+
+        Ending here costs no model call — a degenerate menu would only
+        force the model to pick the one remaining option anyway.
+        """
+        return (self.searches_done >= MAX_SEARCHES
+                and self.notes.count() == 0
+                and not self._openable_results())
+
+    def _openable_results(self) -> bool:
+        """True when at least one unseen result could still be opened."""
+        return (self.pages_opened < MAX_PAGES
+                and any(r.url not in self.seen_urls
+                        for r in self.results[:MAX_RESULTS_SHOWN]))
+
+    def _search_layer_dead(self) -> bool:
+        """True when the provider's last live search reported failure.
+
+        Keys on ``last_call_failed`` (this round's last search), not the
+        cross-round counter: a round served from the provider's cache
+        must end "(no answer)", not falsely claim the layer is down.
+        """
+        return bool(getattr(self.provider, "last_call_failed", False))
+
+    def _pages_all_failed(self) -> bool:
+        """Pages were attempted, ALL failed, and nothing can recover.
+
+        The episode ends honestly instead of synthesizing from an empty
+        note store — but only once no recovery path remains (unopened
+        results, notes to answer from, or another search) is left.
+        """
+        if not self.pages_attempted or self.pages_opened \
+                or self.notes.count():
+            return False
+        if self._openable_results():
+            return False
+        return (self.searches_done >= MAX_SEARCHES
+                or self._search_layer_dead()
+                or self._rejected_queries >= MAX_REJECTED_QUERIES)
 
     def _pending_is_answer(self) -> bool:
         """True when the queued node already belongs to the answer flow."""
@@ -156,6 +246,8 @@ class WebResearchVertical:
             self._apply_notes(value if decision.valid else [])
         elif isinstance(node, ShortTextNode) and node.prefill == FINAL_PREFILL:
             self._accept_answer(value if decision.valid else "")
+        elif isinstance(node, ShortTextNode) and node.prefill == SITES_PREFILL:
+            self._apply_sites(value if decision.valid else "")
         elif isinstance(node, ShortTextNode):
             self._run_search(value if decision.valid else self.task)
         else:
@@ -163,19 +255,63 @@ class WebResearchVertical:
 
     def result(self) -> dict:
         """Episode outcome with note provenance."""
-        return {"task": self.task, "answer": self.answer,
-                "notes": self.notes.render(), "searches": self.searches_done,
-                "pages": self.pages_opened}
+        outcome = {"task": self.task, "answer": self.answer,
+                   "notes": self.notes.render(), "searches": self.searches_done,
+                   "pages": self.pages_opened}
+        if self.answer == PAGES_UNAVAILABLE_ANSWER:
+            outcome["pages_unavailable"] = True
+        return outcome
 
     # ------------------------------------------------------------ menus
 
     def _results_menu(self) -> MenuNode:
         options = list(self._build_open_options())
-        if self.searches_done < MAX_SEARCHES:
+        if self._can_search():
             options.append(OPT_NEW_SEARCH)
         if self.notes.count():
             options.append(OPT_ANSWER)
+        if options == [OPT_NEW_SEARCH]:
+            # One possible move: skip the menu and ask for it directly.
+            return self._new_query_flow()
         return MenuNode("What next?", options or [OPT_ANSWER])
+
+    def _can_search(self) -> bool:
+        """A new search must fit the budget AND the rejection allowance."""
+        return (self.searches_done < MAX_SEARCHES
+                and self._rejected_queries < MAX_REJECTED_QUERIES)
+
+    def _new_query_flow(self):
+        """The only move left is a new query: sites ask once, else write.
+
+        When the provider reports its hops dead, free-text queries are
+        pointless — the model gets ONE chance to name likely sites
+        instead; the reply is URL-mined into ordinary open options.
+        """
+        if self._search_layer_dead() and not self._sites_asked:
+            self._sites_asked = True
+            self.episode.log_session(
+                "> search engines are unavailable — asking for sites")
+            node = ShortTextNode(
+                "Search engines are unavailable. Name one or two sites or "
+                "URLs likely to answer the task.",
+                SITES_PREFILL, max_tokens=QUERY_MAX_TOKENS)
+        else:
+            node = ShortTextNode(
+                "Suggest a better web search query for the task.",
+                "QUERY:", max_tokens=QUERY_MAX_TOKENS)
+            node.temperature = QUERY_TEMPERATURE
+        self.pending = node
+        return node
+
+    def _apply_sites(self, text: str) -> None:
+        """Turn the sites reply into openable results (or fall through)."""
+        urls = [url for url in _extract_urls(text)
+                if url not in self.seen_urls][:MAX_SITE_SUGGESTIONS]
+        if urls:
+            self.results = [_LinkTarget(url, url) for url in urls]
+            self.episode.log_session(
+                f"> trying {len(urls)} suggested site(s) directly")
+        self.pending = None
 
     def _build_open_options(self):
         """Openable results only: never re-offer seen or failed URLs."""
@@ -196,7 +332,7 @@ class WebResearchVertical:
         if getattr(self.page, "links", None) and self.pages_opened < MAX_PAGES:
             options.append(OPT_LINKS)
         options.append(OPT_BACK)
-        if self.searches_done < MAX_SEARCHES:
+        if self._can_search():
             options.append(OPT_NEW_SEARCH)
         if self.notes.count():
             options.append(OPT_ANSWER)
@@ -316,11 +452,7 @@ class WebResearchVertical:
             if self.searches_done >= MAX_SEARCHES:
                 self.pending = self._answer_flow()
             else:
-                node = ShortTextNode(
-                    "Suggest a better web search query for the task.",
-                    "QUERY:", max_tokens=QUERY_MAX_TOKENS)
-                node.temperature = QUERY_TEMPERATURE
-                self.pending = node
+                self._new_query_flow()
         elif value == OPT_LINKS:
             self.pending = self._links_menu()
         elif value == OPT_NEXT_CHUNK:
@@ -365,17 +497,22 @@ class WebResearchVertical:
         self._load_page(match)
 
     def _load_page(self, result) -> None:
+        self.pages_attempted += 1
         try:
             page = self.fetch_page(result.url)
         except Exception as error:  # fetch failures become a log line
+            self.pages_failed += 1
             self.episode.log_session(f"> failed to open '{result.title[:40]}'")
+            self._trace_fetch_failure(result, str(error) or "fetch error")
             self.seen_urls.add(result.url)
             self.pending = None
             return
         page.url = page.url or result.url  # fakes may omit it
         if _looks_like_error_page(page.sentences):
+            self.pages_failed += 1
             self.episode.log_session(
                 f"> page '{result.title[:40]}' failed to load properly")
+            self._trace_fetch_failure(result, "bot check or error page")
             self.seen_urls.add(result.url)
             self.pending = None
             return
@@ -387,6 +524,16 @@ class WebResearchVertical:
         self.seen_urls.add(result.url)
         self._show_page_chunk(f"> opened '{result.title[:TITLE_CHARS]}'")
         self._queue_note_pass()
+
+    def _trace_fetch_failure(self, result, reason: str) -> None:
+        """One ticker-visible trace event per failed page open."""
+        if self.tracer is None:
+            return
+        self.tracer.record({
+            "node": "fetch",
+            "value": f"failed to open '{result.title[:TITLE_CHARS]}' "
+                     f"({reason})",
+            "valid": True, "out_tokens": 0, "wall_s": 0.0})
 
     def _queue_note_pass(self) -> None:
         """Every freshly shown chunk gets an immediate note-picking pass.
@@ -403,15 +550,27 @@ class WebResearchVertical:
                 len(chunk), max_picks=NOTE_MAX_PICKS, items=chunk)
 
     def _run_search(self, query: str) -> None:
-        query = query.strip().strip('"\'').strip()  # models love exact-match quotes; they shrink results
-        self.searches_done += 1
+        query = strip_quotes(query)  # models love exact-match quotes; they shrink results
         key = normalize_query(query)
         if key in self._tried_queries:
-            # Strict: a query never runs twice (within or across rounds).
+            # Strict: a query never runs twice (within or across rounds),
+            # and the rejection costs no search budget.
+            self._rejected_queries += 1
             self.episode.log_session(
                 f"> already searched '{query[:40]}' — use different words")
             self.pending = None
             return
+        if self._tried_queries and too_similar(query,
+                                               list(self._tried_queries)):
+            # A paraphrase of a tried query brings no new angle; reject
+            # it for free instead of spending a real search on it.
+            self._rejected_queries += 1
+            self.episode.log_session(
+                f"> '{query[:40]}' rehashes an earlier search — "
+                "try a new angle")
+            self.pending = None
+            return
+        self.searches_done += 1
         self._tried_queries.add(key)
         try:
             self.results = self.provider.search(query)
@@ -504,3 +663,49 @@ class WebResearchVertical:
 
     def _page_title(self) -> str:
         return (self.page.title if self.page else "")[:TITLE_CHARS]
+
+
+if __name__ == "__main__":
+    from dataclasses import dataclass, field
+
+    @dataclass(frozen=True)
+    class _Result:
+        title: str
+        url: str
+        snippet: str = "s"
+
+    @dataclass
+    class _Page:
+        title: str
+        sentences: list
+        url: str = ""
+
+    @dataclass
+    class _Notes:
+        items: list = field(default_factory=list)
+
+        def add(self, text, source_url, sentence_idx):
+            self.items.append(text)
+
+        def count(self):
+            return len(self.items)
+
+        def render(self, max_notes=30):
+            return ""
+
+        def texts(self):
+            return list(self.items)
+
+    class _Provider:
+        def search(self, query, max_results=8):
+            return [_Result("Alpha", "http://a")]
+
+    assert _extract_urls("see tripadvisor.com/x and yelp.com") == [
+        "https://tripadvisor.com/x", "https://yelp.com"]
+    vertical = WebResearchVertical(
+        "capital of France?", _Provider(),
+        lambda url: _Page("Alpha", ["Paris is the capital of France."]),
+        _Notes())
+    menu = vertical.next_node()
+    assert menu.options[0].startswith("open result 1: Alpha"), menu.options
+    print("smoke OK")

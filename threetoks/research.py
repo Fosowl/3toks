@@ -20,7 +20,8 @@ from threetoks.web.notes import NoteStore
 from threetoks.web.target import (QUERY_TEMPERATURE, TargetBelief,
                                  normalize_query, strategy_queries,
                                  too_similar, update_belief)
-from threetoks.web.vertical import WebResearchVertical
+from threetoks.web.vertical import (SEARCH_UNAVAILABLE_ANSWER,
+                                    WebResearchVertical)
 
 JUDGE_PREFIX = ("You strictly judge research answers. Vague answers, "
                 "meta-text about pages, or answers that dodge the "
@@ -49,6 +50,11 @@ ANGLE_HINTS = (
 )
 MAX_STEPS_PER_ROUND = 25
 JUDGE_TASK_CLIP = 48
+
+# Search breaker: this many consecutive provider failures with zero notes
+# gathered means the search layer is down — abort honestly instead of
+# requerying a dead engine for the remaining rounds.
+SEARCH_ABORT_FAILURES = 2
 
 # Curation: keep at most this many notes; skip the model call entirely at
 # or below it (small stores are already tight enough to answer from).
@@ -111,24 +117,27 @@ def judge_answer(task: str, result: dict, policy: Policy) -> bool:
 
 
 def propose_query(task: str, tried: list[str], policy: Policy,
-                  belief: TargetBelief | None = None) -> str:
+                  belief: TargetBelief | None = None,
+                  banned: set | frozenset | None = None) -> str:
     """Pick the next search angle, different from every prior try.
 
     With a belief, harness-composed strategy queries (site: filters,
     anchor keywords) go on a 1-digit menu, with writing a query kept as
     an ordinary option. Without a belief — or when the menu declines —
     the model writes one, which must survive the paraphrase check or a
-    deterministic fallback replaces it.
+    deterministic fallback replaces it. ``banned`` holds normalized keys
+    of queries that already EXECUTED; they are struck out in every path
+    (strategy menu, written query, and fallback).
 
     ``belief=None`` opts out of the strategy menu entirely (external
     callers, tests); a blank ``TargetBelief()`` still gets generic
     angles on the menu — pass one to participate in belief mechanics.
     """
     if belief is not None:
-        picked = _pick_strategy(task, tried, belief, policy)
+        picked = _pick_strategy(task, tried, belief, policy, banned)
         if picked:
             return picked
-    return _written_query(task, tried, belief, policy)
+    return _written_query(task, tried, belief, policy, banned)
 
 
 def _query_history(belief: TargetBelief | None, tried: list[str]) -> str:
@@ -141,9 +150,10 @@ def _query_history(belief: TargetBelief | None, tried: list[str]) -> str:
 
 
 def _pick_strategy(task: str, tried: list[str], belief: TargetBelief,
-                   policy: Policy) -> str | None:
+                   policy: Policy,
+                   banned: set | frozenset | None = None) -> str | None:
     """Menu over composed strategy queries; None means write one instead."""
-    strategies = strategy_queries(task, belief, tried)
+    strategies = strategy_queries(task, belief, tried, banned)
     if not strategies:
         return None
     episode = Episode(STRATEGY_PREFIX, task)
@@ -160,7 +170,8 @@ def _pick_strategy(task: str, tried: list[str], belief: TargetBelief,
 
 
 def _written_query(task: str, tried: list[str],
-                   belief: TargetBelief | None, policy: Policy) -> str:
+                   belief: TargetBelief | None, policy: Policy,
+                   banned: set | frozenset | None = None) -> str:
     """Free-text query at temperature; tried paraphrases fall back.
 
     Two diversity levers keep repeat proposals from ever recurring:
@@ -181,22 +192,25 @@ def _written_query(task: str, tried: list[str],
     proposed = decision.value if decision.valid else ""
     tried_keys = {normalize_query(query) for query in tried}
     if proposed and normalize_query(proposed) not in tried_keys \
+            and normalize_query(proposed) not in (banned or set()) \
             and not too_similar(proposed, tried):
         return proposed
-    return _fallback_query(task, tried, belief)
+    return _fallback_query(task, tried, belief, banned)
 
 
 def _fallback_query(task: str, tried: list[str],
-                    belief: TargetBelief | None) -> str:
+                    belief: TargetBelief | None,
+                    banned: set | frozenset | None = None) -> str:
     """Deterministic last resort: an unstruck strategy, then task+angle.
 
     The angle words are exactly the paraphrases this feature kills, so
     they only run when even the composed candidates are exhausted.
     """
-    strategies = strategy_queries(task, belief or TargetBelief(), tried)
+    strategies = strategy_queries(task, belief or TargetBelief(), tried,
+                                  banned)
     if strategies:
         return strategies[0]
-    tried_keys = {normalize_query(query) for query in tried}
+    tried_keys = {normalize_query(query) for query in tried} | (banned or set())
     angles = ("details", "overview", "guide", "review")
     for offset in range(len(angles)):
         candidate = f"{task} {angles[(len(tried) + offset) % len(angles)]}"
@@ -288,27 +302,53 @@ def deep_research(task: str, services: Services, policy: Policy) -> dict:
     total_rounds = max(1, services.max_research_rounds)
     for round_number in range(1, total_rounds + 1):
         tried.append(query)
-        context = tuple(line for line in (recall_line, belief.line()) if line)
+        prior = tried[:-1]  # queries earlier rounds already burned
+        context = tuple(line for line in (
+            recall_line, belief.line(),
+            f"QUERIES ALREADY TRIED (do not repeat): {', '.join(prior)}"
+            if prior else None) if line)
         vertical = WebResearchVertical(task, services.provider,
                                        services.fetch_page, notes,
                                        initial_query=query,
                                        context_lines=context,
                                        seen_urls=seen_urls,
                                        tried_queries=executed)
+        vertical.tracer = getattr(policy, "tracer", None)  # fetch failures
         result = run_episode(vertical, policy, max_steps=MAX_STEPS_PER_ROUND)
         notes = vertical.notes  # adopt curation pruning across rounds
         result["rounds"] = round_number
         result["queries"] = list(tried)
+        if result.get("pages_unavailable"):
+            # Every page open failed: no judge, no requery — the honest
+            # error answer stands and the loop stops like the breaker.
+            result["judged_good"] = False
+            result["target"] = _target_summary(belief)
+            return result
+        if _search_layer_down(services) and not notes.count():
+            # Dead search layer with zero evidence: requerying is
+            # pointless; end with the honest unavailability answer.
+            result["search_unavailable"] = True
+            result["answer"] = SEARCH_UNAVAILABLE_ANSWER
+            result["judged_good"] = False
+            result["target"] = _target_summary(belief)
+            return result
         if judge_answer(task, result, policy):
             result["judged_good"] = True
             result["target"] = _target_summary(belief)
             return result
         if round_number < total_rounds:
             belief = update_belief(task, belief, notes, policy)
-            query = propose_query(task, tried, policy, belief)
+            query = propose_query(task, tried, policy, belief,
+                                  banned=executed)
     result["judged_good"] = False
     result["target"] = _target_summary(belief)
     return result
+
+
+def _search_layer_down(services: Services) -> bool:
+    """True when the provider's consecutive failures hit the abort bar."""
+    return getattr(services.provider, "consecutive_failures", 0) \
+        >= SEARCH_ABORT_FAILURES
 
 
 if __name__ == "__main__":

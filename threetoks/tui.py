@@ -61,7 +61,8 @@ DEBUG_PROMPT_CLIP = 200     # /debug: prompt text clipped to this
 DEBUG_RESULT_CLIP = 120     # /debug: result text clipped to this
 UNDER_INDENT = " " * 12     # column where a ticker line's value starts
 SIGN_OFF = "⌁ mesh offline — tokens saved, see you"
-_KIND_LABELS = {"menu": "menu", "pick_many": "pick", "short_text": "text"}
+_KIND_LABELS = {"menu": "menu", "pick_many": "pick", "short_text": "text",
+                "fetch": "fetch"}
 
 
 def build_debug_tokens_line(event: dict, enabled: bool = True) -> str:
@@ -974,6 +975,26 @@ def _make_provider(config, sink):
     return auto_provider()
 
 
+def _searxng_gate(mode: str, sink) -> None:
+    """Browser modes pair with the local SearXNG: exit clearly without it.
+
+    ``plain``/``stealth`` exist for JS-heavy pages found through search;
+    starting Chrome when no search engine answers can only produce a
+    session that opens nothing, so refuse early and say how to fix it.
+    """
+    try:
+        from threetoks.web import search as search_mod  # lazy: web extras
+    except ImportError:
+        return  # no web extras: the provider is already disabled anyway
+    base_url = os.getenv(search_mod.SEARXNG_URL_ENV,
+                         search_mod.DEFAULT_SEARXNG_URL)
+    if not search_mod._searxng_answers(base_url):
+        sink(fg(AMBER, f"  browser mode '{mode}' needs a local SearXNG, "
+                f"but none answers at {base_url} — run "
+                "./start_search_engine.sh first", _color_enabled()))
+        raise SystemExit(1)
+
+
 def _initial_fetcher(config, services, sink=print):
     """Set ``services.fetch_page`` from ``config.browser.mode`` at startup.
 
@@ -988,6 +1009,7 @@ def _initial_fetcher(config, services, sink=print):
     if mode == "http":
         services.fetch_page = fetch_page
         return None
+    _searxng_gate(mode, sink)
     try:
         fetcher = _make_browser_fetcher(mode, config.browser.visible)
     except Exception as error:  # noqa: BLE001 - optional module; use HTTP
