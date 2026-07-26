@@ -13,11 +13,8 @@ Core idea: the harness walks a **tree of decisions** and renders each one as
 a numbered menu; the model answers with **~3 tokens**. Everything
 deterministic (parsing, page rendering, notes, undo) is code; the model is
 only the policy oracle. Notes are taken by *pointing at numbered sentences*,
-never by rewriting content. A ReAct-style agent spends 200-500 tokens and
-15-30s per step on this hardware; a ThreeToks menu step spends 1-3 tokens and
-~0.3s. Phase 2 adds a small mesh of pluggable agents (routing is itself a
-one-token menu decision) and a judged deep-research loop on top of the
-same tree-of-menus engine.
+and never by rewriting content. Where a ReAct-style agent might spends 200-500 tokens and
+15-30s per step; ThreeToks could spends only 1-3 tokens and ~0.3s.
 
 - Architecture: [docs/DESIGN.md](docs/DESIGN.md)
 - Writing a new agent: [docs/AGENTS.md](docs/AGENTS.md)
@@ -25,7 +22,7 @@ same tree-of-menus engine.
   E3 note-taking quality, E4 reformulation recovery)
 - Default policy model: `qwen3.5:2b` via Ollama, for all nodes.
   `deepseek-r1:1.5b` is supported (raw-mode think suppression) but is not
-  used by default — see Phase-0 findings below.
+  used by default.
 
 ## Install
 
@@ -103,7 +100,7 @@ Optional, both improve web research quality:
 
 ## Agents
 
-`python3 -m threetoks` dispatches every request through a one-token router:
+`threetoks` dispatches every request through a one-token router:
 the model is shown a menu of agent names + one-line descriptions and picks
 one digit. An invalid or unparseable choice falls back to the first
 registered agent (`casual`).
@@ -113,7 +110,7 @@ registered agent (`casual`).
 | `casual` | small talk, quick replies | canned-reply bank ranked by keyword overlap; exact hint match answers with zero model calls; falls through to a bounded free-text reply only when nothing fits |
 | `web` | research questions using internet search | thin wrapper over the judged deep-research loop (below); full vertical with search, page reading, link following, notes |
 | `files` | questions about local files/folders | explorer sandboxed under `services.files_root`; same menu/notes/answer shape as the web vertical; can run a one-line shell command once a deterministic deny-list and a fresh one-token safety judge both clear it |
-| `light` | "turn on the light", lamp control | only registered on a Raspberry Pi with the `relay` extra; clear phrasings are settled by a regex with zero model calls, anything else spends one menu decision |
+| `light` | "turn on the light", relay control for raspberry pi | only registered on a Raspberry Pi with the `relay` extra; clear phrasings are settled by a regex with zero model calls, anything else spends one menu decision |
 | `look` | "what am I holding?", camera questions | only registered with the `camera` extra AND a vision-capable model (llava, qwen-vl, gpt-4o, claude, gemini, ...); one frame, one bounded vision decision |
 
 Slash commands in the TUI: `/help`, `/agents` (list registered agents),
@@ -129,9 +126,7 @@ Adding an agent is one new module plus one line in the registry — see
 ## LLM providers
 
 3toks is local-first: no account, no API key, nothing leaves your
-machine. Ollama (raw mode) is the measured default; any other local
-server that speaks the OpenAI chat API works too. Set `[llm] provider`
-in `config.ini`:
+machine.
 
 | Provider | `provider =` | Mode |
 |---|---|---|
@@ -150,19 +145,9 @@ If your local server requires a key, export it as `LLM_API_KEY` —
 otherwise no environment setup is needed. All transports are
 stdlib-only, no SDKs to install.
 
-Raw mode is recommended over chat mode: it pre-seeds the assistant's
-reply (`ANSWER:`), which is what makes 1-token menu decisions reliable
-on tiny models. A chat API can't do that (Anthropic's native prefill is
-the exception), so chat-transport decisions run in a degraded mode that
-leans on instruction-following and strips any echoed prefill; bigger
-models handle this fine, but the token math and the measured accuracy
-numbers in this README all describe the local raw-mode path. Decisions
-made over a chat transport are tagged `mode: chat` in traces. When a
-chat provider answers with unparseable decisions (every ticker line
-renders `—`), `/debug on` shows each raw completion and its finish
+*Debugging*: `/debug on` shows each raw completion and its finish
 reason — `length` means the node's token cap truncated the reply before
-the model answered (the caps are tuned for raw-mode prefill, so a
-chatty or reasoning model spends them on preamble).
+the model answered.
 
 ## Cloud API providers (optional)
 
@@ -202,7 +187,7 @@ as a `custom` provider:
 [llm]
 provider = custom
 api_base = http://127.0.0.1:8000/v1
-model = glm-5.2-colibri     ; must match coli serve's --model-id
+model = glm-5.2     ; must match coli serve's --model-id
 send_seed = false           ; colibri rejects the seed parameter
 ```
 
@@ -326,7 +311,7 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the full design: decision node
 types, the append-only prompt layout, the model/backend strategy, the
 escalation ladder for recovering from misclicks, and the repository layout.
 
-## Phase-0 findings
+## Experiments 
 
 Phase-0 picked the default policy model and the shape of the decision nodes
 from measured behavior, not guesswork: `qwen3.5:2b` answers menus
