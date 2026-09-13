@@ -151,11 +151,22 @@ class Policy:
         return result
 
     def _debug_dump(self, prompt, result: GenResult) -> None:
-        """Emit a debug event with the full prompt and result text."""
-        prompt_text = prompt.user if isinstance(prompt, ChatPrompt) else str(prompt)
+        """Emit a debug event with the full prompt and result text.
+
+        Chat transports hand over un-templated parts, so the system block
+        rides in its own ``system_text`` key; on the raw path it is already
+        embedded in the rendered template, so the key stays empty.
+        """
+        if isinstance(prompt, ChatPrompt):
+            prompt_text = prompt.user
+            system_text = prompt.system
+        else:
+            prompt_text = str(prompt)
+            system_text = ""
         self.tracer.record({
             "debug": True,
             "prompt_text": prompt_text,
+            "system_text": system_text,
             "result_text": result.text,
             "prompt_tokens": result.prompt_tokens,
             "out_tokens": result.out_tokens,

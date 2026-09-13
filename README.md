@@ -120,8 +120,10 @@ Slash commands in the TUI: `/help`, `/agents` (list registered agents),
 `/deep N` (set research rounds), `/browser http|plain|stealth`,
 `/model NAME` (swap the policy model), `/voice on|off|debug` (talk instead
 of typing; `debug` traces what the microphone hears and why each gate
-dropped it), `/debug [on|off]` (show the raw model answer and finish
-reason under each decision), `/setup` (re-run the config wizard), `/quit`.
+dropped it), `/debug [on|off|full]` (show the raw model answer and finish
+reason under each decision; `full` also prints the complete prompt of
+every model call — the request, menu options, and prefill the decision
+actually saw), `/setup` (re-run the config wizard), `/quit`.
 
 Adding an agent is one new module plus one line in the registry — see
 [docs/AGENTS.md](docs/AGENTS.md) for the contract and a minimal example.
@@ -162,7 +164,10 @@ chat provider answers with unparseable decisions (every ticker line
 renders `—`), `/debug on` shows each raw completion and its finish
 reason — `length` means the node's token cap truncated the reply before
 the model answered (the caps are tuned for raw-mode prefill, so a
-chatty or reasoning model spends them on preamble).
+chatty or reasoning model spends them on preamble). The same line
+summarizes the prompt as head + tail (system boilerplate … request +
+menu + prefill); `/debug full` dumps the whole prompt of every call,
+which is what you want when a routing or menu choice makes no sense.
 
 ## Cloud API providers (optional)
 

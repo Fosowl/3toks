@@ -57,7 +57,8 @@ SHORT_TEXT_CLIP = 40
 PICKED_LINE_CLIP = 70
 QUESTION_CLIP = 48
 RAW_CLIP = 120              # /debug: raw completion clipped to this
-DEBUG_PROMPT_CLIP = 200     # /debug: prompt text clipped to this
+DEBUG_PROMPT_HEAD = 80      # /debug: prompt head shown before the seam
+DEBUG_PROMPT_TAIL = 220     # /debug: prompt tail shown after the seam
 DEBUG_RESULT_CLIP = 120     # /debug: result text clipped to this
 UNDER_INDENT = " " * 12     # column where a ticker line's value starts
 SIGN_OFF = "⌁ mesh offline — tokens saved, see you"
@@ -68,10 +69,13 @@ def build_debug_tokens_line(event: dict, enabled: bool = True) -> str:
     """One dim line showing the full prompt and result tokens for a model call.
 
     Printed for every LLM request while ``/debug`` is on, aligned under the
-    ticker's value column. Shows the clipped prompt text, result text, and
-    token counts.
+    ticker's value column. Menu prompts carry boilerplate (family template,
+    system block, few-shots) at the head and the decision inputs (user
+    request, ACTIONS menu, prefill) at the tail, so the prompt is shown as
+    head + tail with the middle elided; ``/debug full`` prints everything.
     """
-    prompt = _clip_repr(event.get("prompt_text"), DEBUG_PROMPT_CLIP)
+    prompt = _clip_repr_ends(event.get("prompt_text"),
+                             DEBUG_PROMPT_HEAD, DEBUG_PROMPT_TAIL)
     result = _clip_repr(event.get("result_text"), DEBUG_RESULT_CLIP)
     pt = _num(event.get("prompt_tokens"), int)
     ot = _num(event.get("out_tokens"), int)
@@ -204,6 +208,21 @@ def _clip_repr(text, limit: int) -> str:
     return repr(raw[:limit]) + "…"
 
 
+def _clip_repr_ends(text, head: int, tail: int) -> str:
+    """``repr`` of ``text`` with the middle elided: head, ``…``, tail, ``…``.
+
+    Menu prompts carry their identity at the head (family template, system
+    block, few-shots) and their decision inputs at the tail (user request,
+    ACTIONS menu, prefill); a head-only clip showed nothing but boilerplate,
+    which is exactly the part you do not need when debugging a misroute.
+    Short prompts pass through as a plain ``repr``.
+    """
+    raw = str(text or "")
+    if len(raw) <= head + tail:
+        return repr(raw)
+    return repr(raw[:head]) + "…" + repr(raw[-tail:]) + "…"
+
+
 def build_debug_line(event: dict, enabled: bool = True) -> str:
     """One dim line under the ticker showing the model's RAW answer.
 
@@ -214,12 +233,54 @@ def build_debug_line(event: dict, enabled: bool = True) -> str:
     digit — the failure mode of a chat transport, where the ``ANSWER:``
     prefill is only a hint and a chatty model spends the cap on preamble.
     ``attempt`` is 1-based, so it counts up to the retry ladder's length.
+    An empty completion at ``done: stop`` gets its own hint: the model's
+    first token already hit a stop (its end-of-turn token or the node's
+    newline stop) — usually a judgment that nothing fits, not a crash.
     """
     raw = _clip_repr(event.get("raw_text"), RAW_CLIP)
     reason = event.get("done_reason") or "?"
     attempt = _num(event.get("attempt"), int) + 1
-    return dim(f"{UNDER_INDENT}· raw {raw} · done: {reason}"
-               f" · attempt {attempt}", enabled)
+    line = (f"{UNDER_INDENT}· raw {raw} · done: {reason}"
+            f" · attempt {attempt}")
+    if reason == "stop" and not str(event.get("raw_text") or "").strip():
+        # A stop hit on the very first token: end-of-turn (nothing looked
+        # worth answering — often off-topic retrieval) or the node's own
+        # newline stop. Not the cap (that reads ``length``), not a crash.
+        line += " — empty answer: the model stopped before answering"
+    return dim(line, enabled)
+
+
+def _dump_lines(text: str, enabled: bool) -> list[str]:
+    """Each line of ``text`` verbatim, as one dim debug-dump row.
+
+    Nothing is clipped or wrapped, so a dump can be pasted into a bug
+    report exactly as the model saw it.
+    """
+    return [dim(f"{UNDER_INDENT}· {row}", enabled)
+            for row in (text.splitlines() or [""])]
+
+
+def build_debug_full_lines(event: dict, enabled: bool = True) -> list[str]:
+    """The complete prompt and result of one model call (``/debug full``).
+
+    For reading exactly what a misroute saw: the system block (chat
+    transports only — a raw template embeds it in ``prompt_text``), every
+    prompt line, then the unclipped completion with its token counts.
+    """
+    lines = []
+    system = str(event.get("system_text") or "")
+    if system:
+        lines.append(dim(f"{UNDER_INDENT}· system:", enabled))
+        lines.extend(_dump_lines(system, enabled))
+    lines.append(dim(f"{UNDER_INDENT}· prompt:", enabled))
+    lines.extend(_dump_lines(str(event.get("prompt_text") or ""), enabled))
+    stats = (f"{_num(event.get('prompt_tokens'), int)}pt/"
+             f"{_num(event.get('out_tokens'), int)}ot · "
+             f"{event.get('done_reason') or '?'}")
+    lines.append(dim(f"{UNDER_INDENT}· out "
+                     f"{str(event.get('result_text') or '')!r} · {stats}",
+                     enabled))
+    return lines
 
 
 def _wrap(text: str, width: int, indent: str = "") -> list[str]:
@@ -461,6 +522,7 @@ class ReplState:
     # which is the web SearchProvider); families are raw-mode only
     debug: bool = False     # /debug: show each decision's raw model answer
     # (NOT voice.debug, which traces microphone transcripts)
+    debug_full: bool = False  # /debug full: dump whole prompts per call
 
 
 def _cmd_help(state: ReplState, arg: str) -> str:
@@ -472,7 +534,8 @@ def _cmd_help(state: ReplState, arg: str) -> str:
         ("/browser MODE [on-screen]", "fetch via http|plain|stealth"),
         ("/model NAME", "swap the deciding model"),
         ("/voice [on|off|debug]", "talk instead of typing (voice extras)"),
-        ("/debug [on|off]", "show the raw model answer per decision"),
+        ("/debug [on|off|full]",
+         "raw model answer per decision; full: whole prompts"),
         ("/setup", "re-run the config wizard"),
         ("/quit", "leave the mesh"),
     ]
@@ -689,7 +752,7 @@ def _cmd_voice(state: ReplState, arg: str) -> str:
     return _voice_on(state)
 
 
-_DEBUG_ARGS = ("", "on", "off")  # accepted /debug arguments
+_DEBUG_ARGS = ("", "on", "off", "full")  # accepted /debug arguments
 
 
 def _cmd_debug(state: ReplState, arg: str) -> str:
@@ -698,19 +761,26 @@ def _cmd_debug(state: ReplState, arg: str) -> str:
     Distinct from ``/voice debug``, which traces microphone transcripts:
     this one shows what the model actually completed, so a decision that
     renders ``—`` names its own cause instead of just looking broken.
-    Bare ``/debug`` reports the current state.
+    ``full`` prints the complete prompt of every model call — the exact
+    request, menu options, and prefill the decision saw — instead of the
+    head+tail summary. Bare ``/debug`` reports the current state.
     """
     want = arg.strip().lower()
     if want not in _DEBUG_ARGS:
-        return fg(AMBER, "usage: /debug [on|off]", state.enabled)
+        return fg(AMBER, "usage: /debug [on|off|full]", state.enabled)
     if want == "":
-        status = "on" if state.debug else "off"
+        status = ("off" if not state.debug
+                  else "full" if state.debug_full else "on")
         return dim(f"debug is {status}", state.enabled)
-    state.debug = want == "on"
+    state.debug = want != "off"
+    state.debug_full = want == "full"
     if state.policy is not None and hasattr(state.policy, "debug"):
         state.policy.debug = state.debug
     if not state.debug:
         return dim("debug off", state.enabled)
+    if state.debug_full:
+        return dim("debug full — complete prompt of every model call",
+                   state.enabled)
     return dim("debug on — raw model answer + token dump under each decision",
                state.enabled)
 
@@ -766,11 +836,18 @@ class _TickerCounter:
 
         With ``/debug`` on, each ticker line is followed by the raw
         completion it was parsed from, and a token-level dump of the
-        full prompt and result for every model call.
+        full prompt and result for every model call; ``/debug full``
+        prints the whole prompt of every call instead of the summary.
         """
         if event.get("debug"):
             if self.state.debug:
-                self.sink(build_debug_tokens_line(event, self.state.enabled))
+                if getattr(self.state, "debug_full", False):
+                    for line in build_debug_full_lines(event,
+                                                       self.state.enabled):
+                        self.sink(line)
+                else:
+                    self.sink(build_debug_tokens_line(event,
+                                                      self.state.enabled))
             return
         self.decisions += 1
         self.tokens += int(event.get("out_tokens", 0) or 0)
@@ -1177,6 +1254,18 @@ def _demo() -> None:
     for event in _DEMO_EVENTS:
         print(build_ticker_line(event, enabled))
     print(build_debug_line(_DEMO_EVENTS[-1], enabled))  # as /debug on shows it
+    print(build_debug_tokens_line(                     # token-level dump line
+        {"debug": True,
+         "prompt_text": "<|im_start|>system\nYou are a menu selector "
+                        "controlling a research agent. When shown a numbered "
+                        "list of actions, reply with exactly one digit.\n\n"
+                        "Request: do a web search for forecast on the economy "
+                        "of japan\n\nWhich agent should handle this request?"
+                        "\nACTIONS:\n1 = casual — chat and small talk\n"
+                        "2 = code — write or debug Python code\n"
+                        "3 = web — look up facts on the internet\n\nANSWER:",
+         "result_text": " 3", "prompt_tokens": 752, "out_tokens": 3,
+         "done_reason": "stop"}, enabled))
     print(dim(f"  {ZAP} routed {CHEVRON} ", enabled)
           + fg(VIOLET, "web", enabled))
     print()

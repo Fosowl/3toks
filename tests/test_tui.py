@@ -148,6 +148,18 @@ class DebugLineTest(unittest.TestCase):
         self.assertIn("…", line)
         self.assertNotIn("z" * (tui.RAW_CLIP + 1), line)
 
+    def test_empty_stop_completion_gets_a_hint(self):
+        # raw '' + done: stop = the first generated token was already a
+        # stop token (end-of-turn or the newline stop), not the token cap.
+        line = tui.build_debug_line(
+            self._event(raw_text="", done_reason="stop"), enabled=False)
+        self.assertIn("stopped before answering", line)
+
+    def test_empty_length_completion_gets_no_hint(self):
+        # done: length already names its own cause (the token cap).
+        line = tui.build_debug_line(self._event(), enabled=False)
+        self.assertNotIn("stopped before answering", line)
+
     def test_no_escape_when_disabled(self):
         self.assertNotIn("\x1b",
                          tui.build_debug_line(self._event(), enabled=False))
@@ -215,8 +227,27 @@ class DebugTokensLineTest(unittest.TestCase):
             self._event(prompt_text="x" * 500, result_text="y" * 300),
             enabled=False)
         self.assertIn("…", line)
-        self.assertNotIn("x" * (tui.DEBUG_PROMPT_CLIP + 1), line)
+        self.assertNotIn("x" * (tui.DEBUG_PROMPT_HEAD
+                                + tui.DEBUG_PROMPT_TAIL + 1), line)
         self.assertNotIn("y" * (tui.DEBUG_RESULT_CLIP + 1), line)
+
+    def test_long_prompt_shows_the_tail_not_just_the_head(self):
+        # The routing-debug failure shape: a head-only clip showed nothing
+        # but the system block; the request and menu live at the tail.
+        tail = ("Request: do a web search for forecast on the economy of "
+                "japan\n\nWhich agent should handle this request?\n"
+                "ACTIONS:\n2 = code — write or debug Python code\n\n"
+                "ANSWER:")
+        prompt = "<|im_start|>system\nbe terse\n" + "pad " * 100 + "\n" + tail
+        line = tui.build_debug_tokens_line(
+            self._event(prompt_text=prompt), enabled=False)
+        self.assertIn("economy of japan", line)
+        self.assertIn("ANSWER:", line)
+        self.assertIn("<|im_start|>system", line)  # head still identifies it
+
+    def test_short_prompt_stays_a_single_plain_repr(self):
+        line = tui.build_debug_tokens_line(self._event(), enabled=False)
+        self.assertEqual(line.count("…"), 0)
 
     def test_no_escape_when_disabled(self):
         self.assertNotIn(
@@ -249,6 +280,76 @@ class TickerCounterDebugTokensTest(unittest.TestCase):
         self.assertIn("hi", printed[0])
         self.assertIn("yo", printed[0])
         self.assertIn("5pt/1ot", printed[0])
+
+
+class TickerCounterDebugFullTest(unittest.TestCase):
+    """/debug full streams the whole prompt of every model call."""
+
+    def _emit(self):
+        state = make_state(enabled=False)
+        state.debug = True
+        state.debug_full = True
+        printed = []
+        counter = tui._TickerCounter(state, printed.append)
+        counter({"debug": True, "system_text": "be terse",
+                 "prompt_text": "Request: hi\nACTIONS:\n1 = a\n2 = b\n\n"
+                                "ANSWER:",
+                 "result_text": " 1", "prompt_tokens": 5, "out_tokens": 1,
+                 "done_reason": "stop"})
+        return printed
+
+    def test_every_prompt_line_is_streamed_unclipped(self):
+        printed = self._emit()
+        joined = "\n".join(printed)
+        self.assertIn("· system:", joined)
+        self.assertIn("be terse", joined)
+        self.assertIn("Request: hi", joined)
+        self.assertIn("ANSWER:", joined)
+        self.assertIn("5pt/1ot", joined)
+
+    def test_long_lines_are_not_clipped(self):
+        state = make_state(enabled=False)
+        state.debug = True
+        state.debug_full = True
+        printed = []
+        counter = tui._TickerCounter(state, printed.append)
+        counter({"debug": True, "prompt_text": "x" * 5000,
+                 "result_text": "", "prompt_tokens": 1, "out_tokens": 0,
+                 "done_reason": "stop"})
+        self.assertTrue(any("x" * 5000 in line for line in printed))
+
+
+class DebugFullLinesTest(unittest.TestCase):
+    """The /debug full dump: complete prompt and result, nothing clipped."""
+
+    def _event(self, **overrides):
+        event = {"debug": True, "system_text": "be terse",
+                 "prompt_text": "Request: hi\nACTIONS:\n1 = a\n2 = b",
+                 "result_text": " 1", "prompt_tokens": 9, "out_tokens": 2,
+                 "done_reason": "stop"}
+        return {**event, **overrides}
+
+    def test_shows_system_prompt_and_result_with_counts(self):
+        joined = "\n".join(tui.build_debug_full_lines(self._event(),
+                                                      enabled=False))
+        self.assertIn("system:", joined)
+        self.assertIn("be terse", joined)
+        self.assertIn("2 = b", joined)
+        self.assertIn("' 1'", joined)
+        self.assertIn("9pt/2ot", joined)
+        self.assertIn("stop", joined)
+
+    def test_raw_template_prompt_needs_no_system_block(self):
+        # Raw mode embeds the system block in the template already.
+        joined = "\n".join(tui.build_debug_full_lines(
+            self._event(system_text=""), enabled=False))
+        self.assertNotIn("system:", joined)
+        self.assertIn("Request: hi", joined)
+
+    def test_missing_keys_do_not_crash(self):
+        lines = tui.build_debug_full_lines({}, enabled=False)
+        self.assertTrue(lines)
+        self.assertNotIn("\x1b", "\n".join(lines))
 
 
 class NoColorTest(unittest.TestCase):
@@ -450,7 +551,7 @@ class SlashCommandTest(unittest.TestCase):
     def test_help_lists_debug_apart_from_voice_debug(self):
         # Two unrelated features; /help must not blur them together.
         reply = tui.handle_command(make_state(enabled=False), "/help")
-        self.assertIn("/debug [on|off]", reply)
+        self.assertIn("/debug [on|off|full]", reply)
         self.assertIn("raw model answer", reply)
         self.assertIn("/voice [on|off|debug]", reply)
 
@@ -471,8 +572,34 @@ class SlashCommandTest(unittest.TestCase):
     def test_debug_garbage_argument_reports_usage(self):
         state = make_state(enabled=False)
         reply = tui.handle_command(state, "/debug loud")
-        self.assertIn("usage: /debug [on|off]", reply)
+        self.assertIn("usage: /debug [on|off|full]", reply)
         self.assertFalse(state.debug)
+
+    def test_debug_full_sets_both_flags(self):
+        state = make_state(enabled=False)
+        reply = tui.handle_command(state, "/debug full")
+        self.assertTrue(state.debug)
+        self.assertTrue(state.debug_full)
+        self.assertIn("complete prompt", reply)
+
+    def test_debug_on_clears_full(self):
+        state = make_state(enabled=False)
+        tui.handle_command(state, "/debug full")
+        tui.handle_command(state, "/debug on")
+        self.assertTrue(state.debug)
+        self.assertFalse(state.debug_full)
+
+    def test_debug_off_clears_full(self):
+        state = make_state(enabled=False)
+        tui.handle_command(state, "/debug full")
+        tui.handle_command(state, "/debug off")
+        self.assertFalse(state.debug)
+        self.assertFalse(state.debug_full)
+
+    def test_debug_bare_reports_full_state(self):
+        state = make_state(enabled=False)
+        tui.handle_command(state, "/debug full")
+        self.assertIn("debug is full", tui.handle_command(state, "/debug"))
 
     def test_debug_is_independent_of_voice_debug(self):
         state = make_state(enabled=False)
