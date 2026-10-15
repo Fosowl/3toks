@@ -3,7 +3,10 @@
 A ``SearchProvider`` turns a query into a short list of ``SearchResult``s.
 Backends: ``SearxngProvider`` (local docker, HTML scrape of
 ``article.result`` blocks), ``BingHtmlProvider`` and ``DdgHtmlProvider``
-(zero-infrastructure HTML scrapes). A bot-wall/challenge page raises
+(zero-infrastructure HTML scrapes). Every request goes through curl_cffi
+with ``impersonate="chrome"``: a plain ``requests`` GET with a fake Chrome
+User-Agent was walled by DuckDuckGo 3/3 (2026-10-15), the impersonated TLS
+fingerprint 0/3. A bot-wall/challenge page raises
 ``SearchUnavailable`` instead of returning [] — an empty answer and a
 dead engine must not look alike, or the research loop cannot tell
 "no hits" from "search layer down". ``auto_provider`` chains the
@@ -22,8 +25,10 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import time
 
-import requests
 from bs4 import BeautifulSoup
+from curl_cffi import requests as curl_requests
+
+from threetoks.web.fetch import IMPERSONATE
 
 DEFAULT_MAX_RESULTS = 8
 DEFAULT_SEARXNG_URL = "http://localhost:8080"
@@ -31,16 +36,13 @@ SEARXNG_URL_ENV = "THREETOKS_SEARXNG_URL"
 PROBE_TIMEOUT_S = 2
 SEARCH_TIMEOUT_S = 10
 DDG_HTML_URL = "https://html.duckduckgo.com/html/"
-BROWSER_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
-)
 
 # Bot-wall markers: the page answered 200 but carries a challenge instead
 # of results. Each provider checks its own signature before parsing.
 SEARXNG_SUSPENDED_MARKERS = ("dialog-error", "Suspended")
 BING_CHALLENGE_MARKER = "bing.com/challenge/verify"
 DDG_ANOMALY_MARKER = "anomaly-modal"
+MOJEEK_CAPTCHA_MARKER = "<title>Captcha</title>"
 
 
 class SearchUnavailable(Exception):
@@ -94,21 +96,28 @@ class SearxngProvider:
 
     def search(self, query: str, max_results: int = DEFAULT_MAX_RESULTS
                ) -> list[SearchResult]:
-        """POST to ``/search``, rotating engine subsets between calls.
+        """Ask the local SearXNG for results, with a small engine subset.
 
-        SearXNG fans out to every enabled engine on each query, which
-        gets them all rate-limited together under automated load; asking
-        a different small subset per call spreads the traffic instead.
-        A "Suspended" dialog-error means the instance itself is walled:
-        raise so the fallback chain moves on.
+        The fallback chain uses this as its first hop when SearXNG runs.
+        ``FallbackProvider.search`` calls it with the user query text.
+        It POSTs to ``/search`` with the next engine subset from
+        ``ENGINE_ROTATION``, so the engines do not get rate-limited
+        together, and raises when SearXNG itself is suspended.
+
+        Args:
+            query (str): the search text from the research loop.
+            max_results (int): the maximum number of hits to return.
+
+        Returns:
+            list[SearchResult]: the parsed hits, possibly empty.
         """
         engines = ENGINE_ROTATION[self._rotation % len(ENGINE_ROTATION)]
         self._rotation += 1
-        response = requests.post(
+        response = curl_requests.post(
             f"{self.base_url}/search",
             data={"q": query, "categories": "general", "language": "auto",
                   "engines": ",".join(engines)},
-            headers={"User-Agent": BROWSER_USER_AGENT},
+            impersonate=IMPERSONATE,
             timeout=SEARCH_TIMEOUT_S,
         )
         response.raise_for_status()
@@ -159,30 +168,67 @@ class DdgHtmlProvider:
 
     def search(self, query: str, max_results: int = DEFAULT_MAX_RESULTS
                ) -> list[SearchResult]:
-        """GET the DDG HTML page for ``query`` and parse its results.
+        """Get DuckDuckGo results for one query.
 
-        The anomaly modal is a bot check, not an empty SERP: raise so the
-        failure is visible to the fallback chain.
+        The fallback chain uses this as a zero-infrastructure search hop.
+        ``FallbackProvider.search`` calls it with the user query text.
+        It GETs the DDG HTML page and raises when the anomaly modal (a bot
+        check, not an empty result page) is present.
+
+        Args:
+            query (str): the search text from the research loop.
+            max_results (int): the maximum number of hits to return.
+
+        Returns:
+            list[SearchResult]: the parsed hits, possibly empty.
         """
-        response = requests.get(
-            DDG_HTML_URL,
-            params={"q": query},
-            headers={"User-Agent": BROWSER_USER_AGENT},
-            timeout=SEARCH_TIMEOUT_S,
-        )
-        response.raise_for_status()
-        if DDG_ANOMALY_MARKER in response.text:
+        html = _get_serp(DDG_HTML_URL, query)
+        if DDG_ANOMALY_MARKER in html:
             raise SearchUnavailable("duckduckgo served a bot check")
-        return _parse_ddg_results(response.text, max_results)
+        return _parse_ddg_results(html, max_results)
+
+
+def _get_serp(url: str, query: str) -> str:
+    """Download one search result page as a Chrome-like client.
+
+    The HTML scrape providers use this to send identical requests.
+    Each provider ``search`` method calls it with its engine URL and query.
+    It GETs ``url?q=query`` with the impersonated Chrome fingerprint and
+    raises on an HTTP error status.
+
+    Args:
+        url (str): the engine search URL, without the query string.
+        query (str): the search text from the research loop.
+
+    Returns:
+        str: the HTML of the result page.
+    """
+    response = curl_requests.get(url, params={"q": query},
+                                 impersonate=IMPERSONATE,
+                                 timeout=SEARCH_TIMEOUT_S)
+    response.raise_for_status()
+    return response.text
 
 
 def _searxng_answers(base_url: str) -> bool:
-    """Return True if a cheap GET of the searxng root succeeds quickly."""
+    """Tell if a local SearXNG instance answers.
+
+    The startup code uses this to put SearXNG in the chain only when it runs.
+    ``auto_provider``, the CLI and the TUI call it with the SearXNG base URL.
+    It does one short GET of the root page.
+
+    Args:
+        base_url (str): the SearXNG URL, such as "http://localhost:8080".
+
+    Returns:
+        bool: True when the root page answers HTTP 200 in time.
+    """
     try:
-        response = requests.get(f"{base_url.rstrip('/')}/",
-                                timeout=PROBE_TIMEOUT_S)
+        response = curl_requests.get(f"{base_url.rstrip('/')}/",
+                                     impersonate=IMPERSONATE,
+                                     timeout=PROBE_TIMEOUT_S)
         return response.status_code == 200
-    except requests.RequestException:
+    except curl_requests.exceptions.RequestException:
         return False
 
 
@@ -239,19 +285,24 @@ class BingHtmlProvider:
 
     def search(self, query: str, max_results: int = DEFAULT_MAX_RESULTS
                ) -> list[SearchResult]:
-        """GET the Bing SERP and parse organic results.
+        """Get Bing organic results for one query.
 
-        A challenge/verify shell is a bot wall, not an empty SERP: raise
-        so the fallback chain treats the hop as down.
+        The fallback chain uses this as its first zero-infrastructure hop.
+        ``FallbackProvider.search`` calls it with the user query text.
+        It GETs the Bing result page and raises when Bing sends its
+        challenge/verify page (a bot wall, not an empty result page).
+
+        Args:
+            query (str): the search text from the research loop.
+            max_results (int): the maximum number of hits to return.
+
+        Returns:
+            list[SearchResult]: the parsed hits, possibly empty.
         """
-        response = requests.get(
-            "https://www.bing.com/search", params={"q": query},
-            headers={"User-Agent": BROWSER_USER_AGENT},
-            timeout=SEARCH_TIMEOUT_S)
-        response.raise_for_status()
-        if BING_CHALLENGE_MARKER in response.text:
+        html = _get_serp("https://www.bing.com/search", query)
+        if BING_CHALLENGE_MARKER in html:
             raise SearchUnavailable("bing served a challenge page")
-        return _parse_bing_results(response.text, max_results)
+        return _parse_bing_results(html, max_results)
 
 
 def _parse_mojeek_results(html: str, max_results: int) -> list[SearchResult]:
@@ -286,13 +337,24 @@ class MojeekHtmlProvider:
 
     def search(self, query: str, max_results: int = DEFAULT_MAX_RESULTS
                ) -> list[SearchResult]:
-        """GET the Mojeek SERP and parse organic results."""
-        response = requests.get(
-            "https://www.mojeek.com/search", params={"q": query},
-            headers={"User-Agent": BROWSER_USER_AGENT},
-            timeout=SEARCH_TIMEOUT_S)
-        response.raise_for_status()
-        return _parse_mojeek_results(response.text, max_results)
+        """Get Mojeek organic results for one query.
+
+        Callers that want a search engine with no JS challenge use this.
+        ``FallbackProvider.search`` or a benchmark calls it with query text.
+        It GETs the Mojeek result page and raises when Mojeek sends its
+        HTTP 200 "Captcha" page (a bot wall, not an empty result page).
+
+        Args:
+            query (str): the search text from the research loop.
+            max_results (int): the maximum number of hits to return.
+
+        Returns:
+            list[SearchResult]: the parsed hits, possibly empty.
+        """
+        html = _get_serp("https://www.mojeek.com/search", query)
+        if MOJEEK_CAPTCHA_MARKER in html:
+            raise SearchUnavailable("mojeek served a captcha")
+        return _parse_mojeek_results(html, max_results)
 
 
 class FallbackProvider:

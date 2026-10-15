@@ -13,9 +13,11 @@ without the IO layer:
 """
 import re
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 from threetoks.nodes import ESCAPE, MenuNode, PickManyNode, ShortTextNode
 from threetoks.render import Episode
+from threetoks.web.errors import BlockedPage
 from threetoks.web.notes import rank_by_overlap
 from threetoks.web.target import (QUERY_TEMPERATURE, normalize_query,
                                   strip_quotes, too_similar)
@@ -132,6 +134,7 @@ class WebResearchVertical:
                  context_lines: tuple[str, ...] = (),
                  seen_urls: set[str] | None = None,
                  tried_queries: set[str] | None = None,
+                 blocked_hosts: set[str] | None = None,
                  tracer=None):
         self.task = task
         self.provider = provider
@@ -153,6 +156,9 @@ class WebResearchVertical:
             else set()
         self._tried_queries: set[str] = tried_queries \
             if tried_queries is not None else set()
+        # Hosts that served a bot check: never offered again this session.
+        self.blocked_hosts: set[str] = blocked_hosts \
+            if blocked_hosts is not None else set()
         self.results = []
         self.page = None
         self.chunk_start = 0
@@ -201,8 +207,39 @@ class WebResearchVertical:
     def _openable_results(self) -> bool:
         """True when at least one unseen result could still be opened."""
         return (self.pages_opened < MAX_PAGES
-                and any(r.url not in self.seen_urls
+                and any(self._can_open(r.url)
                         for r in self.results[:MAX_RESULTS_SHOWN]))
+
+    def _can_open(self, url: str) -> bool:
+        """Tell if a URL is worth offering to the model.
+
+        Result menus, site suggestions and link lists use this filter.
+        They call it with one candidate URL.
+        It rejects URLs already opened or failed, and URLs on a host that
+        served a bot check earlier in this session.
+
+        Args:
+            url (str): the candidate page URL.
+
+        Returns:
+            bool: True when the URL may be offered.
+        """
+        return url not in self.seen_urls and not self._host_blocked(url)
+
+    def _host_blocked(self, url: str) -> bool:
+        """Tell if the URL's host served a bot check this session.
+
+        Search listings drop such hits so the model never reads them.
+        ``_can_open`` and ``_run_search`` call it with one URL.
+        It compares the URL host with ``blocked_hosts``.
+
+        Args:
+            url (str): the candidate page URL.
+
+        Returns:
+            bool: True when the host is blocked.
+        """
+        return urlparse(url).hostname in self.blocked_hosts
 
     def _search_layer_dead(self) -> bool:
         """True when the provider's last live search reported failure.
@@ -306,7 +343,7 @@ class WebResearchVertical:
     def _apply_sites(self, text: str) -> None:
         """Turn the sites reply into openable results (or fall through)."""
         urls = [url for url in _extract_urls(text)
-                if url not in self.seen_urls][:MAX_SITE_SUGGESTIONS]
+                if self._can_open(url)][:MAX_SITE_SUGGESTIONS]
         if urls:
             self.results = [_LinkTarget(url, url) for url in urls]
             self.episode.log_session(
@@ -319,7 +356,7 @@ class WebResearchVertical:
         if self.pages_opened >= MAX_PAGES:
             return
         openable = [r for r in self.results[:MAX_RESULTS_SHOWN]
-                    if r.url not in self.seen_urls]
+                    if self._can_open(r.url)]
         for index, result in enumerate(openable, 1):
             text = f"open result {index}: {result.title[:TITLE_CHARS]}"
             self._option_map[text] = result
@@ -500,21 +537,18 @@ class WebResearchVertical:
         self.pages_attempted += 1
         try:
             page = self.fetch_page(result.url)
+        except BlockedPage as error:
+            self._skip_blocked_host(result, str(error))
+            return
         except Exception as error:  # fetch failures become a log line
-            self.pages_failed += 1
-            self.episode.log_session(f"> failed to open '{result.title[:40]}'")
-            self._trace_fetch_failure(result, str(error) or "fetch error")
-            self.seen_urls.add(result.url)
-            self.pending = None
+            self._fail_page(result, f"> failed to open '{result.title[:40]}'",
+                            str(error) or "fetch error")
             return
         page.url = page.url or result.url  # fakes may omit it
         if _looks_like_error_page(page.sentences):
-            self.pages_failed += 1
-            self.episode.log_session(
-                f"> page '{result.title[:40]}' failed to load properly")
-            self._trace_fetch_failure(result, "bot check or error page")
-            self.seen_urls.add(result.url)
-            self.pending = None
+            self._fail_page(
+                result, f"> page '{result.title[:40]}' failed to load properly",
+                "bot check or error page")
             return
         page.sentences = self._relevant_sentences(page.sentences)
         self.page = page
@@ -524,6 +558,45 @@ class WebResearchVertical:
         self.seen_urls.add(result.url)
         self._show_page_chunk(f"> opened '{result.title[:TITLE_CHARS]}'")
         self._queue_note_pass()
+
+    def _fail_page(self, result, log_line: str, reason: str) -> None:
+        """Record one page that could not be used and go back to results.
+
+        Every failed page open ends the same way, whatever the cause.
+        ``_load_page`` and ``_skip_blocked_host`` call it with the result,
+        the line the model reads, and the reason for the trace.
+        It counts the failure, logs it, traces it and marks the URL seen.
+
+        Args:
+            result: the search result or link that was opened (``.url``,
+                ``.title``).
+            log_line (str): the session line shown to the model.
+            reason (str): the failure reason for the ticker trace.
+        """
+        self.pages_failed += 1
+        self.episode.log_session(log_line)
+        self._trace_fetch_failure(result, reason)
+        self.seen_urls.add(result.url)
+        self.pending = None
+
+    def _skip_blocked_host(self, result, reason: str) -> None:
+        """Record a bot-checked page and stop offering its host.
+
+        One bot check usually means every page of that site is walled, so
+        trying more of them only wastes steps. ``_load_page`` calls this
+        with the result that failed and the ``BlockedPage`` message.
+        It adds the host to ``blocked_hosts`` (shared for the whole
+        session) and records the failure for the model.
+
+        Args:
+            result: the search result or link that was opened (``.url``,
+                ``.title``).
+            reason (str): the ``BlockedPage`` message, for the trace.
+        """
+        host = urlparse(result.url).hostname
+        self.blocked_hosts.add(host)
+        self._fail_page(result, f"> {host} blocked the agent with a bot "
+                        "check; skipping that site", reason)
 
     def _trace_fetch_failure(self, result, reason: str) -> None:
         """One ticker-visible trace event per failed page open."""
@@ -573,9 +646,10 @@ class WebResearchVertical:
         self.searches_done += 1
         self._tried_queries.add(key)
         try:
-            self.results = self.provider.search(query)
+            results = self.provider.search(query)
         except Exception:  # a dead provider must not kill the episode
-            self.results = []
+            results = []
+        self.results = [r for r in results if not self._host_blocked(r.url)]
         self.page = None
         self.pending = None
         lines = [f"[{i}] {r.title[:TITLE_CHARS]} — {r.snippet[:SNIPPET_CHARS]}"
@@ -653,7 +727,7 @@ class WebResearchVertical:
                 and not link.label.startswith("http")
 
         candidates = [l for l in self.page.links
-                      if l.url not in self.seen_urls and wordy(l)]
+                      if self._can_open(l.url) and wordy(l)]
         return sorted(candidates, key=lambda l: -sum(
             w in l.label.lower() for w in keywords))
 

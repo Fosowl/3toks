@@ -94,12 +94,17 @@ Optional, both improve web research quality:
   [infra/searxng/README.md](infra/searxng/README.md)); auto-detected at
   startup, falls back to scraping Bing, then DuckDuckGo's HTML endpoint,
   with no setup. Required for the browser modes below.
-- **Selenium browser** — `/browser on` in the TUI drives a real (visible by
-  default) Chrome window instead of plain HTTP fetch, for JS-rendered pages.
-  Requires Chrome and `selenium` installed; `/browser off` reverts to plain
-  HTTP. The `plain`/`stealth` browser modes pair with the local SearXNG:
-  startup refuses them (with a pointer to `./start_search_engine.sh`) when
-  no instance answers.
+- **Chrome browser** — `/browser plain` in the TUI (or `[browser] mode =
+  plain`) drives a real Chrome instead of plain HTTP fetch, for
+  JS-rendered pages; `/browser plain headless` hides the window,
+  `/browser http` reverts. Requires Chrome and the `browser` extra. Chrome
+  hides its automation switches and keeps one profile in
+  `~/.cache/threetoks/chrome-profile`, so solved bot checks and cookies
+  carry over between sessions. When a site shows a bot check, a visible
+  window waits 45 s so you can solve it; a site that stays blocked is
+  skipped for the rest of the session. The `plain` mode pairs with the
+  local SearXNG: startup refuses it (with a pointer to
+  `./start_search_engine.sh`) when no instance answers.
 
 ## Agents
 
@@ -117,7 +122,7 @@ registered agent (`casual`).
 | `look` | "what am I holding?", camera questions | only registered with the `camera` extra AND a vision-capable model (llava, qwen-vl, gpt-4o, claude, gemini, ...); one frame, one bounded vision decision |
 
 Slash commands in the TUI: `/help`, `/agents` (list registered agents),
-`/deep N` (set research rounds), `/browser http|plain|stealth`,
+`/deep N` (set research rounds), `/browser http|plain [on-screen|headless]`,
 `/model NAME` (swap the policy model), `/voice on|off|debug` (talk instead
 of typing; `debug` traces what the microphone hears and why each gate
 dropped it), `/debug [on|off]` (show the raw model answer and finish

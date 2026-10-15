@@ -172,7 +172,8 @@ class SearchBreakerTest(unittest.TestCase):
         class FakeVertical:
             def __init__(self, task, provider, fetch_page, notes,
                          initial_query=None, context_lines=(),
-                         seen_urls=None, tried_queries=None):
+                         seen_urls=None, tried_queries=None,
+                         blocked_hosts=None):
                 rounds_run.append(initial_query)
                 self.episode = Episode("S", task)
                 self.steps_left = 0
@@ -213,7 +214,8 @@ class SearchBreakerTest(unittest.TestCase):
         class FakeVertical:
             def __init__(self, task, provider, fetch_page, notes,
                          initial_query=None, context_lines=(),
-                         seen_urls=None, tried_queries=None):
+                         seen_urls=None, tried_queries=None,
+                         blocked_hosts=None):
                 self.episode = Episode("S", task)
                 self.steps_left = 0
                 self.notes = notes
@@ -309,8 +311,9 @@ class BeliefRequeryTest(unittest.TestCase):
         class FakeVertical:
             def __init__(self, task, provider, fetch_page, notes,
                          initial_query=None, context_lines=(),
-                         seen_urls=None, tried_queries=None):
-                shared.append((seen_urls, tried_queries))
+                         seen_urls=None, tried_queries=None,
+                         blocked_hosts=None):
+                shared.append((seen_urls, tried_queries, blocked_hosts))
                 self.episode = Episode("S", task)
                 self.steps_left = 0
                 self.notes = notes
@@ -340,6 +343,9 @@ class BeliefRequeryTest(unittest.TestCase):
              research_module.propose_query) = originals
         self.assertIs(shared[0][0], shared[1][0])  # one seen-URL set
         self.assertIs(shared[0][1], shared[1][1])  # one tried-query set
+        # Bot-walled hosts live on the session, not on one research run.
+        self.assertIs(shared[0][2], services.blocked_hosts)
+        self.assertIs(shared[1][2], services.blocked_hosts)
 
     def test_rounds_carry_recall_and_updated_target_context(self):
         import threetoks.research as research_module
@@ -349,7 +355,8 @@ class BeliefRequeryTest(unittest.TestCase):
         class FakeVertical:
             def __init__(self, task, provider, fetch_page, notes,
                          initial_query=None, context_lines=(),
-                         seen_urls=None, tried_queries=None):
+                         seen_urls=None, tried_queries=None,
+                         blocked_hosts=None):
                 contexts.append(tuple(context_lines))
                 self.episode = Episode("S", task)
                 self.steps_left = 0
@@ -416,7 +423,8 @@ class CurationWindowTest(unittest.TestCase):
         class FakeVertical:
             def __init__(self, task, provider, fetch_page, notes,
                          initial_query=None, context_lines=(),
-                         seen_urls=None, tried_queries=None):
+                         seen_urls=None, tried_queries=None,
+                         blocked_hosts=None):
                 counts_seen.append(notes.count())
                 self.episode = Episode("S", task)
                 self.steps_left = 0

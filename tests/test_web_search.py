@@ -1,7 +1,7 @@
 """Unit tests for search-result parsing and provider auto-detect (offline).
 
 No network: parse helpers run on fixtures, and provider ``search`` methods
-are exercised by monkeypatching ``requests``.
+are exercised by monkeypatching ``curl_requests`` (curl_cffi).
 """
 import base64
 import unittest
@@ -10,7 +10,8 @@ from unittest import mock
 
 from threetoks.web import search
 from threetoks.web.search import (BingHtmlProvider, DdgHtmlProvider,
-                                 FallbackProvider, SearchResult,
+                                 FallbackProvider, MojeekHtmlProvider,
+                                 SearchResult,
                                  SearchUnavailable, SearxngProvider,
                                  _decode_bing_href, _decode_ddg_href,
                                  _parse_bing_results, _parse_ddg_results,
@@ -25,7 +26,7 @@ def _load(name: str) -> str:
 
 
 class _FakeResponse:
-    """Minimal stand-in for a ``requests.Response``."""
+    """Minimal stand-in for a curl_cffi ``Response``."""
 
     def __init__(self, text: str, status_code: int = 200):
         self.text = text
@@ -58,7 +59,7 @@ class SearxngParseTest(unittest.TestCase):
     def test_provider_posts_and_parses(self):
         provider = SearxngProvider("http://localhost:8080")
         fake = _FakeResponse(_load("searxng_results.html"))
-        with mock.patch.object(search.requests, "post",
+        with mock.patch.object(search.curl_requests, "post",
                                return_value=fake) as posted:
             results = provider.search("paris")
         self.assertEqual(results[0].title, "Paris - Wikipedia")
@@ -82,7 +83,7 @@ class DdgParseTest(unittest.TestCase):
     def test_provider_gets_and_parses(self):
         provider = DdgHtmlProvider()
         fake = _FakeResponse(_load("ddg_results.html"))
-        with mock.patch.object(search.requests, "get", return_value=fake):
+        with mock.patch.object(search.curl_requests, "get", return_value=fake):
             results = provider.search("paris")
         self.assertEqual(len(results), 2)
         self.assertEqual(results[0].title, "Paris - Wikipedia")
@@ -140,7 +141,7 @@ class ProviderChallengeTest(unittest.TestCase):
         suspended = ('<html><div class="dialog-error">'
                      'Suspended: too many requests</div></html>')
         provider = SearxngProvider("http://localhost:8080")
-        with mock.patch.object(search.requests, "post",
+        with mock.patch.object(search.curl_requests, "post",
                                return_value=_FakeResponse(suspended)):
             with self.assertRaises(SearchUnavailable):
                 provider.search("q")
@@ -148,7 +149,7 @@ class ProviderChallengeTest(unittest.TestCase):
     def test_bing_challenge_raises_unavailable(self):
         shell = ('<html><script>"verifyEndpoint":'
                  '"https://www.bing.com/challenge/verify?p=7"</script></html>')
-        with mock.patch.object(search.requests, "get",
+        with mock.patch.object(search.curl_requests, "get",
                                return_value=_FakeResponse(shell)):
             with self.assertRaises(SearchUnavailable):
                 BingHtmlProvider().search("q")
@@ -156,13 +157,21 @@ class ProviderChallengeTest(unittest.TestCase):
     def test_ddg_challenge_raises_unavailable(self):
         shell = ('<div class="anomaly-modal__title">Unfortunately, '
                  'bots use DuckDuckGo too.</div>')
-        with mock.patch.object(search.requests, "get",
+        with mock.patch.object(search.curl_requests, "get",
                                return_value=_FakeResponse(shell)):
             with self.assertRaises(SearchUnavailable):
                 DdgHtmlProvider().search("q")
 
+    def test_mojeek_captcha_raises_unavailable(self):
+        captcha = ('<html><head><title>Captcha</title></head><body>'
+                   '<form method="post">Solve the puzzle</form></body></html>')
+        with mock.patch.object(search.curl_requests, "get",
+                               return_value=_FakeResponse(captcha)):
+            with self.assertRaises(SearchUnavailable):
+                MojeekHtmlProvider().search("q")
+
     def test_genuine_empty_page_still_returns_empty(self):
-        with mock.patch.object(search.requests, "get",
+        with mock.patch.object(search.curl_requests, "get",
                                return_value=_FakeResponse("<html>0 hits</html>")):
             self.assertEqual(BingHtmlProvider().search("q"), [])
 

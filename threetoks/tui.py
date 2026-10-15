@@ -470,7 +470,7 @@ def _cmd_help(state: ReplState, arg: str) -> str:
         ("/help", "show this command list"),
         ("/agents", "list registered agents"),
         ("/deep N", "set research rounds to N"),
-        ("/browser MODE [on-screen]", "fetch via http|plain|stealth"),
+        ("/browser MODE [on-screen]", "fetch via http|plain"),
         ("/model NAME", "swap the deciding model"),
         ("/voice [on|off|debug]", "talk instead of typing (voice extras)"),
         ("/debug [on|off]", "show the raw model answer per decision"),
@@ -527,7 +527,7 @@ def _cmd_model(state: ReplState, arg: str) -> str:
     return dim(f"model = {name}", state.enabled)
 
 
-_BROWSER_MODES = ("http", "plain", "stealth")
+_BROWSER_MODES = ("http", "plain")
 
 
 def _close_active_fetcher(state: ReplState) -> None:
@@ -540,30 +540,29 @@ def _close_active_fetcher(state: ReplState) -> None:
         state.fetcher = None
 
 
-def _make_browser_fetcher(mode: str, visible: bool):
-    """Lazily build a fetcher for ``plain`` / ``stealth`` (imports deferred)."""
-    if mode == "plain":
-        from threetoks.web.browser import make_fetcher
-        return make_fetcher(visible=visible)
-    from threetoks.web.stealth_browser import make_stealth_fetcher
-    return make_stealth_fetcher(visible=visible)
+def _make_browser_fetcher(visible: bool):
+    """Lazily build the Chrome fetcher for ``plain`` (imports deferred)."""
+    from threetoks.web.browser import make_fetcher
+    return make_fetcher(visible=visible)
 
 
 def _cmd_browser(state: ReplState, arg: str) -> str:
-    """Swap ``services.fetch_page`` between http / plain / stealth fetchers.
+    """Swap ``services.fetch_page`` between the http and plain fetchers.
 
-    ``/browser http`` restores the plain-HTTP fetch. ``plain`` and
-    ``stealth`` drive a real Chrome; visibility defaults to the config's
-    ``[browser] visible`` and an explicit ``on-screen`` / ``headless``
-    argument overrides it. The browser modules are optional, so imports
-    are lazy and every failure surfaces as a styled message, not a
-    traceback.
+    ``/browser http`` restores the plain-HTTP fetch. ``plain`` drives a
+    real Chrome; visibility defaults to the config's ``[browser]
+    visible`` and an explicit ``on-screen`` / ``headless`` argument
+    overrides it. A new fetcher gets a fresh chance at every site, so
+    hosts blocked earlier in the session are forgotten (a visible window
+    lets the user solve the check). The browser module is optional, so
+    imports are lazy and every failure surfaces as a styled message, not
+    a traceback.
     """
     parts = arg.split()
     mode = parts[0].lower() if parts else ""
     if mode not in _BROWSER_MODES:
         return fg(AMBER,
-                  "usage: /browser http|plain|stealth [on-screen|headless]",
+                  "usage: /browser http|plain [on-screen|headless]",
                   state.enabled)
     visible = state.browser_visible
     if len(parts) > 1 and parts[1].lower() == "on-screen":
@@ -571,12 +570,13 @@ def _cmd_browser(state: ReplState, arg: str) -> str:
     elif len(parts) > 1 and parts[1].lower() == "headless":
         visible = False
     _close_active_fetcher(state)
+    state.services.blocked_hosts.clear()
     if mode == "http":
         from threetoks.cli import fetch_page
         state.services.fetch_page = fetch_page
         return dim("browser http — plain HTTP fetch", state.enabled)
     try:
-        fetcher = _make_browser_fetcher(mode, visible)
+        fetcher = _make_browser_fetcher(visible)
     except Exception as error:  # noqa: BLE001 - optional module, any failure
         from threetoks.cli import fetch_page
         state.services.fetch_page = fetch_page  # never leave a dead driver bound
@@ -959,7 +959,7 @@ def repl(state: ReplState, read_input=input, sink=print) -> None:
 def _make_provider(config, sink):
     """Search provider, or None (with a notice) on a bare core install.
 
-    The web extras (requests, bs4, markdownify) are optional; a missing
+    The web extras (curl_cffi, bs4, markdownify) are optional; a missing
     import must degrade to a working TUI without the web agent, never a
     startup crash.
     """
@@ -978,7 +978,7 @@ def _make_provider(config, sink):
 def _searxng_gate(mode: str, sink) -> None:
     """Browser modes pair with the local SearXNG: exit clearly without it.
 
-    ``plain``/``stealth`` exist for JS-heavy pages found through search;
+    ``plain`` exists for JS-heavy pages found through search;
     starting Chrome when no search engine answers can only produce a
     session that opens nothing, so refuse early and say how to fix it.
     """
@@ -1011,7 +1011,7 @@ def _initial_fetcher(config, services, sink=print):
         return None
     _searxng_gate(mode, sink)
     try:
-        fetcher = _make_browser_fetcher(mode, config.browser.visible)
+        fetcher = _make_browser_fetcher(config.browser.visible)
     except Exception as error:  # noqa: BLE001 - optional module; use HTTP
         services.fetch_page = fetch_page
         sink(fg(AMBER, f"  browser {mode} unavailable: {error} — "

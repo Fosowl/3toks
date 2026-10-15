@@ -248,7 +248,8 @@ around a judged multi-round research loop, and added an interactive TUI.
   waits for `document.readyState == "complete"` plus a fixed settle delay,
   then hands `page_source` to the same `html_to_page` pipeline the HTTP
   fetcher uses. Wired into the TUI as `/browser on|off`; lazy driver
-  creation so importing the module never launches Chrome.
+  creation so importing the module never launches Chrome. (Superseded:
+  §20 hides the automation switches and deletes `stealth`.)
 - **Web vertical upgrades** (`threetoks/web/vertical.py`,
   `threetoks/web/search.py`): link following (`follow a link on this page`
   menu option, backed by `PageText.links` from `textify.py`); keyword-
@@ -572,3 +573,57 @@ project: chat-API providers, voice in/out, camera vision, Pi relay.
   settles clear phrasings by regex with zero model calls; the reference
   tools.py bug (boolean-negating an "on"/"off" string) was fixed, and
   8-bit PCM decode underflow in the reference TTS was corrected.
+
+## 20. Fewer CAPTCHAs: honest fingerprints and bot-check pages (2026-10-15)
+
+A live probe (Chrome 155, bot.sannysoft.com plus six Cloudflare/DataDome/
+PerimeterX-protected pages, one try per cell, same IP) showed why the web
+layer met CAPTCHAs: the browser announced automation, and block pages were
+read as content.
+
+| Variant | Sannysoft fails | Protected pages passed |
+|---|---|---|
+| old `plain`, headless | 6 | 0/6 |
+| old `plain`, visible | 3 | 1/6 |
+| old `stealth`, visible | 1 | 3/6 |
+| new `plain`, visible | 0 | 4/6 |
+
+- **`plain` Chrome hides only what automation adds** (`web/browser.py`):
+  no `--enable-automation` switch, no AutomationControlled blink feature
+  (`navigator.webdriver` is false), GPU on (WebGL is real, not null), and
+  in headless mode the user agent says `Chrome`, not `HeadlessChrome`. The
+  CDP override reuses the browser's own client hints, so user agent,
+  brands and platform agree.
+- **`stealth` mode is deleted.** Its patches made the fingerprint
+  inconsistent (Windows/Linux `navigator.platform` on a Mac user agent,
+  Chrome 125 strings on Chrome 155, an "Intel Iris" GPU on Apple silicon);
+  its `user-agent=` flag lacked `--` and did nothing; its "captcha" marker
+  matched normal pages, so every fetch waited 10 s; it leaked a 68 MB
+  profile per session; and its two packages were never declared. A
+  `mode = stealth` config value now falls back to the default (`http`).
+- **One persistent Chrome profile** (`web/chrome_profile.py`,
+  `~/.cache/threetoks/chrome-profile`): solved checks and site cookies
+  survive between sessions. An OS file lock gives the profile to one
+  session at a time; a second concurrent session uses a temporary profile
+  that is deleted on close.
+- **Bot-check pages are failures, not content** (`web/blockpage.py`).
+  Markers measured on 32 pages, each present only on block pages:
+  `_cf_chl_opt` (Cloudflare), `captcha-delivery.com` (DataDome),
+  `px-captcha` (PerimeterX), and challenge titles ("Just a moment...",
+  "Prove your humanity", ...). The word "captcha", `challenge-platform`
+  and `g-recaptcha` appear on normal pages and are not used. Both fetchers
+  raise `BlockedPage` (`web/errors.py`). The Chrome fetcher first waits
+  10 s headless (automatic checks clear) or 45 s in a visible window
+  (time for the user to solve the CAPTCHA).
+- **One block skips the host for the session.** `Services.blocked_hosts`
+  is shared by every research round and task; the vertical stops offering
+  results, links and suggested sites from a host that served a bot check.
+- **HTTP impersonates Chrome** (`curl_cffi`, `impersonate="chrome"`) in
+  `fetch.py`, `search.py` and code retrieval, replacing `requests` with a
+  fixed Chrome 134 user agent. DuckDuckGo HTML went from 3/3 walled to
+  0/3. Mojeek's HTTP-200 "Captcha" page now raises `SearchUnavailable`
+  instead of parsing as zero hits.
+
+Not solved: a site that walls the IP itself (Reddit after repeated hits,
+DataDome on ResearchGate and G2 in headless mode) still blocks; the host
+skip only stops the agent from wasting steps on it.

@@ -39,6 +39,7 @@ class FakeServices:
     def __init__(self):
         self.max_research_rounds = 3
         self.fetch_page = None
+        self.blocked_hosts = set()
 
 
 def make_state(**overrides):
@@ -533,18 +534,26 @@ class SlashCommandTest(unittest.TestCase):
         with mock.patch.object(tui, "_make_browser_fetcher",
                                return_value=fake) as maker:
             reply = tui.handle_command(state, "/browser plain")
-        maker.assert_called_once_with("plain", False)
+        maker.assert_called_once_with(False)
         self.assertIs(state.fetcher, fake)
         self.assertEqual(state.services.fetch_page, fake.fetch_page)
         self.assertIn("plain", reply)
 
-    def test_browser_stealth_on_screen_passes_visible(self):
+    def test_browser_on_screen_passes_visible(self):
         state = make_state(enabled=False)
         fake = _RecordingFetcher()
         with mock.patch.object(tui, "_make_browser_fetcher",
                                return_value=fake) as maker:
-            tui.handle_command(state, "/browser stealth on-screen")
-        maker.assert_called_once_with("stealth", True)
+            tui.handle_command(state, "/browser plain on-screen")
+        maker.assert_called_once_with(True)
+
+    def test_browser_switch_gives_blocked_sites_a_fresh_chance(self):
+        state = make_state(enabled=False)
+        state.services.blocked_hosts.add("walled.example")
+        with mock.patch.object(tui, "_make_browser_fetcher",
+                               return_value=_RecordingFetcher()):
+            tui.handle_command(state, "/browser plain on-screen")
+        self.assertEqual(state.services.blocked_hosts, set())
 
     def test_browser_visibility_defaults_from_the_config(self):
         # [browser] visible = true must show the window without the user
@@ -555,7 +564,7 @@ class SlashCommandTest(unittest.TestCase):
         with mock.patch.object(tui, "_make_browser_fetcher",
                                return_value=fake) as maker:
             tui.handle_command(state, "/browser plain")
-        maker.assert_called_once_with("plain", True)
+        maker.assert_called_once_with(True)
 
     def test_browser_headless_overrides_a_visible_config(self):
         state = make_state(enabled=False)
@@ -563,8 +572,8 @@ class SlashCommandTest(unittest.TestCase):
         fake = _RecordingFetcher()
         with mock.patch.object(tui, "_make_browser_fetcher",
                                return_value=fake) as maker:
-            tui.handle_command(state, "/browser stealth headless")
-        maker.assert_called_once_with("stealth", False)
+            tui.handle_command(state, "/browser plain headless")
+        maker.assert_called_once_with(False)
 
     def test_browser_switch_closes_previous_fetcher(self):
         state = make_state(enabled=False)
@@ -572,7 +581,7 @@ class SlashCommandTest(unittest.TestCase):
         with mock.patch.object(tui, "_make_browser_fetcher",
                                side_effect=[first, second]):
             tui.handle_command(state, "/browser plain")
-            tui.handle_command(state, "/browser stealth")
+            tui.handle_command(state, "/browser plain headless")
         self.assertEqual(first.closed, 1)
         self.assertIs(state.fetcher, second)
 
@@ -580,7 +589,7 @@ class SlashCommandTest(unittest.TestCase):
         state = make_state(enabled=False)
         with mock.patch.object(tui, "_make_browser_fetcher",
                                side_effect=RuntimeError("no chrome")):
-            reply = tui.handle_command(state, "/browser stealth")
+            reply = tui.handle_command(state, "/browser plain")
         self.assertIn("unavailable", reply)
         self.assertIsNone(state.fetcher)
 
@@ -629,12 +638,12 @@ class InitialFetcherFallbackTest(unittest.TestCase):
         lines = []
         with mock.patch.object(tui, "_make_browser_fetcher",
                                side_effect=RuntimeError("no chromedriver")):
-            fetcher = tui._initial_fetcher(self._config("stealth"), services,
+            fetcher = tui._initial_fetcher(self._config("plain"), services,
                                            lines.append)
         self.assertIsNone(fetcher)
         self.assertIsNotNone(services.fetch_page)   # degraded to http
         [notice] = lines
-        self.assertIn("stealth unavailable", notice)
+        self.assertIn("plain unavailable", notice)
         self.assertIn("no chromedriver", notice)
 
     def test_http_mode_stays_quiet(self):

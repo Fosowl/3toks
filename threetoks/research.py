@@ -312,7 +312,8 @@ def deep_research(task: str, services: Services, policy: Policy) -> dict:
                                        initial_query=query,
                                        context_lines=context,
                                        seen_urls=seen_urls,
-                                       tried_queries=executed)
+                                       tried_queries=executed,
+                                       blocked_hosts=services.blocked_hosts)
         vertical.tracer = getattr(policy, "tracer", None)  # fetch failures
         result = run_episode(vertical, policy, max_steps=MAX_STEPS_PER_ROUND)
         notes = vertical.notes  # adopt curation pruning across rounds

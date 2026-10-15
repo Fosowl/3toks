@@ -308,10 +308,10 @@ if __name__ == "__main__":
     opened = []
     record = opened.append  # fake open_url: records, never opens a browser
     quiet = lambda line: None
-    answers = iter(["", "", "stealth", "y", "", "5", "", "n", "n"])
+    answers = iter(["", "", "plain", "y", "", "5", "", "n", "n"])
     wizard = run_wizard(ask=lambda prompt: next(answers), sink=quiet,
                         open_url=record)
-    assert wizard.browser.mode == "stealth", wizard.browser
+    assert wizard.browser.mode == "plain", wizard.browser
     assert wizard.browser.visible is True, wizard.browser
     assert wizard.research.max_rounds == 5, wizard.research
     assert wizard.memory.enabled is False, wizard.memory

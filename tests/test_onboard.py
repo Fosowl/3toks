@@ -66,7 +66,7 @@ class WizardDefaultsTest(unittest.TestCase):
         run_wizard(ask=ask, sink=_quiet, open_url=_no_browser)
         self.assertIn(f"[{config.DEFAULT_MODEL}]", prompts[0])
         self.assertIn(f"[{config.DEFAULT_LLM_HOST}]", prompts[1])
-        self.assertIn("http/plain/stealth", prompts[2])
+        self.assertIn("http/plain", prompts[2])
 
     def test_base_config_supplies_the_defaults(self):
         base = ThreetoksConfig(llm=config.LlmConfig(
@@ -96,13 +96,13 @@ class WizardDefaultsTest(unittest.TestCase):
 
 class WizardAnswersTest(unittest.TestCase):
     def test_full_answers_override_every_asked_field(self):
-        ask, _ = _scripted(["my-model", "http://h:9", "stealth", "y",
+        ask, _ = _scripted(["my-model", "http://h:9", "plain", "y",
                             "http://s:1", "7", "/data", "yes", "/mem.json",
                             "n"])
         cfg = run_wizard(ask=ask, sink=_quiet, open_url=_no_browser)
         self.assertEqual(cfg.llm.model, "my-model")
         self.assertEqual(cfg.llm.host, "http://h:9")
-        self.assertEqual(cfg.browser.mode, "stealth")
+        self.assertEqual(cfg.browser.mode, "plain")
         self.assertTrue(cfg.browser.visible)
         self.assertEqual(cfg.search.searxng_url, "http://s:1")
         self.assertEqual(cfg.research.max_rounds, 7)

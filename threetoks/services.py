@@ -15,6 +15,7 @@ class Services:
     provider: object = None            # SearchProvider (web)
     fetch_page: object = None          # callable url -> PageText (web)
     files_root: Path = field(default_factory=Path.cwd)
+    blocked_hosts: set = field(default_factory=set)  # bot-walled this session
     max_research_rounds: int = DEFAULT_RESEARCH_ROUNDS
     recalled: list = field(default_factory=list)  # memories the selector chose
     retriever: object = None           # code retrieval-as-repair (opt-in)

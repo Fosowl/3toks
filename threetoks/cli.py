@@ -19,7 +19,7 @@ from threetoks.trace import Tracer
 from threetoks.web.notes import NoteStore
 from threetoks.web.vertical import WebResearchVertical
 
-# The web extras (requests, bs4, markdownify) are OPTIONAL: everything
+# The web extras (curl_cffi, bs4, markdownify) are OPTIONAL: everything
 # that touches them imports lazily so the core runs on a bare install.
 
 DEFAULT_MODEL = "qwen3.5:2b"
@@ -77,30 +77,25 @@ def make_fetch_page(config):
     """Build a ``(fetch_page, fetcher)`` pair for the configured browser mode.
 
     ``http`` uses the module-level plain-HTTP :func:`fetch_page` and no
-    fetcher to close. ``plain`` / ``stealth`` lazily import their Chrome
-    backend and return the live fetcher so the caller can close it — but
+    fetcher to close. ``plain`` lazily imports the Chrome backend and
+    returns the live fetcher so the caller can close it — but
     only once a local SearXNG answers: browser mode exists for JS-heavy
     pages found through search, so without the search engine the pairing
     is pointless and startup refuses with a clear error.
     """
     mode = config.browser.mode
-    if mode in ("plain", "stealth"):
-        from threetoks.web import search as search_mod  # lazy: web extras
-        base_url = os.getenv(search_mod.SEARXNG_URL_ENV,
-                             search_mod.DEFAULT_SEARXNG_URL)
-        if not search_mod._searxng_answers(base_url):
-            raise SystemExit(
-                f"browser mode '{mode}' needs a local SearXNG, but none "
-                f"answers at {base_url} — run ./start_search_engine.sh first")
-    if mode == "plain":
-        from threetoks.web.browser import make_fetcher
-        fetcher = make_fetcher(config.browser.visible)
-        return fetcher.fetch_page, fetcher
-    if mode == "stealth":
-        from threetoks.web.stealth_browser import make_stealth_fetcher
-        fetcher = make_stealth_fetcher(config.browser.visible)
-        return fetcher.fetch_page, fetcher
-    return fetch_page, None
+    if mode != "plain":
+        return fetch_page, None
+    from threetoks.web import search as search_mod  # lazy: web extras
+    base_url = os.getenv(search_mod.SEARXNG_URL_ENV,
+                         search_mod.DEFAULT_SEARXNG_URL)
+    if not search_mod._searxng_answers(base_url):
+        raise SystemExit(
+            f"browser mode '{mode}' needs a local SearXNG, but none "
+            f"answers at {base_url} — run ./start_search_engine.sh first")
+    from threetoks.web.browser import make_fetcher
+    fetcher = make_fetcher(config.browser.visible)
+    return fetcher.fetch_page, fetcher
 
 
 def main() -> None:

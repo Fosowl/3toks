@@ -58,7 +58,7 @@ DEFAULT_MEMORY_ENABLED = True
 DEFAULT_CODE_RETRIEVAL = False
 DEFAULT_SNIPPET_CACHE = "threetoks_snippets.json"
 
-BROWSER_MODES = ("http", "plain", "stealth")
+BROWSER_MODES = ("http", "plain")
 _TRUE_WORDS = ("1", "true", "yes", "on")
 _FALSE_WORDS = ("0", "false", "no", "off")
 
@@ -87,7 +87,7 @@ class LlmConfig:
 
 @dataclass(frozen=True)
 class BrowserConfig:
-    """Fetch backend: ``http`` (requests), ``plain`` / ``stealth`` (Chrome)."""
+    """Fetch backend: ``http`` (curl_cffi) or ``plain`` (real Chrome)."""
 
     mode: str = DEFAULT_BROWSER_MODE
     visible: bool = DEFAULT_BROWSER_VISIBLE
@@ -364,7 +364,7 @@ send_seed = {send_seed}
 disable_think = {disable_think}
 
 [browser]
-# Page fetching: http (fast, bot-detectable) | plain | stealth (real Chrome).
+# Page fetching: http (fast, no JavaScript) | plain (real Chrome).
 mode = {mode}
 visible = {visible}
 
@@ -513,11 +513,11 @@ if __name__ == "__main__":
     import tempfile
 
     with tempfile.NamedTemporaryFile("w", suffix=".ini", delete=False) as handle:
-        handle.write("[browser]\nmode = stealth\nvisible = yes\n"
+        handle.write("[browser]\nmode = plain\nvisible = yes\n"
                      "[llm]\nvote_k = not-a-number\n")
         temp_path = handle.name
     parsed = load_config(temp_path)
-    assert parsed.browser.mode == "stealth", parsed.browser
+    assert parsed.browser.mode == "plain", parsed.browser
     assert parsed.browser.visible is True, parsed.browser
     assert parsed.llm.vote_k == DEFAULT_VOTE_K, parsed.llm  # bad -> default
     assert defaults.memory.path == DEFAULT_MEMORY_PATH, defaults.memory

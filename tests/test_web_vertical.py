@@ -3,6 +3,7 @@ import unittest
 from dataclasses import dataclass, field
 
 from threetoks.nodes import ESCAPE, Decision, MenuNode, PickManyNode, ShortTextNode
+from threetoks.web.errors import BlockedPage
 from threetoks.web.notes import NoteStore
 from threetoks.web.vertical import (AUTO_CHUNKS_PER_PAGE,
                                    FORCE_ANSWER_AT_STEPS_LEFT,
@@ -347,6 +348,67 @@ class ErrorPageTest(unittest.TestCase):
         menu = vertical.next_node()
         vertical.apply(menu, menu_decision(menu.options[0]))
         self.assertIsNotNone(vertical.page)
+
+
+class BlockedHostTest(unittest.TestCase):
+    """One bot check takes the whole host off the menus for the session."""
+
+    def _vertical(self, blocked_hosts=None):
+        provider = FakeProvider([
+            FakeResult("Walled one", "https://walled.example/a"),
+            FakeResult("Walled two", "https://walled.example/b"),
+            FakeResult("Open", "https://open.example/c")])
+        opened = []
+
+        def fetch(url):
+            opened.append(url)
+            if "walled" in url:
+                raise BlockedPage(f"{url}: blocked by a bot check (test)")
+            return FakePage("Open", ["A sentence."])
+
+        vertical = WebResearchVertical("t", provider, fetch, FakeNotes(),
+                                       blocked_hosts=blocked_hosts)
+        return vertical, opened
+
+    def test_blocked_page_hides_every_result_from_that_host(self):
+        vertical, _ = self._vertical()
+        menu = vertical.next_node()
+        vertical.apply(menu, menu_decision(menu.options[0]))
+        retry = vertical.next_node()
+        self.assertFalse(any("Walled" in o for o in retry.options))
+        self.assertTrue(any("Open" in o for o in retry.options))
+
+    def test_blocked_host_is_recorded_in_the_shared_set(self):
+        shared = set()
+        vertical, _ = self._vertical(blocked_hosts=shared)
+        menu = vertical.next_node()
+        vertical.apply(menu, menu_decision(menu.options[0]))
+        self.assertEqual(shared, {"walled.example"})
+
+    def test_host_blocked_earlier_in_the_session_is_never_offered(self):
+        vertical, opened = self._vertical(blocked_hosts={"walled.example"})
+        menu = vertical.next_node()
+        self.assertFalse(any("Walled" in o for o in menu.options))
+        self.assertEqual(opened, [])
+
+    def test_blocked_hits_leave_the_listing_so_later_hits_move_up(self):
+        walled = [FakeResult(f"Walled {i}", f"https://walled.example/{i}")
+                  for i in range(5)]
+        provider = FakeProvider(walled + [FakeResult("Open", "https://o.ex/")])
+        vertical = WebResearchVertical(
+            "t", provider, lambda url: FakePage("Open", ["A sentence."]),
+            FakeNotes(), blocked_hosts={"walled.example"})
+        menu = vertical.next_node()
+        self.assertNotIn("Walled", vertical.episode.render_base())
+        self.assertTrue(any("Open" in o for o in menu.options))
+
+    def test_model_is_told_why_the_site_was_skipped(self):
+        vertical, _ = self._vertical()
+        menu = vertical.next_node()
+        vertical.apply(menu, menu_decision(menu.options[0]))
+        self.assertIn("walled.example blocked the agent",
+                      vertical.episode.render_base())
+
 
 
 def make_long_vertical(n_sentences, notes=None, task="apples grow on trees"):

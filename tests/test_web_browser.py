@@ -3,8 +3,10 @@
 No browser launches: ``create_driver`` is monkeypatched to return a fake
 driver object, so these tests assert wiring — lazy creation, the
 ``html_to_page`` handoff, idempotent close, ``FetchError`` translation,
-stale-PATH-chromedriver masking, and dead-session recovery — without any
-Chrome, chromedriver, or network.
+stale-PATH-chromedriver masking, dead-session recovery, bot-check waits
+and the headless user-agent fix — without any Chrome, chromedriver, or
+network. The shared Chrome profile is redirected to a temporary cache
+directory so no test touches the user's real profile.
 """
 import os
 import tempfile
@@ -14,12 +16,39 @@ from unittest import mock
 from selenium.common.exceptions import WebDriverException
 
 from threetoks.web import browser
-from threetoks.web.browser import make_fetcher
-from threetoks.web.fetch import FetchError
+from threetoks.web.chrome_profile import ChromeProfile
+from threetoks.web.errors import BlockedPage, FetchError
 from threetoks.web.textify import PageText
 
 _PAGE_HTML = ("<html><title>Demo</title><body>"
               "<p>The capital of France is Paris today.</p></body></html>")
+_CHALLENGE_HTML = ("<html><head><title>Just a moment...</title></head><body>"
+                   "<script>window._cf_chl_opt={}</script></body></html>")
+_CACHE_ROOT = None
+_CACHE_PATCH = None
+_OPEN_FETCHERS = []
+
+
+def setUpModule():
+    global _CACHE_ROOT, _CACHE_PATCH
+    _CACHE_ROOT = tempfile.TemporaryDirectory(prefix="threetoks_test_cache_")
+    _CACHE_PATCH = mock.patch.dict(os.environ,
+                                   {"XDG_CACHE_HOME": _CACHE_ROOT.name})
+    _CACHE_PATCH.start()
+
+
+def tearDownModule():
+    for fetcher in _OPEN_FETCHERS:
+        fetcher.close()
+    _CACHE_PATCH.stop()
+    _CACHE_ROOT.cleanup()
+
+
+def make_fetcher(visible: bool = False) -> browser.BrowserFetcher:
+    """``browser.make_fetcher`` whose profile lock is freed after the tests."""
+    fetcher = browser.make_fetcher(visible=visible)
+    _OPEN_FETCHERS.append(fetcher)
+    return fetcher
 
 
 class FakeDriver:
@@ -32,6 +61,7 @@ class FakeDriver:
         self.got = []
         self.quit_count = 0
         self.page_load_timeout = None
+        self.cdp_calls = []
 
     def get(self, url: str) -> None:
         self.got.append(url)
@@ -41,6 +71,9 @@ class FakeDriver:
 
     def set_page_load_timeout(self, seconds: int) -> None:
         self.page_load_timeout = seconds
+
+    def execute_cdp_cmd(self, command: str, params: dict) -> None:
+        self.cdp_calls.append((command, params))
 
     def quit(self) -> None:
         self.quit_count += 1
@@ -69,7 +102,7 @@ class LazyCreationTest(unittest.TestCase):
             fetcher = make_fetcher()
             fetcher._wait_until_ready = lambda _driver: None
             fetcher.fetch_page("https://example.com/")
-        created.assert_called_once_with(False)
+        created.assert_called_once_with(False, mock.ANY)
         self.assertIs(fetcher.driver, fake)
 
     def test_driver_reused_across_fetches(self):
@@ -90,7 +123,7 @@ class LazyCreationTest(unittest.TestCase):
             fetcher = make_fetcher(visible=True)
             fetcher._wait_until_ready = lambda _driver: None
             fetcher.fetch_page("https://example.com/")
-        created.assert_called_once_with(True)
+        created.assert_called_once_with(True, mock.ANY)
 
 
 class FetchHandoffTest(unittest.TestCase):
@@ -155,7 +188,7 @@ class ErrorTranslationTest(unittest.TestCase):
         boom = WebDriverException("chromedriver unusable")
         with mock.patch.object(browser.webdriver, "Chrome", side_effect=boom):
             with self.assertRaises(FetchError) as caught:
-                browser.create_driver(visible=False)
+                browser.create_driver(visible=False, profile_dir="/tmp/p")
         self.assertIn("chromedriver", str(caught.exception))
 
 
@@ -294,7 +327,7 @@ class CreateDriverMaskTest(unittest.TestCase):
                 mock.patch.object(browser.webdriver, "Chrome",
                                   side_effect=chrome), \
                 mock.patch.dict(browser.os.environ, {"PATH": "/original"}):
-            driver = browser.create_driver(visible=False)
+            driver = browser.create_driver(visible=True, profile_dir="/p")
             return driver, browser.os.environ["PATH"]
 
     def test_stale_path_driver_masked_during_start(self):
@@ -345,6 +378,134 @@ class CreateDriverMaskTest(unittest.TestCase):
         with self.assertRaises(FetchError):
             self._create(stale=False, masked=None, chrome=chrome)
         self.assertEqual(chrome.call_count, 1)
+
+
+class ChromeOptionsTest(unittest.TestCase):
+    """Options must not re-add the switches bot checks detect."""
+
+    def _options(self, visible: bool):
+        with mock.patch.object(browser, "get_chrome_path",
+                               return_value="/x/chrome"):
+            return browser.create_chrome_options(visible, "/profile")
+
+    def test_automation_switches_hidden(self):
+        options = self._options(visible=False)
+        self.assertEqual(options.experimental_options["excludeSwitches"],
+                         ["enable-automation"])
+        self.assertIn("--disable-blink-features=AutomationControlled",
+                      options.arguments)
+
+    def test_gpu_stays_on_so_webgl_is_real(self):
+        self.assertNotIn("--disable-gpu", self._options(False).arguments)
+
+    def test_profile_dir_is_used(self):
+        self.assertIn("--user-data-dir=/profile",
+                      self._options(True).arguments)
+
+
+class HeadlessUserAgentTest(unittest.TestCase):
+    """Headless Chrome must not announce ``HeadlessChrome``."""
+
+    _HINTS = {"brands": [{"brand": "Google Chrome", "version": "155"}],
+              "platform": "macOS", "mobile": False}
+
+    def _driver(self):
+        fake = FakeDriver()
+        fake.execute_script = mock.Mock(side_effect=lambda script: (
+            "Mozilla/5.0 (Macintosh) HeadlessChrome/155.0.0.0 Safari/537.36"
+            if script == browser._USER_AGENT_SCRIPT else self._HINTS))
+        return fake
+
+    def _create(self, visible: bool, fake):
+        with mock.patch.object(browser, "create_chrome_options"), \
+                mock.patch.object(browser, "_start_with_mask",
+                                  return_value=fake):
+            return browser.create_driver(visible, "/profile")
+
+    def test_headless_token_replaced_and_hints_kept(self):
+        fake = self._driver()
+        self._create(visible=False, fake=fake)
+        [(command, params)] = fake.cdp_calls
+        self.assertEqual(command, "Network.setUserAgentOverride")
+        self.assertNotIn("Headless", params["userAgent"])
+        self.assertIn("Chrome/155.0.0.0", params["userAgent"])
+        self.assertEqual(params["userAgentMetadata"], self._HINTS)
+
+    def test_visible_window_keeps_its_own_user_agent(self):
+        fake = self._driver()
+        self._create(visible=True, fake=fake)
+        self.assertEqual(fake.cdp_calls, [])
+
+    def test_setup_failure_quits_chrome(self):
+        fake = self._driver()
+        fake.execute_cdp_cmd = mock.Mock(side_effect=WebDriverException("x"))
+        with self.assertRaises(FetchError):
+            self._create(visible=False, fake=fake)
+        self.assertEqual(fake.quit_count, 1)
+
+
+class SequenceDriver(FakeDriver):
+    """Serves one ``page_source`` per read, repeating the last one."""
+
+    def __init__(self, pages):
+        super().__init__()
+        self._pages = list(pages)
+
+    @property
+    def page_source(self):
+        return self._pages.pop(0) if len(self._pages) > 1 else self._pages[0]
+
+    @page_source.setter
+    def page_source(self, _value):
+        pass
+
+
+class BotCheckTest(unittest.TestCase):
+    """A bot check is waited out, or reported as ``BlockedPage``."""
+
+    def _fetch(self, driver):
+        fetcher = make_fetcher()
+        fetcher.driver = driver
+        fetcher._wait_until_ready = lambda _driver: None
+        with mock.patch.object(browser.time, "sleep"):
+            return fetcher, fetcher.fetch_page("https://walled.example/")
+
+    def test_check_that_clears_returns_the_real_page(self):
+        driver = SequenceDriver([_CHALLENGE_HTML, _CHALLENGE_HTML, _PAGE_HTML])
+        _fetcher, page = self._fetch(driver)
+        self.assertTrue(any("Paris" in s for s in page.sentences))
+
+    def test_check_that_never_clears_raises_blocked_page(self):
+        with mock.patch.object(browser, "CHALLENGE_WAIT_HEADLESS_S", 0):
+            with self.assertRaises(BlockedPage) as caught:
+                self._fetch(FakeDriver(_CHALLENGE_HTML))
+        self.assertIn("walled.example", str(caught.exception))
+
+    def test_blocked_page_keeps_the_browser_open(self):
+        driver = FakeDriver(_CHALLENGE_HTML)
+        fetcher = make_fetcher()
+        fetcher.driver = driver
+        fetcher._wait_until_ready = lambda _driver: None
+        with mock.patch.object(browser, "CHALLENGE_WAIT_HEADLESS_S", 0), \
+                self.assertRaises(BlockedPage):
+            fetcher.fetch_page("https://walled.example/")
+        self.assertIs(fetcher.driver, driver)
+        self.assertEqual(driver.quit_count, 0)
+
+
+class ProfileLifecycleTest(unittest.TestCase):
+    """Closing the fetcher frees the shared profile for the next session."""
+
+    def test_close_releases_the_profile_lock(self):
+        with tempfile.TemporaryDirectory() as root, \
+                mock.patch.object(browser, "create_driver",
+                                  return_value=FakeDriver()):
+            shared = os.path.join(root, "profile")
+            first = browser.BrowserFetcher(profile=ChromeProfile(shared))
+            first._wait_until_ready = lambda _driver: None
+            first.fetch_page("https://example.com/")
+            first.close()
+            self.assertEqual(ChromeProfile(shared).claim(), shared)
 
 
 class ChromePathTest(unittest.TestCase):
