@@ -85,19 +85,6 @@ class BodiedExceptTest(unittest.TestCase):
         # index 1 must not include itself even though it has a body
         self.assertEqual([m.name for m in store.bodied_except(1)], ["a"])
 
-    def test_render_script_appends_a_main_guard_that_parses(self):
-        store = MethodStore("g")
-        store.add("go", "", "runs it").body = "def go():\n    return 1"
-        script = store.render_script("go")
-        self.assertTrue(script.endswith(
-            'if __name__ == "__main__":\n    go()\n'), script)
-        ast.parse(script)
-
-    def test_render_script_without_entry_is_the_plain_module(self):
-        store = MethodStore("g")
-        store.add("go", "", "runs it")
-        self.assertEqual(store.render_script(None), store.render_module())
-
     def test_signature_lines_formats_each_record_on_its_own_line(self):
         store = self._store_with_three()
         lines = store.signature_lines(store.methods)

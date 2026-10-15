@@ -379,7 +379,8 @@ max_rounds = {max_rounds}
 max_steps = {max_steps}
 
 [files]
-# Root directory the read-only file-explorer agent is sandboxed to.
+# Root the file explorer reads and the code agent works in. The explorer
+# only reads; code edits are written only after you confirm the diff.
 root = {root}
 
 [memory]

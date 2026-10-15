@@ -21,10 +21,13 @@ class Services:
     retriever: object = None           # code retrieval-as-repair (opt-in)
     relay: object = None               # GPIO light Relay (Pi relay extra)
     capture_frame: object = None       # callable -> base64 JPEG (camera extra)
+    # callable (rel_path: str, diff: str) -> bool; None: never apply
+    confirm_edit: object = None
 
 
 if __name__ == "__main__":
     services = Services()
     assert services.files_root.exists()
     assert services.max_research_rounds == DEFAULT_RESEARCH_ROUNDS
+    assert services.confirm_edit is None   # edits never applied by default
     print("smoke OK")

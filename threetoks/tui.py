@@ -294,22 +294,30 @@ OUTPUT_MAX_LINES = 12
 
 
 def _output_rows(result: dict, enabled: bool) -> list[str]:
-    """The script's captured stdout, shown under the code it came from.
+    """Show the script's captured stdout under the code it came from.
 
-    The runner already executed the delivered entry (§7b smoke call);
-    hiding what it printed made a working script look inert. Long output
-    is clipped with an honest truncation count.
+    The result panel uses these rows so a working script does not look
+    inert. _panel_rows calls it with the agent result.
+    It clips long output with a "more lines" count and shows nothing when
+    the output is empty or is already the answer (code compute mode).
+
+    Args:
+        result (dict): the agent result, from _panel_rows.
+        enabled (bool): color flag, from _panel_rows.
+
+    Returns:
+        list[str]: panel rows, empty when there is nothing new to show.
     """
     output = str(result.get("output") or "").rstrip()
-    if not output:
-        return []
-    lines = output.splitlines()
-    shown, hidden = lines[:OUTPUT_MAX_LINES], len(lines) - OUTPUT_MAX_LINES
+    if not output or output.strip() == str(result.get("answer") or "").strip():
+        return []  # compute: the output IS the answer
+    from threetoks.code.edit.nav import clip_lines
+    shown, hidden = clip_lines(output.splitlines(), OUTPUT_MAX_LINES)
     rows = ["", dim("output when run:", enabled)]
     for line in shown:
         rows.extend(fg(GREEN, seg, enabled)
                     for seg in _wrap(line, PANEL_WIDTH - 3))
-    if hidden > 0:
+    if hidden:
         rows.append(dim(f"… {hidden} more line(s)", enabled))
     return rows
 
@@ -843,6 +851,80 @@ def _read_line(read_input, prompt: str):
         return None
 
 
+CONFIRM_DIFF_MAX_LINES = 200  # one function's diff fits whole
+CONFIRM_YES = ("y", "yes")
+
+
+def make_confirm_edit(state: ReplState, read_input, sink):
+    """Build the callback that asks the user to accept one code edit.
+
+    The code agent calls the callback before it writes a file.
+    repl calls this builder with its state, input reader and output sink.
+    The callback prints the clipped diff, asks a y/N question and gives
+    True only for "y" or "yes"; EOF and Ctrl-C give False.
+
+    Args:
+        state (ReplState): the REPL state (color flag), from repl.
+        read_input (callable): prompt -> line reader, from repl.
+        sink (callable): line printer, from repl.
+
+    Returns:
+        callable: (rel_path: str, diff: str) -> bool.
+    """
+    def confirm_edit(rel_path: str, diff: str) -> bool:
+        sink(_diff_preview(diff, state.enabled))
+        reply = _read_line(read_input,
+                           f"  apply this edit to {rel_path}? [y/N] ")
+        return (reply or "").strip().lower() in CONFIRM_YES
+    return confirm_edit
+
+
+def _diff_preview(diff: str, enabled: bool) -> str:
+    """Color a unified diff and clip it for the confirm question.
+
+    The user reads this preview before saying yes or no to an edit.
+    The confirm callback calls it with the diff from the code agent.
+    It shows added lines green, removed lines pink, other lines dim, and
+    adds an "N more lines" note after CONFIRM_DIFF_MAX_LINES lines.
+
+    Args:
+        diff (str): unified diff text, from the code agent.
+        enabled (bool): color flag, from the REPL state.
+
+    Returns:
+        str: the printable preview.
+    """
+    from threetoks.code.edit.nav import clip_lines
+    lines, hidden = clip_lines(diff.splitlines(), CONFIRM_DIFF_MAX_LINES)
+    shown = [_diff_line(line, enabled) for line in lines]
+    if hidden:
+        shown.append(dim(f"  … {hidden} more lines", enabled))
+    return "\n".join(shown)
+
+
+def _diff_line(line: str, enabled: bool) -> str:
+    """Color one unified diff line by its kind.
+
+    The diff preview uses this to make changes easy to see.
+    _diff_preview calls it once per shown line.
+    It colors "+" lines green and "-" lines pink; headers and context
+    lines are dim.
+
+    Args:
+        line (str): one diff line, from _diff_preview.
+        enabled (bool): color flag, from _diff_preview.
+
+    Returns:
+        str: the indented, colored line.
+    """
+    is_header = line.startswith(("+++", "---"))
+    if line.startswith("+") and not is_header:
+        return fg(GREEN, "  " + line, enabled)
+    if line.startswith("-") and not is_header:
+        return fg(PINK, "  " + line, enabled)
+    return dim("  " + line, enabled)
+
+
 def _debug_sink(state: ReplState, sink):
     """A dim per-event writer while voice debug is on, else None."""
     if not state.voice.debug:
@@ -945,7 +1027,22 @@ def render_error(error: Exception, enabled: bool = True) -> str:
 
 
 def repl(state: ReplState, read_input=input, sink=print) -> None:
-    """The interactive loop: banner already shown; read, dispatch, repeat."""
+    """Run the interactive loop: read a line, dispatch it, repeat.
+
+    main uses this after the banner is shown; tests call it with a
+    scripted reader and a list sink.
+    It also gives the code agent an edit-confirm callback that uses the
+    same reader and sink as the prompt.
+
+    Args:
+        state (ReplState): the live REPL state, from main.
+        read_input (callable): prompt -> line reader, default input.
+        sink (callable): line printer, default print.
+
+    Returns:
+        None.
+    """
+    state.services.confirm_edit = make_confirm_edit(state, read_input, sink)
     prompt = prompt_text(state.enabled)
     while state.running:
         line = _next_line(state, read_input, prompt, sink)
@@ -1212,6 +1309,11 @@ def _demo() -> None:
                               "model_seconds": 4.3, "retries": 1}, enabled))
     print()
     print(render_error(RuntimeError("ollama backend unreachable"), enabled))
+    print()
+    print(_diff_preview("--- a/mod.py\n+++ b/mod.py\n@@ -1,2 +1,2 @@\n"
+                        " def add(a, b):\n-    return a - b\n"
+                        "+    return a + b", enabled))
+    print("  apply this edit to mod.py? [y/N] …")
     print()
     print(prompt_text(enabled) + "…")
     print(gradient(SIGN_OFF, enabled))

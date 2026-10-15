@@ -5,10 +5,15 @@ completion strings in node order: first the PLAN completion (after the
 "FUNCTIONS:\n1. " prefill), then per method an IMPLEMENT completion (the body
 after the "def name(args):\n    " prefill), then a TEST completion (asserts
 after the "assert " prefill) if that method reaches the test phase. The gates
-shell out to a real python3 subprocess, so bodies here are tiny and fast.
+run a real isolated child process (sandbox.run_python), so bodies here are
+tiny and fast.
 """
 import ast
+import os
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 from threetoks.backend.base import FAMILY_CHATML, GenResult, ModelSpec
 from threetoks.code.vertical import CodeVertical
@@ -352,6 +357,60 @@ class RunnerRepairLoopTest(unittest.TestCase):
         self.assertFalse(row["verified"])
         self.assertEqual(row["attempts"], 1)   # never resampled over EOF
         self.assertIn("input(", outcome["answer"])
+
+    def test_only_the_script_entry_is_smoke_called(self):
+        # wipe() is zero-arg too, but it is not the entry: running it
+        # would execute arbitrary model code nobody asked to run.
+        policy, _ = make_policy([
+            "main(): computes the answer\n2. wipe(): clears the data",
+            "return 42",
+            "return 1 // 0",                 # would crash if called
+        ])
+        vertical = CodeVertical("compute the answer", gen_tests=False)
+        outcome = run_episode(vertical, policy, MAX_STEPS)
+        self.assertTrue(outcome["run"]["ok"])
+        self.assertEqual(outcome["run"]["checks"], 1)
+        self.assertEqual(_row(outcome, "wipe")["repairs"], 0)
+
+    def test_runner_checks_run_in_run_cwd(self):
+        policy, _ = make_policy([
+            "main(): prints the notes file",
+            "print(open('notes.txt').read())",
+        ])
+        with tempfile.TemporaryDirectory() as folder:
+            Path(folder, "notes.txt").write_text("hello notes")
+            vertical = CodeVertical("show the notes", gen_tests=False,
+                                    run_cwd=Path(folder))
+            outcome = run_episode(vertical, policy, MAX_STEPS)
+        self.assertTrue(outcome["run"]["ok"])
+        self.assertEqual(outcome["output"], "hello notes\n")
+
+    @unittest.skipUnless(os.name == "posix", "shell wrapper is POSIX")
+    def test_run_cwd_checks_use_the_project_venv_python(self):
+        policy, _ = make_policy(["main(): says hi", "print('hi')"])
+        with tempfile.TemporaryDirectory() as folder:
+            venv_python = Path(folder, ".venv", "bin", "python")
+            venv_python.parent.mkdir(parents=True)
+            venv_python.write_text("#!/bin/sh\necho VENV_PYTHON\n"
+                                   f'exec "{sys.executable}" "$@"\n')
+            venv_python.chmod(0o755)
+            vertical = CodeVertical("say hi", gen_tests=False,
+                                    run_cwd=Path(folder))
+            outcome = run_episode(vertical, policy, MAX_STEPS)
+        self.assertEqual(outcome["output"], "VENV_PYTHON\nhi\n")
+
+
+class GoalEntryTest(unittest.TestCase):
+    def test_keyword_parameter_signature_is_not_added(self):
+        # convert(amount, from, to): `from` is a keyword, so a stub with
+        # that signature would break the module.
+        policy, _ = make_policy(["rate(): returns the exchange rate",
+                                 "return 2"])
+        vertical = CodeVertical("write convert(amount, from, to) for money",
+                                gen_tests=False)
+        outcome = run_episode(vertical, policy, MAX_STEPS)
+        ast.parse(outcome["answer"])
+        self.assertNotIn("def convert(", outcome["answer"])
 
 
 class ScriptGuardTest(unittest.TestCase):

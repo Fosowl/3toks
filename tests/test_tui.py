@@ -823,5 +823,54 @@ class ModelSwapOptionalAgentsTest(unittest.TestCase):
                          tui.handle_command(chat, "/model gpt-4o-mini"))
 
 
+class ConfirmEditTest(unittest.TestCase):
+    """The code agent's edit confirm: only an explicit yes applies."""
+
+    DIFF = "--- a/m.py\n+++ b/m.py\n@@ -1 +1 @@\n-x = 1\n+x = 2"
+
+    def _confirm(self, reader):
+        printed, prompts = [], []
+
+        def read_input(prompt):
+            prompts.append(prompt)
+            return reader()
+
+        confirm = tui.make_confirm_edit(make_state(enabled=False),
+                                        read_input, printed.append)
+        return confirm("m.py", self.DIFF), printed, prompts
+
+    def test_yes_applies_and_the_diff_is_shown_first(self):
+        answer, printed, prompts = self._confirm(lambda: " Y ")
+        self.assertTrue(answer)
+        self.assertIn("+x = 2", printed[0])
+        self.assertIn("apply this edit to m.py? [y/N]", prompts[0])
+
+    def test_empty_reply_declines(self):
+        self.assertFalse(self._confirm(lambda: "")[0])
+
+    def test_eof_and_ctrl_c_decline(self):
+        for error in (EOFError, KeyboardInterrupt):
+            def raise_it(error=error):
+                raise error
+            self.assertFalse(self._confirm(raise_it)[0], error)
+
+    def test_long_diff_is_clipped_with_a_count(self):
+        diff = "\n".join(f"+line {n}" for n in
+                         range(tui.CONFIRM_DIFF_MAX_LINES + 3))
+        shown = []
+        confirm = tui.make_confirm_edit(make_state(enabled=False),
+                                        lambda prompt: "n", shown.append)
+        self.assertFalse(confirm("m.py", diff))
+        self.assertIn("3 more lines", shown[0])
+        self.assertNotIn(f"+line {tui.CONFIRM_DIFF_MAX_LINES}", shown[0])
+
+    def test_repl_confirm_reads_from_the_repl_input(self):
+        state = make_state(enabled=False)
+        replies = iter(["/quit", "yes"])
+        tui.repl(state, read_input=lambda prompt: next(replies),
+                 sink=[].append)
+        self.assertTrue(state.services.confirm_edit("m.py", self.DIFF))
+
+
 if __name__ == "__main__":
     unittest.main()

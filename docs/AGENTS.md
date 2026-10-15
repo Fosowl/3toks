@@ -194,11 +194,15 @@ into the mesh. The recipe, with `threetoks/relay.py` +
 
 An agent may itself route further: the `code` agent front-doors four modes
 (navigate / edit / compute / author) through `threetoks/code/route.py` —
-deterministic pre-checks first, one one-token menu otherwise (measured in
-spike E7; see docs/DESIGN-coding-agent.md §9a). It also reads
+a free pre-check only for read-only navigate questions, one one-token menu
+for everything else (docs/DESIGN-coding-agent.md §10). It also reads
 `services.retriever` (the opt-in retrieval-as-repair hook, None unless
-`[code] retrieval` is enabled and a search provider exists) and
-`services.files_root` (the corpus the navigate/edit modes operate on).
+`[code] retrieval` is enabled and a search provider exists),
+`services.files_root` (the corpus the navigate/edit/compute modes operate
+on), and `services.confirm_edit` (`(rel_path, diff) -> bool`; the edit mode
+writes a file only when it returns True — None means never write). Code
+the agent runs goes through `threetoks/code/sandbox.py`, never a bare
+`subprocess` call.
 
 ## Design rules an agent must follow
 

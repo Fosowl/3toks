@@ -1,7 +1,5 @@
-"""Offline tests for the code-mode router (pre-checks + one-token menu)."""
-import tempfile
+"""Offline tests for the code-mode router (navigate pre-check + one menu)."""
 import unittest
-from pathlib import Path
 
 from threetoks.backend.base import FAMILY_CHATML, GenResult, ModelSpec
 from threetoks.code import route
@@ -9,67 +7,49 @@ from threetoks.policy import Policy, PolicyConfig
 
 
 class PreRouteTest(unittest.TestCase):
-    def setUp(self):
-        self._holder = tempfile.TemporaryDirectory()
-        self.addCleanup(self._holder.cleanup)
-        self.root = Path(self._holder.name)
-        (self.root / "parser.py").write_text("def parse():\n    return 1\n")
+    """Only read-only navigate questions may skip the menu."""
 
-    def test_path_plus_edit_verb_is_edit(self):
-        mode, reason = route.pre_route("fix the crash in parser.py", self.root)
-        self.assertEqual(mode, route.EDIT)
-        self.assertIn("edit verb", reason)
-
-    def test_path_plus_navigate_verb_is_navigate(self):
-        mode, _ = route.pre_route("what does parser.py actually do?",
-                                  self.root)
+    def test_navigate_question_naming_a_class_routes_free(self):
+        mode, _ = route.pre_route("where is the Cache class implemented?")
         self.assertEqual(mode, route.NAVIGATE)
 
-    def test_path_plus_compute_verb_is_compute(self):
-        mode, _ = route.pre_route("count the defs in parser.py", self.root)
-        self.assertEqual(mode, route.COMPUTE)
-
-    def test_path_without_verb_cue_falls_through(self):
-        mode, _ = route.pre_route("parser.py looks weird today", self.root)
-        self.assertIsNone(mode)
-
-    def test_nonexistent_path_is_not_a_path_signal(self):
-        mode, _ = route.pre_route("fix the crash in nothere.py", self.root)
-        self.assertIsNone(mode)
-
-    def test_author_phrasing_wins_even_when_a_real_path_is_named(self):
-        mode, _ = route.pre_route(
-            "write a script that parses log files like parser.py", self.root)
-        self.assertEqual(mode, route.AUTHOR)
-
-    def test_write_code_phrasing_is_author(self):
-        # live gap: "write code in python to get weather" fell through to
-        # the menu because "code" was missing from the artifact nouns.
-        mode, _ = route.pre_route(
-            "write code in python to get weather in antibes", None)
-        self.assertEqual(mode, route.AUTHOR)
-
-    def test_interrogative_code_entity_shape_is_navigate(self):
-        mode, _ = route.pre_route(
-            "where is the retry function defined?", None)
+    def test_navigate_question_naming_a_path_routes_free(self):
+        mode, reason = route.pre_route("what does parser.py actually do?")
         self.assertEqual(mode, route.NAVIGATE)
+        self.assertIn("path-like", reason)
 
-    def test_compute_verb_plus_data_noun_is_compute(self):
-        mode, _ = route.pre_route(
-            "sum the second column of the csv", None)
-        self.assertEqual(mode, route.COMPUTE)
+    def test_navigate_question_with_an_edit_word_is_never_edit_free(self):
+        # "add" is an edit cue: the request may mean "add a function"
+        mode, _ = route.pre_route("where is the add function in parser.py?")
+        self.assertIn(mode, (None, route.NAVIGATE))
+        self.assertNotEqual(mode, route.EDIT)
 
-    def test_bare_top_is_not_a_compute_cue_but_top_k_is(self):
+    def test_edit_request_goes_to_the_menu(self):
+        self.assertIsNone(route.pre_route("fix the bug in parser.py")[0])
+
+    def test_author_request_goes_to_the_menu(self):
         self.assertIsNone(route.pre_route(
-            "the top function in that module is odd", None)[0])
-        self.assertEqual(route.pre_route(
-            "give me the top 5 IPs in the log", None)[0], route.COMPUTE)
+            "write a script that reverses a string")[0])
+
+    def test_compute_request_goes_to_the_menu(self):
+        self.assertIsNone(route.pre_route(
+            "sum the second column of the csv")[0])
+
+    def test_cue_words_match_whole_words_only(self):
+        # "consume" holds "sum", "prefix" holds "fix": neither blocks
+        mode, _ = route.pre_route("where is the consume_prefix function?")
+        self.assertEqual(mode, route.NAVIGATE)
+
+    def test_navigate_cue_without_code_entity_goes_to_the_menu(self):
+        self.assertIsNone(route.pre_route("what is the weather today?")[0])
+
+    def test_a_version_number_is_not_a_path(self):
+        self.assertIsNone(route.pre_route("what is new in 3.12?")[0])
 
     def test_ambiguous_requests_fall_through(self):
         for request in ("hello there", "hmm, code stuff",
                         "this script is supposed to help"):
-            self.assertIsNone(route.pre_route(request, self.root)[0],
-                              request)
+            self.assertIsNone(route.pre_route(request)[0], request)
 
 
 class _MenuBackend:
@@ -93,25 +73,31 @@ def _policy(backend):
 
 
 class RouteModeTest(unittest.TestCase):
-    def test_pre_check_skips_the_model_entirely(self):
-        backend = _MenuBackend("navigate")
-        mode, how = route.route_mode("write a script that sorts numbers",
-                                     _policy(backend), None)
-        self.assertEqual(mode, route.AUTHOR)
+    def test_free_navigate_skips_the_model_entirely(self):
+        backend = _MenuBackend("edit")
+        mode, how = route.route_mode("where is the retry function defined?",
+                                     _policy(backend))
+        self.assertEqual(mode, route.NAVIGATE)
         self.assertTrue(how.startswith("pre:"))
         self.assertEqual(backend.calls, 0)
 
-    def test_fall_through_uses_one_menu(self):
-        backend = _MenuBackend("compute")
-        mode, how = route.route_mode("hmm, something about numbers",
-                                     _policy(backend), None)
-        self.assertEqual(mode, route.COMPUTE)
-        self.assertEqual(how, "menu")
+    def test_author_request_costs_one_menu(self):
+        backend = _MenuBackend("author")
+        mode, how = route.route_mode("write a script that sorts numbers",
+                                     _policy(backend))
+        self.assertEqual((mode, how), (route.AUTHOR, "menu"))
+        self.assertEqual(backend.calls, 1)
+
+    def test_edit_request_is_decided_by_the_menu(self):
+        backend = _MenuBackend("edit")
+        mode, how = route.route_mode("fix the bug in parser.py",
+                                     _policy(backend))
+        self.assertEqual((mode, how), (route.EDIT, "menu"))
 
     def test_garbage_menu_reply_falls_back_to_navigate(self):
         backend = _MenuBackend("no-such-option")
         mode, how = route.route_mode("hmm, something about numbers",
-                                     _policy(backend), None)
+                                     _policy(backend))
         self.assertEqual(mode, route.FALLBACK_MODE)
         self.assertEqual(how, "menu-fallback")
 

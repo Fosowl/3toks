@@ -210,10 +210,11 @@ ImplementNode.
   now drops any plan line whose `def name(args):` does not parse or whose
   name shadows a builtin; an all-junk plan falls back to `main()` as
   before.
-- **Checks are deterministic only.** Trusted example asserts, plus a smoke
-  call for zero-argument functions (the `main()` fallback path — the common
-  TUI case has no examples, and a smoke call still catches runtime
-  crashes). Model-written advisory asserts never run here: they stay
+- **Checks are deterministic only.** Trusted example asserts, plus one
+  smoke call of the delivered script entry (the function the `__main__`
+  guard calls — since §10, never every zero-argument function: a helper
+  like `delete_temp_files()` must not run just because it takes no args).
+  Model-written advisory asserts never run here: they stay
   advisory (E6). A check that dies on `EOFError`/`KeyboardInterrupt` is
   *skipped*, not failed — `input()`-driven code is interactive, not broken.
 - **Blame is a traceback lookup, not a model call.** Each check runs in its
@@ -268,6 +269,10 @@ example* rather than resampling blind, and promoting model asserts from
 advisory to gating only once a trusted oracle is present.
 
 ## 9. v2: modes, editing, and retrieval (E7 / E8 / E9)
+
+> §9a's free pre-routes into edit/compute/author and §9b's keyword
+> free-take navigation were replaced in §10 after the 2026-10-15 review.
+> The text below is kept as the measured history.
 
 Three spikes (spikes/e7_code_routing, e8_edit_vertical, e9_code_retrieval)
 measured the coding agent's expansion beyond greenfield generation. All
@@ -351,3 +356,85 @@ misses are free. Mojeek leads the zero-infrastructure search hops
 embeds internet code; the whitelist + subprocess timeout are a speed
 bump, not a sandbox, and licensing is recorded (source URL) but not
 resolved. Turning it on is an explicit, informed choice.
+
+## 10. v3 (2026-10-15): safety envelope, shortlist + confirm, repo-test oracle
+
+A review (docs/reviews/2026-10-15-code-agent-review.html; 8 per-file
+reviewers + a live qwen3.6:27b probe) found the exploration side weakest
+and two safety gaps. Live, an unnamed bug report sent the edit vertical to
+the wrong function for free (keyword overlap, size-biased), and the model
+then re-wrote that innocent function 9 times: 12 calls, 936 output
+tokens, 126 s, no fix. Model code ran in the user's cwd with the user's
+environment (API keys), and a read-only question naming `add` + a file
+was routed free into edit and rewrote the user's function.
+
+**Rule change: the model chooses every target; the harness never
+free-takes one by keywords.** Free paths remain only where they cannot
+mutate anything (navigate) or where no choice exists.
+
+- **Safety envelope** (`code/sandbox.py`). Every subprocess that runs
+  generated, internet, or user code goes through `sandbox.run_python`:
+  `-I -B -X utf8`, a temp cwd unless the caller passes one, an env
+  allow-list (no API keys), output to capped temp files, POSIX process
+  group killed after every run and on Ctrl-C, best-effort rlimits. It is
+  isolation, not a security sandbox (network and absolute paths remain
+  reachable). User code (oracle, repo tests, compute) runs under
+  `sandbox.project_python(root)` (`root/.venv` first); generated-code
+  gates under the harness interpreter.
+- **Routing** (`code/route.py`). Free pre-route only to navigate
+  (navigate cue + code entity or path, and no edit/compute/author cue);
+  everything else asks the one-token menu. No file-system walk. A
+  menu fallback is stated in the answer.
+- **Locate = flat shortlist + confirm by pointing**
+  (`code/edit/rank.py`, `vertical.py`). One BM25-style ranking over every
+  function/method in the index (fields: name ×3, docstring ×2, path, body;
+  length-normalised; light stemming; no regex) replaces the
+  folder → file → def walk, which could not reach files below
+  `root/<folder>/`. The model picks from one paged menu (labels carry
+  `path:lineno`). Every target, including a unique exact name, is then
+  confirmed by one semantic menu over its source: "the problem is in this
+  function" / "it is in `<callee>()`, which this calls" (from the index's
+  call graph, ≤ 2 hops) / "somewhere else" (back to the shortlist).
+- **"Unchanged" means "move on".** When the generation returns the
+  original function (same AST without docstring, `splice.canonical_key`),
+  the model is saying "no bug here": the target is struck at once instead
+  of resampled (E8-style oscillation guard, but used as a signal).
+- **Generation hygiene.** The replace prefill is the target's verbatim
+  header (`spans.def_header`, selected by line number: async, defaults,
+  annotations, `*args/**kwargs`, setters/overloads all survive); the
+  original docstring is re-inserted when dropped; candidates pass an
+  undefined-name gate (skipped in star-import files, which also never get
+  a free "missing helper" insert); the token cap grows with the target's
+  size; a completion cut by the cap (`done_reason` length/max_tokens) is
+  rejected by the policy (`reject_truncated`), and non-menu retries no
+  longer repeat the identical temperature-0 call.
+- **Free oracle from the repo** (`code/edit/oracle.py`). Test files that
+  reference the target are found in the index and run before and after
+  (pytest when the project has it, else unittest). A test that passed
+  before must still pass; a test that failed before and passes after marks
+  the edit `verified`. Without tests, the module must import — checked
+  once *before* any generation, so an unimportable module costs zero
+  generations.
+- **Edits are proposals.** The vertical writes a candidate only inside
+  try/finally that restores the original bytes. The agent shows a unified
+  diff and applies it only through `Services.confirm_edit` (the TUI asks
+  `[y/N]`), refuses when the file changed since it was read, and keeps
+  line endings, BOM, and coding cookie (`encoding.encode_like`).
+- **Compute** runs once, in `files_root`, under the project interpreter;
+  the answer is the entry's printed or returned value (`echo_result`). A
+  plan with no zero-argument entry gets a `main()` appended.
+
+Live after the change (same qwen3.6:27b corpus probe as the review; the
+corpus now carries one repo test covering the planted bug):
+
+| Probe | Before | After |
+|---|---|---|
+| unnamed bug report, edit | 12 calls, 936 out-tok, 126 s, wrong target, no fix | 6 calls, 67 out-tok, 25 s, fixed, verified by the repo test |
+| named bug, edit | 2 calls, 55 out-tok, written without asking | 4 calls (incl. confirm), 61 out-tok, 19 s, verified, applied after `y` |
+| compute: sum of primes below 1000 | no answer (`main` returned, did not print) | `76127` |
+| read-only "where is add in render.py, do not change anything" | (review: free route to edit, file rewritten) | navigate, honest miss, file untouched |
+| compute reading a secret env var | (review: key printed) | key not in the child's environment |
+
+Known limits: docstring-only edits read as "unchanged"; one span per
+edit (no multi-site refactors); the oracle needs the project's test
+runner importable by the project interpreter.

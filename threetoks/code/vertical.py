@@ -8,16 +8,18 @@ passes gates but fails only advisory asserts keeps its runnable body. The
 file on disk always parses because a body is stored only after ast checks.
 
 Once every method is terminal, the runner phase (§7b) executes the whole
-module for free — trusted examples plus zero-arg smoke calls — and each
-failure's traceback is mapped to the method it happened in. That blamed
-method is unlocked and re-enters the same implement flow (blind resample
-at repair temperature — no error feedback, per E5b), bounded by
-``MAX_REPAIR_ROUNDS`` overall and ``MAX_METHOD_REPAIRS`` per method.
+module for free — trusted examples plus one smoke call of the script
+entry — and each failure's traceback is mapped to the method it happened
+in. That blamed method is unlocked and re-enters the same implement flow
+(blind resample at repair temperature — no error feedback, per E5b),
+bounded by ``MAX_REPAIR_ROUNDS`` overall and ``MAX_METHOD_REPAIRS`` per
+method. Runner checks run in ``run_cwd`` (a temp dir when None).
 """
 import builtins
 import re
+from pathlib import Path
 
-from threetoks.code import gates, runner
+from threetoks.code import gates, runner, sandbox
 from threetoks.code.nodes import ImplementNode, PlanNode, TestNode
 from threetoks.code.store import (STATUS_PLANNED, STATUS_STUBBED,
                                  STATUS_TESTED, MethodStore)
@@ -31,6 +33,9 @@ MAX_REPAIR_ROUNDS = 2       # whole-module run -> unlock cycles
 MAX_METHOD_REPAIRS = 2      # times one method may be unlocked
 MIN_STEPS_TO_REPAIR = FORCE_STUB_AT_STEPS_LEFT + 2
 FALLBACK_METHOD = ("main", "", "solve the whole task in one function")
+# Compute mode needs a runnable entry whose return value is the answer.
+COMPUTE_ENTRY = ("main", "", "compute and return the final answer the task "
+                 "asks for, using the functions above")
 # No space before "(": a real signature is name(args); prose like
 # "the data (fast)" has a space and must not be mistaken for one.
 _ENTRY = re.compile(r"([a-z_][a-z0-9_]*)\(([^)]*)\)")
@@ -38,20 +43,43 @@ _PARAM_LIST = re.compile(r"^([a-z_][a-z0-9_]*(\s*,\s*[a-z_][a-z0-9_]*)*)?$")
 
 
 class CodeVertical:
-    """Drives one module-writing episode from a natural-language goal."""
+    """Drives one module-writing episode from a natural-language goal.
+
+    ``retriever`` is the optional retrieval-as-repair hook
+    (threetoks/code/retrieve.py). The vertical consults it only when an
+    anchor-bearing method used all its generation attempts and would
+    otherwise stub; None disables it (the config default).
+
+    ``trusted`` maps a method name to a list of trusted anchor
+    expressions (a single str per entry is accepted). Two anchors, normal
+    plus boundary, close the single-anchor blind spot E9 measured.
+
+    With ``run_cwd`` set, the runner checks run in that folder under the
+    project interpreter (``sandbox.project_python``); else in a temp dir
+    under the harness interpreter.
+    """
 
     def __init__(self, goal: str, gen_tests: bool = True,
-                 trusted_examples: dict | None = None, retriever=None):
+                 trusted_examples: dict | None = None, retriever=None,
+                 run_cwd: Path | None = None, echo_result: bool = False):
+        """Set up one episode.
+
+        The code agent creates one vertical per author or compute request.
+
+        Args:
+            goal: the user's request text.
+            gen_tests: True asks the model for advisory asserts.
+            trusted_examples: method name -> anchor expression(s).
+            retriever: optional retrieval-as-repair hook, or None.
+            run_cwd: working directory of the runner checks; None = temp.
+            echo_result: True prints the entry's non-None return value
+                in the smoke call and in the ``__main__`` guard.
+        """
         self.goal = goal
         self.gen_tests = gen_tests
-        # Optional retrieval-as-repair hook (threetoks/code/retrieve.py):
-        # consulted only when an anchor-bearing method exhausted its
-        # generation attempts and would otherwise stub. None = disabled
-        # (the config default).
+        self.run_cwd = run_cwd
+        self.echo_result = echo_result
         self.retriever = retriever
-        # method name -> list of trusted anchor expressions (a single str
-        # is accepted per entry; two anchors — normal + boundary — close
-        # the single-anchor blind spot E9 measured).
         self.trusted = {name: value if isinstance(value, list) else [value]
                         for name, value in (trusted_examples or {}).items()}
         self.store = MethodStore(goal)
@@ -76,7 +104,7 @@ class CodeVertical:
         case the episode continues with that method's implement node.
         """
         if not self.planned:
-            self._set_episode(PlanNode.system)
+            self._set_episode()
             return PlanNode(self.goal)
         self._seek_pending()
         if self.index >= len(self.store.methods):
@@ -100,29 +128,52 @@ class CodeVertical:
     def result(self) -> dict:
         """The rendered script, per-method status, and the final run report.
 
-        The answer is the script render — module plus a ``__main__`` guard
-        when a runnable entry exists — so the delivered file executes as
-        ``python3 module.py``, doing exactly what the runner's smoke call
-        already exercised.
+        The engine calls this when the episode ends. The answer is the
+        module plus a ``__main__`` guard when a runnable entry exists, so
+        the delivered file executes as ``python3 module.py``, doing
+        exactly what the runner's smoke call already exercised.
+
+        Returns:
+            dict: goal, answer, methods, output, run.
         """
         return {"goal": self.goal,
-                "answer": self.store.render_script(self._script_entry()),
+                "answer": self._render_script(self._script_entry()),
                 "methods": [self._method_row(m) for m in self.store.methods],
                 "output": self._entry_output(),
                 "run": self._run_report()}
 
+    def _render_script(self, entry: str | None) -> str:
+        """The module plus a guard that runs the entry like the smoke call.
+
+        result() calls this. The guard body comes from
+        ``runner.entry_call``, so ``echo_result`` behaves the same in the
+        smoke call and in the delivered script.
+
+        Args:
+            entry: the script entry from _script_entry, or None.
+
+        Returns:
+            str: the module, with a ``__main__`` guard when entry is set.
+        """
+        module = self.store.render_module()
+        if entry is None:
+            return module
+        call = runner.entry_call(entry, self.echo_result, gates.BODY_INDENT)
+        return f'{module}\n\nif __name__ == "__main__":\n{call}\n'
+
     def _entry_output(self) -> str:
         """What the delivered script prints when run, from the runner.
 
-        The entry's zero-arg smoke call executes exactly what the
-        ``__main__`` guard will, so its captured stdout IS the script's
-        output — shown to the user instead of silently discarded.
+        result() calls this. Only a PASSED entry check counts: a crashed
+        or interactive run gives no output (its error stays in the run
+        report).
+
+        Returns:
+            str: stdout of the passed entry call, else "".
         """
         entry = self._script_entry()
-        if entry is None:
-            return ""
         return next((r.stdout for r in self.run_results
-                     if r.check.name == entry
+                     if r.passed and r.check.name == entry
                      and r.check.kind == runner.KIND_CALL), "")
 
     def _script_entry(self) -> str | None:
@@ -160,6 +211,7 @@ class CodeVertical:
         self._ensure_entry()
         if not self.store.methods:
             self.store.add(*FALLBACK_METHOD)
+        self._ensure_compute_entry()
         self.planned = True
 
     def _plannable(self, name: str, args: str) -> bool:
@@ -181,15 +233,38 @@ class CodeVertical:
         E6 showed the model can decompose into helpers yet omit the entry
         the task asked for. When the goal contains a clean ``name(params)``,
         the harness guarantees that method exists so the interface is met.
+        A signature that _plannable rejects (keyword params such as
+        ``from``, builtin names) is skipped, so the module always parses.
         """
         match = _ENTRY.search(self.goal)
         if match is None:
             return
         name, args = match.group(1), match.group(2).strip()
-        if not _PARAM_LIST.match(args) or hasattr(builtins, name):
+        if not _PARAM_LIST.match(args) or not self._plannable(name, args):
             return
         if name not in self.store.names():
             self.store.add(name, args, f"the {name} function the task asks for")
+
+    def _ensure_compute_entry(self) -> None:
+        """Add a zero-arg ``main`` when compute mode has no runnable entry.
+
+        Compute mode answers with the printed return value of the script
+        entry. ``_apply_plan`` calls this after the plan is stored. A live
+        plan gave only ``sum_primes(limit)``, so no entry could run and the
+        answer was empty. This adds ``main()`` last, so it is written after
+        the helpers it calls.
+
+        Args:
+            none (reads ``self.echo_result`` and the planned methods).
+
+        Returns:
+            None. The store gains one method when the guard is needed.
+        """
+        if not self.echo_result:
+            return
+        if any(gates.zero_arg_callable(m.args) for m in self.store.methods):
+            return
+        self.store.add(*COMPUTE_ENTRY)
 
     # ------------------------------------------------------------ implement
 
@@ -197,10 +272,10 @@ class CodeVertical:
         """A test node when a body awaits tests, else an implement node."""
         method = self.store.methods[self.index]
         if self.await_test:
-            self._set_episode(TestNode.system, f"{method.name}({method.args}):"
+            self._set_episode(f"{method.name}({method.args}):"
                               f" {method.contract}")
             return TestNode(method.name, method.args)
-        self._set_episode(ImplementNode.system, self._implemented_context())
+        self._set_episode(self._implemented_context())
         heated = method.attempts or method.repairs   # repairs resample varied
         temperature = REPAIR_TEMPERATURE if heated else None
         return ImplementNode(method.name, method.args, method.contract,
@@ -354,7 +429,8 @@ class CodeVertical:
     def _run_module_checks(self) -> None:
         """Free: execute the finished module; unlock what the blame names.
 
-        Runs trusted examples and zero-arg smoke calls via the runner.
+        Runs trusted examples and the script entry's smoke call via the
+        runner, in ``run_cwd``.
         Every real failure unlocks its blamed method (round- and
         per-method-capped); with no budget left the run is report-only.
         A clean run latches ``_run_clean`` so the phase never re-executes.
@@ -365,8 +441,10 @@ class CodeVertical:
             self.run_results = []          # nothing runnable to report on
             return
         module = self.store.render_module()
-        checks = runner.collect_checks(self.store.methods)
-        self.run_results = runner.run_checks(module, checks)
+        checks = runner.collect_checks(self.store.methods,
+                                       self._script_entry(), self.echo_result)
+        self.run_results = runner.run_checks(module, checks, self.run_cwd,
+                                             interpreter=self._interpreter())
         self._run_attempted = True
         failed = runner.failures(self.run_results)
         if not failed:
@@ -379,6 +457,20 @@ class CodeVertical:
         self.repair_round += 1
         for failure in failed:
             self._unlock(failure.blamed)
+
+    def _interpreter(self) -> str | None:
+        """The interpreter for the runner checks.
+
+        _run_module_checks calls this. With ``run_cwd`` the module is the
+        user's compute script, so it runs under the project interpreter
+        (contract C1); else the harness interpreter is used.
+
+        Returns:
+            str | None: project python path, or None for sys.executable.
+        """
+        if self.run_cwd is None:
+            return None
+        return sandbox.project_python(Path(self.run_cwd))
 
     def _unlock(self, name: str) -> bool:
         """Reopen a finished method for one more implement cycle.
@@ -458,9 +550,17 @@ class CodeVertical:
         return ("ALREADY IMPLEMENTED (you may call these):\n"
                 + self.store.signature_lines(done))
 
-    def _set_episode(self, system: str, observation: str = "") -> None:
-        """Rebuild a fresh stateless micro-prompt for the next generation."""
-        self.episode = Episode(system, self.goal)
+    def _set_episode(self, observation: str = "") -> None:
+        """Rebuild a fresh stateless micro-prompt for the next generation.
+
+        next_node calls this before each generation node. The episode has
+        no prefix: the node's own ``system`` text reaches the model once,
+        in the system block that Policy sends.
+
+        Args:
+            observation: context text for the node, or "" for none.
+        """
+        self.episode = Episode("", self.goal)
         if observation:
             self.episode.open_observation(observation)
 
@@ -522,6 +622,14 @@ if __name__ == "__main__":
     assert "n < 2" in two_outcome["answer"], two_outcome["answer"]
     assert two_outcome["methods"][0]["verified"], two_outcome["methods"]
 
+    echo = CodeVertical("compute the answer", gen_tests=False,
+                        echo_result=True)
+    echo_policy = Policy(_demo_backend(["main(): the answer", "return 6 * 7"]),
+                         PolicyConfig(ModelSpec("m", FAMILY_CHATML)))
+    echo_outcome = run_episode(echo, echo_policy, max_steps=20)
+    assert echo_outcome["output"] == "42\n", echo_outcome
+    assert "print(_entry_result)" in echo_outcome["answer"]
+
     from threetoks.nodes import Decision
     entry = CodeVertical("Write triple(n) that multiplies n by three")
     entry._apply_plan(Decision("plan", [], "", valid=False))  # empty plan
@@ -529,4 +637,7 @@ if __name__ == "__main__":
     prose = CodeVertical("process the data (fast) please")     # parenthetical
     prose._apply_plan(Decision("plan", [], "", valid=False))
     assert prose.store.names() == ["main"], prose.store.names()  # no 'data'
+    keyword = CodeVertical("write convert(amount, from, to)")   # `from`
+    keyword._apply_plan(Decision("plan", [], "", valid=False))
+    assert gates.parses(keyword.store.render_module()), keyword.store.names()
     print("smoke OK")
