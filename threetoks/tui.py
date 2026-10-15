@@ -1118,9 +1118,10 @@ def build_state(model: str = None, sink=print):
     specs = default_agents(services) + optional_agents(services, chosen_model)
     if provider is None:  # bare install: never route to the web agent
         specs = [spec for spec in specs if spec.name != "web"]
+    no_think = config.llm.disable_think
     factory = lambda name: Policy(make_backend(config.llm),
-                                  make_policy_config(name), Tracer(None),
-                                  debug=False)
+                                  make_policy_config(name, no_think),
+                                  Tracer(None), debug=False)
     if config.llm.provider == "ollama":  # families only exist in raw mode
         notice = unknown_family_notice(chosen_model)
         if notice:
@@ -1136,7 +1137,8 @@ def build_state(model: str = None, sink=print):
                      llm_provider=config.llm.provider)
     # Re-bind the factory so future model swaps inherit the current debug flag
     state.policy_factory = lambda name: Policy(make_backend(config.llm),
-                                                make_policy_config(name),
+                                                make_policy_config(name,
+                                                                   no_think),
                                                 Tracer(None),
                                                 debug=state.debug)
     return state

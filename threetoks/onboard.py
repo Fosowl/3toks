@@ -84,11 +84,10 @@ def _ask_int(ask, prompt: str, default: int) -> int:
 
 
 def _ask_llm(base: ThreetoksConfig, ask) -> LlmConfig:
-    """Model and host questions; provider, api_base, vote_k stay as configured."""
+    """Model and host questions; every other ``[llm]`` field stays as configured."""
     model = _ask_text(ask, "Ollama model", base.llm.model)
     host = _ask_text(ask, "Ollama host", base.llm.host)
-    return LlmConfig(model=model, host=host, provider=base.llm.provider,
-                     api_base=base.llm.api_base, vote_k=base.llm.vote_k)
+    return replace(base.llm, model=model, host=host)
 
 
 def _ask_browser(base: ThreetoksConfig, ask) -> BrowserConfig:

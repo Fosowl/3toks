@@ -105,6 +105,15 @@ full re-ingest).
   by default on ≤8GB; the ladder ends at voting on such machines.
 - Contexts capped at 2048 tokens (also Ollama's default) — small context is
   a feature: prefill stays fast.
+- **ChatML pre-closes thinking** (`[llm] disable_think`, default true):
+  the raw assistant turn opens with an empty `<think>\n\n</think>\n\n`
+  before the prefill, the way R1 already does it. Measured live
+  (2026-10-15): qwen3.8:27b answers a bare `assistant\nANSWER:` with
+  end-of-turn (empty, 1 token) on every node, so every route fell back
+  to `casual`. With the block closed it routed 6/6 test requests
+  correctly on the first try. qwen3.6:27b answers the same either way.
+  Not yet measured on `qwen3.5:2b`, so the E1 numbers above predate
+  this change; set `disable_think = false` to get the old prompt.
 
 ## 6. Escalation ladder (cost-ordered, calibrated by E4)
 

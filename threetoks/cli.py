@@ -34,19 +34,20 @@ SYSTEM_CHATML = (
     "correct answer. Do not explain.")
 
 
-def model_spec(name: str) -> ModelSpec:
+def model_spec(name: str, disable_think: bool) -> ModelSpec:
     """Infer the template family from the model name (see detect_family)."""
     family, _ = detect_family(name)
-    return ModelSpec(name, family)
+    return ModelSpec(name, family, disable_think)
 
 
-def make_policy_config(name: str) -> PolicyConfig:
+def make_policy_config(name: str, disable_think: bool) -> PolicyConfig:
     """Policy config with the family-appropriate system prompt.
 
     Every family gets the E1-winning system text except R1, whose
     think-suppression flow deliberately runs without one.
+    ``disable_think`` comes from ``[llm] disable_think`` (see ModelSpec).
     """
-    spec = model_spec(name)
+    spec = model_spec(name, disable_think)
     system = "" if spec.family == FAMILY_R1 else SYSTEM_CHATML
     return PolicyConfig(spec, system=system)
 
@@ -109,7 +110,8 @@ def main() -> None:
     from threetoks.web.search import auto_provider
     search_mod.MIN_SEARCH_INTERVAL_S = config.search.min_interval_s
     args = build_parser(config).parse_args()
-    policy = Policy(make_backend(config.llm), make_policy_config(args.model),
+    policy = Policy(make_backend(config.llm),
+                    make_policy_config(args.model, config.llm.disable_think),
                     Tracer(args.trace))
     page_fetch, fetcher = make_fetch_page(config)
     services = Services(provider=auto_provider(), fetch_page=page_fetch,

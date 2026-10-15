@@ -69,11 +69,15 @@ class WizardDefaultsTest(unittest.TestCase):
         self.assertIn("http/plain/stealth", prompts[2])
 
     def test_base_config_supplies_the_defaults(self):
-        base = ThreetoksConfig(llm=config.LlmConfig(model="tuned", vote_k=5))
+        base = ThreetoksConfig(llm=config.LlmConfig(
+            model="tuned", vote_k=5, send_seed=False, disable_think=False))
         ask, _ = _scripted([""] * 9)
         cfg = run_wizard(base, ask=ask, sink=_quiet, open_url=_no_browser)
         self.assertEqual(cfg.llm.model, "tuned")
-        self.assertEqual(cfg.llm.vote_k, 5)  # carried over, never asked
+        # Carried over, never asked; /setup used to reset send_seed.
+        self.assertEqual(cfg.llm.vote_k, 5)
+        self.assertFalse(cfg.llm.send_seed)
+        self.assertFalse(cfg.llm.disable_think)
 
     def test_memory_default_moves_off_the_cwd(self):
         ask, _ = _scripted([""] * 9)

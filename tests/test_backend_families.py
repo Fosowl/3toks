@@ -49,6 +49,20 @@ class TemplateRenderingTest(unittest.TestCase):
         self.assertEqual(prompt, "<|system|>\nsys<|end|>\n<|user|>\n"
                                  "pick one<|end|>\n<|assistant|>\nA:")
 
+    def test_chatml_pre_closes_the_think_block_by_default(self):
+        # Live: qwen3.8:27b answered every un-closed assistant turn with
+        # end-of-turn, so every menu came back empty.
+        prompt = build_raw_prompt(ModelSpec("qwen3.8:27b", FAMILY_CHATML),
+                                  "pick one", system="sys", prefill="ANSWER:")
+        self.assertTrue(prompt.endswith(
+            "<|im_start|>assistant\n<think>\n\n</think>\n\nANSWER:"))
+
+    def test_chatml_think_opt_out_leaves_the_turn_bare(self):
+        spec = ModelSpec("qwen3.5:2b", FAMILY_CHATML, disable_think=False)
+        prompt = build_raw_prompt(spec, "pick one", prefill="ANSWER:")
+        self.assertTrue(prompt.endswith("<|im_start|>assistant\nANSWER:"))
+        self.assertNotIn("<think>", prompt)
+
     def test_no_system_omits_the_system_block_everywhere(self):
         for family in (FAMILY_CHATML, FAMILY_GEMMA, FAMILY_LLAMA3,
                        FAMILY_MISTRAL, FAMILY_PHI3):

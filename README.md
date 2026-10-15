@@ -148,6 +148,11 @@ If your local server requires a key, export it as `LLM_API_KEY` —
 otherwise no environment setup is needed. All transports are
 stdlib-only, no SDKs to install.
 
+`[llm] disable_think = true` (the default) starts every raw-mode ChatML
+answer with an empty `<think></think>` block. Thinking Qwen models need
+it: without it, qwen3.8 answers every menu with nothing, and the router
+falls back to `casual`. Set it to `false` to send the plain prompt.
+
 *Debugging*: `/debug on` shows each raw completion and its finish
 reason — `length` means the node's token cap truncated the reply before
 the model answered.
