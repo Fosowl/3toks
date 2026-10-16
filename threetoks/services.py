@@ -15,15 +15,19 @@ class Services:
     provider: object = None            # SearchProvider (web)
     fetch_page: object = None          # callable url -> PageText (web)
     files_root: Path = field(default_factory=Path.cwd)
+    blocked_hosts: set = field(default_factory=set)  # bot-walled this session
     max_research_rounds: int = DEFAULT_RESEARCH_ROUNDS
     recalled: list = field(default_factory=list)  # memories the selector chose
     retriever: object = None           # code retrieval-as-repair (opt-in)
     relay: object = None               # GPIO light Relay (Pi relay extra)
     capture_frame: object = None       # callable -> base64 JPEG (camera extra)
+    # callable (rel_path: str, diff: str) -> bool; None: never apply
+    confirm_edit: object = None
 
 
 if __name__ == "__main__":
     services = Services()
     assert services.files_root.exists()
     assert services.max_research_rounds == DEFAULT_RESEARCH_ROUNDS
+    assert services.confirm_edit is None   # edits never applied by default
     print("smoke OK")

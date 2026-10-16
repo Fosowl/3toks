@@ -5,19 +5,15 @@
     compute   the user wants the ANSWER a computation produces
     author    the user wants a NEW code artifact delivered
 
-Spike E7 measured this two-stage design live: deterministic pre-checks
-resolve 69.6% of requests for free at 97.9% precision, and a one-token
-menu handles the rest at 76.2% (91.3% end-to-end, ~3 output tokens per
-model-routed request). The top-level agent router deliberately has no
-keyword shortcuts; this sub-router earns its pre-checks with that
-measurement — every check is high-PRECISION and falls through to the
-menu on any doubt. E7's confusion table showed every menu error funnels
-into compute/author, so the few-shot prefix carries explicit
+Spike E7 measured a two-stage design live: deterministic pre-checks, then
+a one-token menu (~3 output tokens per model-routed request). The free
+pre-check is now limited to the one mode whose mistakes cost nothing:
+navigate is read-only. Edit, compute and author change files or run code,
+so they always cost one menu call. E7's confusion table showed every menu
+error funnels into compute/author, so the few-shot prefix carries explicit
 navigate/edit-vs-compute contrast examples.
 """
-import re
-from pathlib import Path
-
+from threetoks.code.edit import rank
 from threetoks.nodes import MenuNode
 from threetoks.policy import Policy
 from threetoks.render import Episode
@@ -38,85 +34,100 @@ COMPUTE_VERBS = ("parse", "sum", "count", "compute", "calculate", "extract",
                  "average", "how many", "total", "most common", "median",
                  "filter", "group by")
 AUTHOR_VERBS = ("write", "create", "build", "generate", "make me", "author")
+BLOCKING_CUES = EDIT_VERBS + COMPUTE_VERBS + AUTHOR_VERBS
 
 NAVIGATE_ENTITY_WORDS = ("function", "method", "class", "variable", "module",
                          "file", "defined", "definition", "declared",
                          "implemented", "logic", "symbol")
-COMPUTE_DATA_WORDS = ("csv", "log", "column", "data", "rows", "lines", "file")
-AUTHOR_ARTIFACT_WORDS = ("script", "program", "module", "function", "class",
-                         "tool", "cli", "library", "package", "code")
 
-# bare "top" is too common ("top-level function"); only "top <number>" is
-# a confident top-K compute signal (E7 found the bare-word false positive).
-_TOP_K_RE = re.compile(r"\btop\s*\d+\b")
-_PATH_TOKEN_RE = re.compile(r"[\w][\w./-]*\.\w+|[\w][\w/-]*/[\w./-]+")
+WORD_CHARS = "_'"             # kept inside words ("where's", "parse_row")
+CURLY_APOSTROPHE = "\u2019"
+TOKEN_EDGE_CHARS = "\"'`()[]{}<>,;:!?."   # stripped from path tokens
 
 
-def pre_route(request: str, root: Path | None) -> tuple[str | None, str]:
-    """Deterministic, zero-token routing; (None, reason) means ask the menu.
+def pre_route(request: str) -> tuple[str | None, str]:
+    """Give the free route for a coding request, or ask for the menu.
 
-    High precision over recall throughout: a wrong free classification is
-    worse than one spent model call, so every ambiguous shape falls
-    through.
+    The code agent uses this check to save one model call on safe requests.
+    route_mode calls it with the raw user request text.
+    It returns NAVIGATE only for a read-only question that names code: a
+    navigate cue, a code-entity word or a path-like token, and no edit,
+    compute or author cue. Every other request goes to the menu.
+
+    Args:
+        request (str): the user's coding request, from route_mode.
+
+    Returns:
+        tuple[str | None, str]: (NAVIGATE or None, reason for the log).
     """
-    low = request.lower()
-    if _is_author_phrasing(low):
-        return AUTHOR, "imperative write/create + new-artifact noun"
-    if root is not None and _mentions_existing_path(request, root):
-        return _classify_with_path(low)
-    return _classify_without_path(low)
+    padded = _padded_words(request)
+    if _contains_any(padded, BLOCKING_CUES):
+        return None, "edit, compute or author cue: ask the menu"
+    if not _contains_any(padded, NAVIGATE_VERBS):
+        return None, "no navigate cue: ask the menu"
+    if _contains_any(padded, NAVIGATE_ENTITY_WORDS):
+        return NAVIGATE, "navigate cue + code-entity word"
+    if any(_is_path_like(token) for token in request.split()):
+        return NAVIGATE, "navigate cue + path-like token"
+    return None, "navigate cue but no code entity: ask the menu"
 
 
-def _is_author_phrasing(low: str) -> bool:
-    """"Write/create a script/function/..." — checked before any path
-    mention, so a file named only as an example never steals the route."""
-    return (_contains_any(low, AUTHOR_VERBS)
-            and _contains_any(low, AUTHOR_ARTIFACT_WORDS))
+def _padded_words(request: str) -> str:
+    """Turn a request into lowercase words for phrase matching.
+
+    pre_route uses this text so that a cue matches whole words only.
+    pre_route calls it with the raw request text.
+    It lowercases the text, splits it with rank.words (keeping "_" and
+    "'"), joins the words with single spaces and adds one space at each
+    end.
+
+    Args:
+        request (str): the raw user request, from pre_route.
+
+    Returns:
+        str: the normalised words, with a space at each end.
+    """
+    low = request.lower().replace(CURLY_APOSTROPHE, "'")
+    return " " + " ".join(rank.words(low, keep=WORD_CHARS)) + " "
 
 
-def _mentions_existing_path(request: str, root: Path) -> bool:
-    """True when a token names a file that really exists under root."""
-    tokens = set(_PATH_TOKEN_RE.findall(request))
-    if not tokens or not root.is_dir():
-        return False
-    for path in root.rglob("*"):
-        if path.is_file() and (path.name in tokens
-                               or str(path.relative_to(root)) in tokens):
-            return True
-    return False
+def _contains_any(padded: str, phrases: tuple[str, ...]) -> bool:
+    """Tell if one of the phrases occurs as whole words in the text.
+
+    pre_route uses this to find cue words ("sum" must not match "consume").
+    pre_route calls it with the output of _padded_words and a cue tuple.
+    It looks for each phrase with one space on each side.
+
+    Args:
+        padded (str): normalised words with edge spaces, from _padded_words.
+        phrases (tuple[str, ...]): lowercase cue phrases, module constants.
+
+    Returns:
+        bool: True when at least one phrase occurs.
+    """
+    return any(f" {phrase} " in padded for phrase in phrases)
 
 
-def _classify_with_path(low: str) -> tuple[str | None, str]:
-    """A real path was named: a verb cue resolves the mode for free."""
-    if _contains_any(low, EDIT_VERBS):
-        return EDIT, "names existing path + edit verb"
-    if _contains_any(low, NAVIGATE_VERBS):
-        return NAVIGATE, "names existing path + navigate verb"
-    if _has_compute_verb(low):
-        return COMPUTE, "names existing path + compute verb"
-    return None, "path named but no confident verb cue"
+def _is_path_like(token: str) -> bool:
+    """Tell if one request token looks like a file path.
 
+    pre_route uses this so "what does parser.py do?" routes free.
+    pre_route calls it with one whitespace-separated request token.
+    It removes edge punctuation, then accepts a token with "/" between two
+    parts, or with a "." followed by a letter-bearing extension.
 
-def _classify_without_path(low: str) -> tuple[str | None, str]:
-    """No real path: require a verb cue AND a supporting noun, with the
-    competing mode's cue words absent, before committing for free."""
-    if _contains_any(low, NAVIGATE_VERBS) \
-            and _contains_any(low, NAVIGATE_ENTITY_WORDS) \
-            and not _contains_any(low, COMPUTE_DATA_WORDS):
-        return NAVIGATE, "interrogative code-entity shape, no path"
-    if _has_compute_verb(low) and _contains_any(low, COMPUTE_DATA_WORDS):
-        return COMPUTE, "compute verb + data noun, no path"
-    return None, "no confident deterministic signal"
+    Args:
+        token (str): one token of the raw request, from pre_route.
 
-
-def _has_compute_verb(low: str) -> bool:
-    return _contains_any(low, COMPUTE_VERBS) or bool(_TOP_K_RE.search(low))
-
-
-def _contains_any(text: str, phrases: tuple[str, ...]) -> bool:
-    """Word-boundaried match ('sum' must not fire inside 'consume')."""
-    return any(re.search(rf"\b{re.escape(phrase)}\b", text)
-               for phrase in phrases)
+    Returns:
+        bool: True when the token looks like a path or a file name.
+    """
+    core = token.strip(TOKEN_EDGE_CHARS)
+    if len([part for part in core.split("/") if part]) >= 2:
+        return True
+    stem, dot, extension = core.rpartition(".")
+    return bool(stem and dot and extension.isalnum()
+                and not extension.isdigit())
 
 
 OPTION_TEXT = {
@@ -224,51 +235,54 @@ ACTIONS:
 ANSWER: 4"""
 
 
-def route_mode(request: str, policy: Policy,
-               root: Path | None = None) -> tuple[str, str]:
-    """(mode, how) for a coding request: free pre-check, else one menu."""
-    mode, reason = pre_route(request, root)
+def route_mode(request: str, policy: Policy) -> tuple[str, str]:
+    """Choose the mode for one coding request.
+
+    The code agent uses this as its front door before it runs a mode.
+    agents/code.run calls it with the user request and the live policy.
+    It takes the free pre-check route when there is one, else it asks one
+    one-digit menu. An invalid menu answer gives FALLBACK_MODE.
+
+    Args:
+        request (str): the user's coding request, from the agent run.
+        policy (Policy): the live decision policy, from the agent run.
+
+    Returns:
+        tuple[str, str]: (mode, how) where how is "pre:<reason>", "menu"
+        or "menu-fallback".
+    """
+    mode, reason = pre_route(request)
     if mode is not None:
         return mode, f"pre:{reason}"
     episode = Episode(CODE_ROUTER_PREFIX, request)
     node = MenuNode("Which mode does this coding request need?",
                     [OPTION_TEXT[mode] for mode in MODES], escape=False)
     decision = policy.decide(episode, node)
-    if decision.valid:
-        for mode in MODES:
-            if decision.value == OPTION_TEXT[mode]:
-                return mode, "menu"
-    return FALLBACK_MODE, "menu-fallback"
+    chosen = next((mode for mode in MODES
+                   if decision.valid and decision.value == OPTION_TEXT[mode]),
+                  None)
+    if chosen is None:
+        return FALLBACK_MODE, "menu-fallback"
+    return chosen, "menu"
 
 
 if __name__ == "__main__":
-    import tempfile
-
     from threetoks.backend.base import FAMILY_CHATML, GenResult, ModelSpec
     from threetoks.policy import PolicyConfig
 
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        (root / "parser.py").write_text("def parse():\n    return 1\n")
-
-        assert pre_route("fix the bug in parser.py", root)[0] == EDIT
-        assert pre_route("where is the Cache class implemented?", root)[0] \
-            == NAVIGATE
-        assert pre_route("sum the revenue column in the csv", root)[0] \
-            == COMPUTE
-        assert pre_route("write a script that reverses a string", root)[0] \
-            == AUTHOR
-        # a path named only as an illustrative example must stay author
-        assert pre_route("write a script that parses log files like "
-                         "parser.py", root)[0] == AUTHOR
-        assert pre_route("parser.py looks weird today", root)[0] is None
-        assert pre_route("hello there", root)[0] is None
+    assert pre_route("fix the bug in parser.py")[0] is None
+    assert pre_route("where is the Cache class implemented?")[0] == NAVIGATE
+    assert pre_route("what does parser.py actually do?")[0] == NAVIGATE
+    assert pre_route("where is the add function in parser.py?")[0] is None
+    assert pre_route("sum the revenue column in the csv")[0] is None
+    assert pre_route("write a script that reverses a string")[0] is None
+    assert pre_route("hello there")[0] is None
 
     class _PickFirst:
         def complete(self, model, raw_prompt, opts):
             return GenResult(" 1", 5, 2, 0.0, "stop")
 
     policy = Policy(_PickFirst(), PolicyConfig(ModelSpec("m", FAMILY_CHATML)))
-    mode, how = route_mode("hmm, something about the code", policy, None)
+    mode, how = route_mode("hmm, something about the code", policy)
     assert mode in MODES and how == "menu"
     print("smoke OK")

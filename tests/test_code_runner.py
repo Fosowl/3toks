@@ -1,15 +1,18 @@
 """Offline tests for the module runner (subprocess only, no model).
 
-Covers check collection (examples beat smoke calls, stubs excluded),
+Covers check collection (examples for every bodied method, a smoke call
+ONLY for the script entry, stubs excluded), the echo entry call,
 traceback-to-method blame mapping (deepest frame wins, assert failures
-default to the checked method), and the inconclusive-skip rule for
-interactive ``input()`` code.
+default to the checked method), the run working directory, and the
+inconclusive-skip rule for interactive ``input()`` code.
 """
+import tempfile
 import unittest
+from pathlib import Path
 
 from threetoks.code.runner import (Check, KIND_CALL, KIND_EXAMPLE, blame,
-                                  collect_checks, failures, is_inconclusive,
-                                  method_spans, run_checks)
+                                  collect_checks, entry_call, failures,
+                                  is_inconclusive, method_spans, run_checks)
 from threetoks.code.store import MethodStore
 
 MODULE = ('"demo"\n'
@@ -34,16 +37,63 @@ def _store(*methods):
 
 
 class CollectChecksTest(unittest.TestCase):
-    def test_example_beats_smoke_call_and_stubs_are_excluded(self):
-        store = _store(("a", "", "def a(): return 1", "a() == 1"),
-                       ("b", "", "def b(): return 2", None),
-                       ("c", "x", "def c(x): return x", None),
-                       ("stub", "", None, None))
-        checks = collect_checks(store.methods)
+    def _store(self):
+        return _store(("a", "", "def a(): return 1", "a() == 1"),
+                      ("b", "", "def b(): return 2", None),
+                      ("c", "x", "def c(x): return x", None),
+                      ("stub", "", None, None))
+
+    def test_only_the_entry_is_smoke_called(self):
+        checks = collect_checks(self._store().methods, "b")
         self.assertEqual([(c.name, c.kind) for c in checks],
                          [("a", KIND_EXAMPLE), ("b", KIND_CALL)])
         self.assertEqual(checks[0].statement, "assert a() == 1")
         self.assertEqual(checks[1].statement, "b()")
+
+    def test_no_entry_means_no_smoke_call_at_all(self):
+        checks = collect_checks(self._store().methods, None)
+        self.assertEqual([c.kind for c in checks], [KIND_EXAMPLE])
+
+    def test_stub_entry_is_never_called(self):
+        checks = collect_checks(self._store().methods, "stub")
+        self.assertNotIn(KIND_CALL, [c.kind for c in checks])
+
+
+class EntryCallTest(unittest.TestCase):
+    def test_echo_prints_a_returned_value(self):
+        checks = collect_checks(
+            _store(("answer", "", "def answer():\n    return 42", None)
+                   ).methods, "answer", echo=True)
+        [result] = run_checks("def answer():\n    return 42\n", checks)
+        self.assertTrue(result.passed)
+        self.assertEqual(result.stdout, "42\n")
+
+    def test_echo_stays_silent_for_none(self):
+        [result] = run_checks("def quiet():\n    return None\n",
+                              [Check("quiet", entry_call("quiet", True),
+                                     KIND_CALL)])
+        self.assertEqual(result.stdout, "")
+
+    def test_without_echo_a_return_value_is_not_printed(self):
+        [result] = run_checks("def answer():\n    return 42\n",
+                              [Check("answer", entry_call("answer", False),
+                                     KIND_CALL)])
+        self.assertEqual(result.stdout, "")
+
+    def test_indented_call_parses_as_a_guard_body(self):
+        guard = 'if __name__ == "__main__":\n' + entry_call("f", True, "    ")
+        compile("def f():\n    return 1\n" + guard, "<t>", "exec")
+
+
+class RunCwdTest(unittest.TestCase):
+    def test_checks_run_in_the_given_directory(self):
+        with tempfile.TemporaryDirectory() as folder:
+            Path(folder, "data.txt").write_text("from disk")
+            module = "def main():\n    print(open('data.txt').read())\n"
+            [result] = run_checks(module, [Check("main", "main()",
+                                                 KIND_CALL)], Path(folder))
+        self.assertTrue(result.passed, result.error)
+        self.assertEqual(result.stdout, "from disk\n")
 
 
 class SpansAndBlameTest(unittest.TestCase):

@@ -85,19 +85,6 @@ class MethodStore:
         blocks = [self._render_one(method) for method in self.methods]
         return "\n\n\n".join([header, *blocks]) + "\n" if blocks else header + "\n"
 
-    def render_script(self, entry: str | None) -> str:
-        """The module plus a ``__main__`` guard calling ``entry``.
-
-        This is the *deliverable* render only: gates and the runner keep
-        using the guard-free ``render_module`` so candidate imports never
-        execute the entry while siblings are still stubs. ``None`` (no
-        runnable entry) renders the plain module.
-        """
-        module = self.render_module()
-        if entry is None:
-            return module
-        return f'{module}\n\nif __name__ == "__main__":\n    {entry}()\n'
-
     def _render_one(self, method: MethodRecord) -> str:
         """A method's accepted body, or a NotImplementedError stub."""
         if method.body is not None:
@@ -128,10 +115,6 @@ if __name__ == "__main__":
     assert "return {}" in module                       # tally bodied
     import ast
     ast.parse(module)                                  # always importable
-    assert store.render_script(None) == module         # no entry, no guard
-    script = store.render_script("tally")
-    assert script.endswith('if __name__ == "__main__":\n    tally()\n'), script
-    ast.parse(script)                                  # invariant holds
     assert store.signature_lines(store.methods).count("\n") == 1
     hostile = MethodStore('goal with """ triple')
     hostile.add("f", "x", 'contract with """ triple')

@@ -21,14 +21,10 @@
    "hints": ["sorry", "cannot", "can't do", "not able", "limitation", "unable"]},
   {"reply": "No problem at all!",
    "hints": ["no problem", "np", "it's fine", "its fine", "no worries"]},
-  {"reply": "Sure thing! What would you like to do?",
-   "hints": ["ok", "okay", "sure", "alright", "sounds good", "cool"]},
   {"reply": "Nice to meet you too!",
    "hints": ["nice to meet you", "pleased to meet", "good to meet"]},
   {"reply": "I'm just a program, but I'm ready to help!",
    "hints": ["are you human", "are you a bot", "are you real", "are you an ai"]},
   {"reply": "Yes, I'm here and ready. What do you need?",
-   "hints": ["are you there", "you there", "hello?", "anyone there"]},
-  {"reply": "Happy to help -- just tell me what you need.",
-   "hints": ["please", "could you", "can you help", "i need help"]}
+   "hints": ["are you there", "you there", "hello?", "anyone there"]}
 ]

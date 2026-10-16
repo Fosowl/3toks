@@ -84,11 +84,10 @@ def _ask_int(ask, prompt: str, default: int) -> int:
 
 
 def _ask_llm(base: ThreetoksConfig, ask) -> LlmConfig:
-    """Model and host questions; provider, api_base, vote_k stay as configured."""
+    """Model and host questions; every other ``[llm]`` field stays as configured."""
     model = _ask_text(ask, "Ollama model", base.llm.model)
     host = _ask_text(ask, "Ollama host", base.llm.host)
-    return LlmConfig(model=model, host=host, provider=base.llm.provider,
-                     api_base=base.llm.api_base, vote_k=base.llm.vote_k)
+    return replace(base.llm, model=model, host=host)
 
 
 def _ask_browser(base: ThreetoksConfig, ask) -> BrowserConfig:
@@ -309,10 +308,10 @@ if __name__ == "__main__":
     opened = []
     record = opened.append  # fake open_url: records, never opens a browser
     quiet = lambda line: None
-    answers = iter(["", "", "stealth", "y", "", "5", "", "n", "n"])
+    answers = iter(["", "", "plain", "y", "", "5", "", "n", "n"])
     wizard = run_wizard(ask=lambda prompt: next(answers), sink=quiet,
                         open_url=record)
-    assert wizard.browser.mode == "stealth", wizard.browser
+    assert wizard.browser.mode == "plain", wizard.browser
     assert wizard.browser.visible is True, wizard.browser
     assert wizard.research.max_rounds == 5, wizard.research
     assert wizard.memory.enabled is False, wizard.memory

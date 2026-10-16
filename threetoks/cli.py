@@ -4,6 +4,8 @@
         --trace trace.jsonl
 """
 import argparse
+import os
+import sys
 import time
 
 from threetoks.backend.base import FAMILY_R1, ModelSpec, detect_family
@@ -17,7 +19,7 @@ from threetoks.trace import Tracer
 from threetoks.web.notes import NoteStore
 from threetoks.web.vertical import WebResearchVertical
 
-# The web extras (requests, bs4, markdownify) are OPTIONAL: everything
+# The web extras (curl_cffi, bs4, markdownify) are OPTIONAL: everything
 # that touches them imports lazily so the core runs on a bare install.
 
 DEFAULT_MODEL = "qwen3.5:2b"
@@ -32,19 +34,20 @@ SYSTEM_CHATML = (
     "correct answer. Do not explain.")
 
 
-def model_spec(name: str) -> ModelSpec:
+def model_spec(name: str, disable_think: bool) -> ModelSpec:
     """Infer the template family from the model name (see detect_family)."""
     family, _ = detect_family(name)
-    return ModelSpec(name, family)
+    return ModelSpec(name, family, disable_think)
 
 
-def make_policy_config(name: str) -> PolicyConfig:
+def make_policy_config(name: str, disable_think: bool) -> PolicyConfig:
     """Policy config with the family-appropriate system prompt.
 
     Every family gets the E1-winning system text except R1, whose
     think-suppression flow deliberately runs without one.
+    ``disable_think`` comes from ``[llm] disable_think`` (see ModelSpec).
     """
-    spec = model_spec(name)
+    spec = model_spec(name, disable_think)
     system = "" if spec.family == FAMILY_R1 else SYSTEM_CHATML
     return PolicyConfig(spec, system=system)
 
@@ -74,19 +77,25 @@ def make_fetch_page(config):
     """Build a ``(fetch_page, fetcher)`` pair for the configured browser mode.
 
     ``http`` uses the module-level plain-HTTP :func:`fetch_page` and no
-    fetcher to close. ``plain`` / ``stealth`` lazily import their Chrome
-    backend and return the live fetcher so the caller can close it.
+    fetcher to close. ``plain`` lazily imports the Chrome backend and
+    returns the live fetcher so the caller can close it — but
+    only once a local SearXNG answers: browser mode exists for JS-heavy
+    pages found through search, so without the search engine the pairing
+    is pointless and startup refuses with a clear error.
     """
     mode = config.browser.mode
-    if mode == "plain":
-        from threetoks.web.browser import make_fetcher
-        fetcher = make_fetcher(config.browser.visible)
-        return fetcher.fetch_page, fetcher
-    if mode == "stealth":
-        from threetoks.web.stealth_browser import make_stealth_fetcher
-        fetcher = make_stealth_fetcher(config.browser.visible)
-        return fetcher.fetch_page, fetcher
-    return fetch_page, None
+    if mode != "plain":
+        return fetch_page, None
+    from threetoks.web import search as search_mod  # lazy: web extras
+    base_url = os.getenv(search_mod.SEARXNG_URL_ENV,
+                         search_mod.DEFAULT_SEARXNG_URL)
+    if not search_mod._searxng_answers(base_url):
+        raise SystemExit(
+            f"browser mode '{mode}' needs a local SearXNG, but none "
+            f"answers at {base_url} — run ./start_search_engine.sh first")
+    from threetoks.web.browser import make_fetcher
+    fetcher = make_fetcher(config.browser.visible)
+    return fetcher.fetch_page, fetcher
 
 
 def main() -> None:
@@ -96,7 +105,8 @@ def main() -> None:
     from threetoks.web.search import auto_provider
     search_mod.MIN_SEARCH_INTERVAL_S = config.search.min_interval_s
     args = build_parser(config).parse_args()
-    policy = Policy(make_backend(config.llm), make_policy_config(args.model),
+    policy = Policy(make_backend(config.llm),
+                    make_policy_config(args.model, config.llm.disable_think),
                     Tracer(args.trace))
     page_fetch, fetcher = make_fetch_page(config)
     services = Services(provider=auto_provider(), fetch_page=page_fetch,
@@ -113,6 +123,11 @@ def main() -> None:
     print(f"\nstats: {outcome['rounds']} rounds "
           f"(judged {'good' if outcome.get('judged_good') else 'exhausted'}), "
           f"queries: {outcome['queries']}, {elapsed:.1f}s")
+    if outcome.get("pages_unavailable"):
+        # Every page open failed: the printed answer is an error, not a
+        # synthesis — say so on stderr and fail the process honestly.
+        print(f"error: {outcome['answer']}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

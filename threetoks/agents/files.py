@@ -26,17 +26,17 @@ AGENT_NAME = "files"
 AGENT_DESCRIPTION = ("browse files and folders on this machine — only "
                      "when the request names them")
 
-MAX_ENTRIES_SHOWN = 15
+MAX_ENTRIES_SHOWN = 32
 MAX_OPEN_OPTIONS = 6
-MAX_FILES_OPENED = 4
+MAX_FILES_OPENED = 32
 CHUNK_LINES = 25
 MAX_FILE_BYTES = 200_000
 NAME_CHARS = 60
 ANSWER_MAX_TOKENS = 80
 QUOTE_FALLBACK_NOTES = 2
-FORCE_ANSWER_AT_STEPS_LEFT = 3
+FORCE_ANSWER_AT_STEPS_LEFT = 16
 INITIAL_STEPS_LEFT = 40
-MAX_STEPS = 20
+MAX_STEPS = 32
 
 MAX_SHELL_RUNS = 3
 SHELL_TIMEOUT_S = 10
@@ -48,7 +48,7 @@ OPT_ANSWER = "answer the task now"
 OPT_BACK = "back to the folder"
 OPT_NEXT_CHUNK = "read more of this file"
 OPT_SHELL = "run a shell command to inspect files"
-FINAL_PREFILL = "FINAL ANSWER: It"
+FINAL_PREFILL = "ANSWER: It"
 CMD_PREFILL = "COMMAND:"
 # A bare menu digit or comma-index list ("1" / "1,2,3") is menu-format
 # bleed, not an answer; a real numeric answer like "1989" is fine.

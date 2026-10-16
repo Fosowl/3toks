@@ -2,8 +2,11 @@
 import ast
 import unittest
 
+from threetoks.backend.base import FAMILY_R1, GenResult, ModelSpec
 from threetoks.code.nodes import (IMPLEMENT_SYSTEM, ImplementNode, PlanNode,
                                  TestNode)
+from threetoks.policy import Policy, PolicyConfig
+from threetoks.render import Episode
 
 PERM = ()  # option-less generation nodes ignore the permutation
 
@@ -28,6 +31,25 @@ class PlanNodeTest(unittest.TestCase):
         decision = node.parse("", PERM)
         self.assertFalse(decision.valid)
         self.assertEqual(decision.value, [])
+
+
+class ImplementNodeTruncationTest(unittest.TestCase):
+    def test_body_cut_by_token_cap_is_resampled(self):
+        replies = [GenResult("return max(low, min(high, value))",
+                             10, 200, 0.0, "length"),
+                   GenResult("return min(high, max(low, value))", 10, 3, 0.0,
+                             "stop")]
+
+        class Backend:
+            def complete(self, model, raw_prompt, opts):
+                return replies.pop(0)
+
+        policy = Policy(Backend(), PolicyConfig(ModelSpec("m", FAMILY_R1)))
+        decision = policy.decide(Episode("", "g"),
+                                 ImplementNode("clamp", "value, low, high", "c"))
+        self.assertTrue(decision.valid)
+        self.assertIn("min(high, max(low, value))", decision.value)
+        self.assertEqual(replies, [])
 
 
 class ImplementNodeParseTest(unittest.TestCase):

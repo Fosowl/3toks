@@ -68,6 +68,7 @@ class ImplementNode:
     system = IMPLEMENT_SYSTEM
     stop = IMPLEMENT_STOP
     max_tokens = IMPLEMENT_MAX_TOKENS
+    reject_truncated = True  # a cut-off body is not code
 
     def __init__(self, name: str, args: str, contract: str,
                  examples: list[str] | None = None,
@@ -160,6 +161,7 @@ if __name__ == "__main__":
     assert not impl.parse("return None", ()).valid         # return-shaped dodge
     fresh = ImplementNode("clamp", "v, lo, hi", "limit")
     assert "COMPLETE working logic" not in fresh.render(())
+    assert ImplementNode.reject_truncated
     tests = TestNode("add", "a, b").parse("add(1, 2) == 3\nassert add(0,0)==0", ())
     assert tests.valid and tests.value == [
         "assert add(1, 2) == 3", "assert add(0,0)==0"], tests.value

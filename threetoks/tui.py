@@ -62,7 +62,8 @@ DEBUG_PROMPT_TAIL = 220     # /debug: prompt tail shown after the seam
 DEBUG_RESULT_CLIP = 120     # /debug: result text clipped to this
 UNDER_INDENT = " " * 12     # column where a ticker line's value starts
 SIGN_OFF = "⌁ mesh offline — tokens saved, see you"
-_KIND_LABELS = {"menu": "menu", "pick_many": "pick", "short_text": "text"}
+_KIND_LABELS = {"menu": "menu", "pick_many": "pick", "short_text": "text",
+                "fetch": "fetch"}
 
 
 def build_debug_tokens_line(event: dict, enabled: bool = True) -> str:
@@ -354,22 +355,30 @@ OUTPUT_MAX_LINES = 12
 
 
 def _output_rows(result: dict, enabled: bool) -> list[str]:
-    """The script's captured stdout, shown under the code it came from.
+    """Show the script's captured stdout under the code it came from.
 
-    The runner already executed the delivered entry (§7b smoke call);
-    hiding what it printed made a working script look inert. Long output
-    is clipped with an honest truncation count.
+    The result panel uses these rows so a working script does not look
+    inert. _panel_rows calls it with the agent result.
+    It clips long output with a "more lines" count and shows nothing when
+    the output is empty or is already the answer (code compute mode).
+
+    Args:
+        result (dict): the agent result, from _panel_rows.
+        enabled (bool): color flag, from _panel_rows.
+
+    Returns:
+        list[str]: panel rows, empty when there is nothing new to show.
     """
     output = str(result.get("output") or "").rstrip()
-    if not output:
-        return []
-    lines = output.splitlines()
-    shown, hidden = lines[:OUTPUT_MAX_LINES], len(lines) - OUTPUT_MAX_LINES
+    if not output or output.strip() == str(result.get("answer") or "").strip():
+        return []  # compute: the output IS the answer
+    from threetoks.code.edit.nav import clip_lines
+    shown, hidden = clip_lines(output.splitlines(), OUTPUT_MAX_LINES)
     rows = ["", dim("output when run:", enabled)]
     for line in shown:
         rows.extend(fg(GREEN, seg, enabled)
                     for seg in _wrap(line, PANEL_WIDTH - 3))
-    if hidden > 0:
+    if hidden:
         rows.append(dim(f"… {hidden} more line(s)", enabled))
     return rows
 
@@ -531,7 +540,7 @@ def _cmd_help(state: ReplState, arg: str) -> str:
         ("/help", "show this command list"),
         ("/agents", "list registered agents"),
         ("/deep N", "set research rounds to N"),
-        ("/browser MODE [on-screen]", "fetch via http|plain|stealth"),
+        ("/browser MODE [on-screen]", "fetch via http|plain"),
         ("/model NAME", "swap the deciding model"),
         ("/voice [on|off|debug]", "talk instead of typing (voice extras)"),
         ("/debug [on|off|full]",
@@ -589,7 +598,7 @@ def _cmd_model(state: ReplState, arg: str) -> str:
     return dim(f"model = {name}", state.enabled)
 
 
-_BROWSER_MODES = ("http", "plain", "stealth")
+_BROWSER_MODES = ("http", "plain")
 
 
 def _close_active_fetcher(state: ReplState) -> None:
@@ -602,30 +611,29 @@ def _close_active_fetcher(state: ReplState) -> None:
         state.fetcher = None
 
 
-def _make_browser_fetcher(mode: str, visible: bool):
-    """Lazily build a fetcher for ``plain`` / ``stealth`` (imports deferred)."""
-    if mode == "plain":
-        from threetoks.web.browser import make_fetcher
-        return make_fetcher(visible=visible)
-    from threetoks.web.stealth_browser import make_stealth_fetcher
-    return make_stealth_fetcher(visible=visible)
+def _make_browser_fetcher(visible: bool):
+    """Lazily build the Chrome fetcher for ``plain`` (imports deferred)."""
+    from threetoks.web.browser import make_fetcher
+    return make_fetcher(visible=visible)
 
 
 def _cmd_browser(state: ReplState, arg: str) -> str:
-    """Swap ``services.fetch_page`` between http / plain / stealth fetchers.
+    """Swap ``services.fetch_page`` between the http and plain fetchers.
 
-    ``/browser http`` restores the plain-HTTP fetch. ``plain`` and
-    ``stealth`` drive a real Chrome; visibility defaults to the config's
-    ``[browser] visible`` and an explicit ``on-screen`` / ``headless``
-    argument overrides it. The browser modules are optional, so imports
-    are lazy and every failure surfaces as a styled message, not a
-    traceback.
+    ``/browser http`` restores the plain-HTTP fetch. ``plain`` drives a
+    real Chrome; visibility defaults to the config's ``[browser]
+    visible`` and an explicit ``on-screen`` / ``headless`` argument
+    overrides it. A new fetcher gets a fresh chance at every site, so
+    hosts blocked earlier in the session are forgotten (a visible window
+    lets the user solve the check). The browser module is optional, so
+    imports are lazy and every failure surfaces as a styled message, not
+    a traceback.
     """
     parts = arg.split()
     mode = parts[0].lower() if parts else ""
     if mode not in _BROWSER_MODES:
         return fg(AMBER,
-                  "usage: /browser http|plain|stealth [on-screen|headless]",
+                  "usage: /browser http|plain [on-screen|headless]",
                   state.enabled)
     visible = state.browser_visible
     if len(parts) > 1 and parts[1].lower() == "on-screen":
@@ -633,12 +641,13 @@ def _cmd_browser(state: ReplState, arg: str) -> str:
     elif len(parts) > 1 and parts[1].lower() == "headless":
         visible = False
     _close_active_fetcher(state)
+    state.services.blocked_hosts.clear()
     if mode == "http":
         from threetoks.cli import fetch_page
         state.services.fetch_page = fetch_page
         return dim("browser http — plain HTTP fetch", state.enabled)
     try:
-        fetcher = _make_browser_fetcher(mode, visible)
+        fetcher = _make_browser_fetcher(visible)
     except Exception as error:  # noqa: BLE001 - optional module, any failure
         from threetoks.cli import fetch_page
         state.services.fetch_page = fetch_page  # never leave a dead driver bound
@@ -919,6 +928,80 @@ def _read_line(read_input, prompt: str):
         return None
 
 
+CONFIRM_DIFF_MAX_LINES = 200  # one function's diff fits whole
+CONFIRM_YES = ("y", "yes")
+
+
+def make_confirm_edit(state: ReplState, read_input, sink):
+    """Build the callback that asks the user to accept one code edit.
+
+    The code agent calls the callback before it writes a file.
+    repl calls this builder with its state, input reader and output sink.
+    The callback prints the clipped diff, asks a y/N question and gives
+    True only for "y" or "yes"; EOF and Ctrl-C give False.
+
+    Args:
+        state (ReplState): the REPL state (color flag), from repl.
+        read_input (callable): prompt -> line reader, from repl.
+        sink (callable): line printer, from repl.
+
+    Returns:
+        callable: (rel_path: str, diff: str) -> bool.
+    """
+    def confirm_edit(rel_path: str, diff: str) -> bool:
+        sink(_diff_preview(diff, state.enabled))
+        reply = _read_line(read_input,
+                           f"  apply this edit to {rel_path}? [y/N] ")
+        return (reply or "").strip().lower() in CONFIRM_YES
+    return confirm_edit
+
+
+def _diff_preview(diff: str, enabled: bool) -> str:
+    """Color a unified diff and clip it for the confirm question.
+
+    The user reads this preview before saying yes or no to an edit.
+    The confirm callback calls it with the diff from the code agent.
+    It shows added lines green, removed lines pink, other lines dim, and
+    adds an "N more lines" note after CONFIRM_DIFF_MAX_LINES lines.
+
+    Args:
+        diff (str): unified diff text, from the code agent.
+        enabled (bool): color flag, from the REPL state.
+
+    Returns:
+        str: the printable preview.
+    """
+    from threetoks.code.edit.nav import clip_lines
+    lines, hidden = clip_lines(diff.splitlines(), CONFIRM_DIFF_MAX_LINES)
+    shown = [_diff_line(line, enabled) for line in lines]
+    if hidden:
+        shown.append(dim(f"  … {hidden} more lines", enabled))
+    return "\n".join(shown)
+
+
+def _diff_line(line: str, enabled: bool) -> str:
+    """Color one unified diff line by its kind.
+
+    The diff preview uses this to make changes easy to see.
+    _diff_preview calls it once per shown line.
+    It colors "+" lines green and "-" lines pink; headers and context
+    lines are dim.
+
+    Args:
+        line (str): one diff line, from _diff_preview.
+        enabled (bool): color flag, from _diff_preview.
+
+    Returns:
+        str: the indented, colored line.
+    """
+    is_header = line.startswith(("+++", "---"))
+    if line.startswith("+") and not is_header:
+        return fg(GREEN, "  " + line, enabled)
+    if line.startswith("-") and not is_header:
+        return fg(PINK, "  " + line, enabled)
+    return dim("  " + line, enabled)
+
+
 def _debug_sink(state: ReplState, sink):
     """A dim per-event writer while voice debug is on, else None."""
     if not state.voice.debug:
@@ -1021,7 +1104,22 @@ def render_error(error: Exception, enabled: bool = True) -> str:
 
 
 def repl(state: ReplState, read_input=input, sink=print) -> None:
-    """The interactive loop: banner already shown; read, dispatch, repeat."""
+    """Run the interactive loop: read a line, dispatch it, repeat.
+
+    main uses this after the banner is shown; tests call it with a
+    scripted reader and a list sink.
+    It also gives the code agent an edit-confirm callback that uses the
+    same reader and sink as the prompt.
+
+    Args:
+        state (ReplState): the live REPL state, from main.
+        read_input (callable): prompt -> line reader, default input.
+        sink (callable): line printer, default print.
+
+    Returns:
+        None.
+    """
+    state.services.confirm_edit = make_confirm_edit(state, read_input, sink)
     prompt = prompt_text(state.enabled)
     while state.running:
         line = _next_line(state, read_input, prompt, sink)
@@ -1035,7 +1133,7 @@ def repl(state: ReplState, read_input=input, sink=print) -> None:
 def _make_provider(config, sink):
     """Search provider, or None (with a notice) on a bare core install.
 
-    The web extras (requests, bs4, markdownify) are optional; a missing
+    The web extras (curl_cffi, bs4, markdownify) are optional; a missing
     import must degrade to a working TUI without the web agent, never a
     startup crash.
     """
@@ -1049,6 +1147,26 @@ def _make_provider(config, sink):
         return None
     search_mod.MIN_SEARCH_INTERVAL_S = config.search.min_interval_s
     return auto_provider()
+
+
+def _searxng_gate(mode: str, sink) -> None:
+    """Browser modes pair with the local SearXNG: exit clearly without it.
+
+    ``plain`` exists for JS-heavy pages found through search;
+    starting Chrome when no search engine answers can only produce a
+    session that opens nothing, so refuse early and say how to fix it.
+    """
+    try:
+        from threetoks.web import search as search_mod  # lazy: web extras
+    except ImportError:
+        return  # no web extras: the provider is already disabled anyway
+    base_url = os.getenv(search_mod.SEARXNG_URL_ENV,
+                         search_mod.DEFAULT_SEARXNG_URL)
+    if not search_mod._searxng_answers(base_url):
+        sink(fg(AMBER, f"  browser mode '{mode}' needs a local SearXNG, "
+                f"but none answers at {base_url} — run "
+                "./start_search_engine.sh first", _color_enabled()))
+        raise SystemExit(1)
 
 
 def _initial_fetcher(config, services, sink=print):
@@ -1065,8 +1183,9 @@ def _initial_fetcher(config, services, sink=print):
     if mode == "http":
         services.fetch_page = fetch_page
         return None
+    _searxng_gate(mode, sink)
     try:
-        fetcher = _make_browser_fetcher(mode, config.browser.visible)
+        fetcher = _make_browser_fetcher(config.browser.visible)
     except Exception as error:  # noqa: BLE001 - optional module; use HTTP
         services.fetch_page = fetch_page
         sink(fg(AMBER, f"  browser {mode} unavailable: {error} — "
@@ -1173,9 +1292,10 @@ def build_state(model: str = None, sink=print):
     specs = default_agents(services) + optional_agents(services, chosen_model)
     if provider is None:  # bare install: never route to the web agent
         specs = [spec for spec in specs if spec.name != "web"]
+    no_think = config.llm.disable_think
     factory = lambda name: Policy(make_backend(config.llm),
-                                  make_policy_config(name), Tracer(None),
-                                  debug=False)
+                                  make_policy_config(name, no_think),
+                                  Tracer(None), debug=False)
     if config.llm.provider == "ollama":  # families only exist in raw mode
         notice = unknown_family_notice(chosen_model)
         if notice:
@@ -1191,7 +1311,8 @@ def build_state(model: str = None, sink=print):
                      llm_provider=config.llm.provider)
     # Re-bind the factory so future model swaps inherit the current debug flag
     state.policy_factory = lambda name: Policy(make_backend(config.llm),
-                                                make_policy_config(name),
+                                                make_policy_config(name,
+                                                                   no_think),
                                                 Tracer(None),
                                                 debug=state.debug)
     return state
@@ -1277,6 +1398,11 @@ def _demo() -> None:
                               "model_seconds": 4.3, "retries": 1}, enabled))
     print()
     print(render_error(RuntimeError("ollama backend unreachable"), enabled))
+    print()
+    print(_diff_preview("--- a/mod.py\n+++ b/mod.py\n@@ -1,2 +1,2 @@\n"
+                        " def add(a, b):\n-    return a - b\n"
+                        "+    return a + b", enabled))
+    print("  apply this edit to mod.py? [y/N] …")
     print()
     print(prompt_text(enabled) + "…")
     print(gradient(SIGN_OFF, enabled))

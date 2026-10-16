@@ -20,7 +20,8 @@ from typing import Protocol
 R1_BOS = "<｜begin▁of▁sentence｜>"
 R1_USER = "<｜User｜>"
 R1_ASSISTANT = "<｜Assistant｜>"
-R1_THINK_CLOSED = "<think>\n\n</think>\n\n"
+# Empty reasoning block: pre-closes thinking so the reply starts at once.
+THINK_CLOSED = "<think>\n\n</think>\n\n"
 
 FAMILY_R1 = "r1"
 FAMILY_CHATML = "chatml"
@@ -63,9 +64,15 @@ _FAMILY_PATTERNS = (
 
 @dataclass(frozen=True)
 class ModelSpec:
-    """An Ollama model tag plus the template family it speaks."""
+    """An Ollama model tag plus the template family it speaks.
+
+    ``disable_think`` pre-closes the reasoning block on ChatML. Thinking
+    Qwen models (live: qwen3.8:27b) answer an un-closed assistant turn
+    with end-of-turn at once, so every decision came back empty.
+    """
     name: str
     family: str
+    disable_think: bool = True
 
 
 @dataclass(frozen=True)
@@ -124,11 +131,12 @@ def build_raw_prompt(spec: ModelSpec, user: str, system: str = "",
     if spec.family == FAMILY_R1:
         base = f"{R1_BOS}{R1_USER}{_fold(system, user)}{R1_ASSISTANT}"
         opened = f"<think>\n{prefill}"
-        return base + (opened if think else R1_THINK_CLOSED + prefill)
+        return base + (opened if think else THINK_CLOSED + prefill)
     if spec.family == FAMILY_CHATML:
         sys_block = f"<|im_start|>system\n{system}<|im_end|>\n" if system else ""
+        closed = THINK_CLOSED if spec.disable_think else ""
         return (f"{sys_block}<|im_start|>user\n{user}<|im_end|>\n"
-                f"<|im_start|>assistant\n{prefill}")
+                f"<|im_start|>assistant\n{closed}{prefill}")
     if spec.family == FAMILY_GEMMA:
         return (f"<start_of_turn>user\n{_fold(system, user)}<end_of_turn>\n"
                 f"<start_of_turn>model\n{prefill}")
@@ -209,7 +217,11 @@ if __name__ == "__main__":
     assert prompt.endswith("</think>\n\nANSWER:") and R1_USER in prompt
     chatml = build_raw_prompt(ModelSpec("qwen3.5:2b", FAMILY_CHATML),
                               "Pick 1 or 2.", system="s", prefill="ANSWER:")
-    assert chatml.endswith("assistant\nANSWER:") and "<|im_start|>system" in chatml
+    assert chatml.endswith("assistant\n<think>\n\n</think>\n\nANSWER:")
+    assert "<|im_start|>system" in chatml
+    thinking = build_raw_prompt(ModelSpec("qwen3.5:2b", FAMILY_CHATML, False),
+                                "Pick 1 or 2.", prefill="ANSWER:")
+    assert thinking.endswith("assistant\nANSWER:")
 
     gemma = build_raw_prompt(ModelSpec("gemma3:4b", FAMILY_GEMMA),
                              "Pick 1 or 2.", system="s", prefill="ANSWER:")

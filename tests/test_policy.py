@@ -2,7 +2,7 @@
 import unittest
 
 from threetoks.backend.base import FAMILY_R1, GenResult, ModelSpec
-from threetoks.nodes import MenuNode, PickManyNode
+from threetoks.nodes import MenuNode, PickManyNode, ShortTextNode
 from threetoks.policy import TEMPERATURE_LADDER, Policy, PolicyConfig
 from threetoks.render import Episode
 from threetoks.trace import Tracer
@@ -152,6 +152,70 @@ class NonMenuNodeTest(unittest.TestCase):
         decision = make_policy(backend).decide(Episode("S", "t"),
                                                PickManyNode("Which?", 10))
         self.assertEqual(decision.value, [3, 7])
+
+
+class StrictTextNode(ShortTextNode):
+    """A text node that refuses completions cut by the token cap."""
+
+    reject_truncated = True
+
+
+def temps_of(backend):
+    return [opts.temperature for _, opts in backend.calls]
+
+
+class NonMenuRetryTemperatureTest(unittest.TestCase):
+    def test_short_text_retries_hot_after_first_attempt(self):
+        backend = FakeBackend(["", "", ""])
+        make_policy(backend).decide(Episode("S", "t"),
+                                    ShortTextNode("Query?", "Q:"))
+        self.assertEqual(temps_of(backend), [0.0, 0.4, 0.4])
+
+    def test_menu_keeps_the_ladder(self):
+        backend = FakeBackend(["x", "x", "x"])
+        make_policy(backend).decide(Episode("S", "t"),
+                                    MenuNode("Pick.", ["a", "b"]))
+        self.assertEqual(temps_of(backend), [0.0, 0.0, 0.4])
+
+    def test_node_temperature_override_wins(self):
+        node = ShortTextNode("Query?", "Q:")
+        node.temperature = 0.9
+        backend = FakeBackend(["", "", ""])
+        make_policy(backend).decide(Episode("S", "t"), node)
+        self.assertEqual(temps_of(backend), [0.9, 0.9, 0.9])
+
+
+class RejectTruncatedTest(unittest.TestCase):
+    def _decide(self, node, texts, reasons):
+        events = []
+        backend = FakeBackend(texts)
+        reason_iter = iter(reasons)
+        complete = backend.complete
+        backend.complete = lambda *args: GenResult(
+            complete(*args).text, 10, 2, 0.01, next(reason_iter))
+        policy = Policy(backend, PolicyConfig(ModelSpec("m", FAMILY_R1)),
+                        Tracer(None, on_event=events.append))
+        return policy.decide(Episode("S", "t"), node), events
+
+    def test_truncated_completion_is_retried(self):
+        decision, events = self._decide(StrictTextNode("Q?", "Q:"),
+                                        [" cut", " whole"], ["length", "stop"])
+        self.assertTrue(decision.valid)
+        self.assertEqual(len(events), 2)
+        self.assertFalse(events[0]["valid"])
+        self.assertEqual(events[0]["done_reason"], "length")
+
+    def test_all_truncated_ends_invalid(self):
+        decision, events = self._decide(StrictTextNode("Q?", "Q:"),
+                                        [" a", " b", " c"], ["max_tokens"] * 3)
+        self.assertFalse(decision.valid)
+        self.assertEqual(len(events), 3)
+
+    def test_node_without_flag_accepts_truncated(self):
+        decision, events = self._decide(ShortTextNode("Q?", "Q:"),
+                                        [" cut"], ["length"])
+        self.assertTrue(decision.valid)
+        self.assertEqual(len(events), 1)
 
 
 if __name__ == "__main__":

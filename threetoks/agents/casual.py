@@ -35,7 +35,7 @@ BUILTIN_REPLIES = (
 )
 MENU_CANDIDATES = 5
 OPTION_CHARS = 60
-FREE_REPLY_MAX_TOKENS = 48
+FREE_REPLY_MAX_TOKENS = 96
 FREE_REPLY_PREFILL = "REPLY:"
 FALLBACK_REPLY = "I'm not sure how to respond to that."
 _MENU_BLEED_RE = re.compile(r"\d+(\s*,\s*\d+)*\s*,?")  # "1" / "1,2" is no reply
@@ -47,6 +47,19 @@ ACTIONS:
 2 = Goodbye! Come back anytime.
 Reply with exactly ONE digit.
 ANSWER: 1"""
+
+FREE_PREFIX = """You answer the user's message directly and briefly.
+Rules:
+- Answer the actual question; never reply with a promise like "I'd be
+  happy to explain" or "Sure, I can help with that" instead of the answer.
+- If it is small talk, reply warmly in one short sentence.
+- If it is a factual question, answer it in one or two short sentences.
+- If you do not know the answer, say so and add: "Tell me to spin up a
+  web research agent and I'll search for it."
+Example:
+MESSAGE:
+what is the capital of France?
+REPLY: The capital of France is Paris."""
 
 
 def _load_replies() -> list[dict]:
@@ -95,15 +108,18 @@ def _pick_from_menu(task: str, candidates: list[str], policy) -> str | None:
 
 
 def _free_reply(task: str, policy) -> str:
-    """Bounded free-text reply when no canned answer fits.
+    """Bounded free-text answer when no canned reply fits.
 
-    A bare digit or index list is menu-format bleed, not a reply — it
-    falls back rather than being shown to the user.
+    Uses FREE_PREFIX, not the menu PREFIX: the shared menu prefix primed
+    the model to emit filler like "I'd be happy to explain that!" instead
+    of answering. A bare digit or index list is menu-format bleed, not a
+    reply — it falls back rather than being shown to the user.
     """
-    episode = Episode(PREFIX, task)
+    episode = Episode(FREE_PREFIX, task)
     episode.open_observation(f"MESSAGE:\n{task}")
     node = ShortTextNode(
-        "Reply to this casual message in one short, friendly sentence.",
+        "Answer the message directly in one or two short sentences. "
+        "Never promise an answer; give it, or offer a web search.",
         FREE_REPLY_PREFILL, max_tokens=FREE_REPLY_MAX_TOKENS)
     decision = policy.decide(episode, node)
     value = decision.value if decision.valid else ""

@@ -19,6 +19,8 @@ from threetoks.trace import Tracer
 # E4: temp-0 failures are confident, so attempt 2 is a pure reshuffle
 # (recovers 29% of failures); temperature only enters at attempt 3.
 TEMPERATURE_LADDER = (0.0, 0.0, 0.4)
+# Completion stops that mean the token cap cut the answer.
+TRUNCATED_REASONS = ("length", "max_tokens")
 VOTE_TEMPERATURE = 0.0
 THINK_STOP = "</think>"
 NODE_SEPARATOR = "\n\n"
@@ -62,12 +64,35 @@ class Policy:
             perm = self._permutation(node, episode.step_count, attempt)
             user = episode.render_base() + NODE_SEPARATOR + node.render(perm)
             result = self._generate(user, node, attempt, think_budget)
-            decision = node.parse(result.text, perm)
+            decision = self._parse(node, result, perm)
             self._record(episode, node, perm, attempt, result, decision)
             if decision.valid:
                 break
         episode.step_count += 1
         return decision
+
+    def _parse(self, node, result: GenResult, perm: tuple[int, ...]) -> Decision:
+        """Parse one completion; reject a cut-off one when the node asks.
+
+        The retry ladder calls this with each completion. A node with
+        ``reject_truncated = True`` (code generation) must not accept a
+        body that the token cap cut off, so that completion becomes an
+        invalid Decision and the ladder tries again.
+
+        Args:
+            node: the decision node (from the vertical).
+            result: GenResult from the backend for this attempt.
+            perm: tuple[int, ...] option order used for this attempt.
+        Returns:
+            Decision: the node's parse, or an invalid Decision with the
+            same value when the node rejects truncated completions.
+        """
+        decision = node.parse(result.text, perm)
+        truncated = result.done_reason in TRUNCATED_REASONS
+        if not (truncated and getattr(node, "reject_truncated", False)):
+            return decision
+        return Decision(node.kind, decision.value, decision.raw_text,
+                        valid=False)
 
     def _decide_by_vote(self, episode: Episode, node) -> Decision:
         """Majority vote over vote_k samples with different option orders.
@@ -109,9 +134,7 @@ class Policy:
         think phase needs raw-mode prompt surgery, so it never runs over
         a chat transport.
         """
-        override = getattr(node, "temperature", None)
-        temperature = override if override is not None else \
-            TEMPERATURE_LADDER[min(attempt, len(TEMPERATURE_LADDER) - 1)]
+        temperature = attempt_temperature(node, attempt)
         prefix = ""
         if think_budget > 0 and self.config.spec.family == FAMILY_R1 \
                 and self._chat is None:
@@ -239,6 +262,29 @@ class Policy:
             "out_tokens": result.out_tokens, "wall_s": round(result.wall_s, 3)})
 
 
+def attempt_temperature(node, attempt: int) -> float:
+    """Pick the sampling temperature for one retry-ladder attempt.
+
+    Policy._generate calls this for every ladder attempt. A menu gets a
+    new option order per attempt, so it keeps TEMPERATURE_LADDER. Other
+    nodes get the same prompt again, so a repeat at 0.0 gives the same
+    answer: they use 0.0 first and then the hottest ladder step. A
+    node's own ``temperature`` always wins.
+
+    Args:
+        node: the decision node (from the vertical).
+        attempt: int, 0-based attempt number from the ladder loop.
+    Returns:
+        float: the temperature for this attempt.
+    """
+    override = getattr(node, "temperature", None)
+    if override is not None:
+        return override
+    if node.kind == "menu":
+        return TEMPERATURE_LADDER[min(attempt, len(TEMPERATURE_LADDER) - 1)]
+    return TEMPERATURE_LADDER[0] if attempt == 0 else TEMPERATURE_LADDER[-1]
+
+
 if __name__ == "__main__":
     from threetoks.nodes import MenuNode
 
@@ -261,4 +307,7 @@ if __name__ == "__main__":
     assert len(backend.prompts) == 2, "retry ladder should have re-asked"
     assert backend.prompts[0].endswith("ANSWER:")
     assert all("done_reason" in event for event in events), events
+    from threetoks.nodes import ShortTextNode
+    assert [attempt_temperature(ShortTextNode("q?", "Q:"), n)
+            for n in range(3)] == [0.0, 0.4, 0.4]
     print("smoke OK")

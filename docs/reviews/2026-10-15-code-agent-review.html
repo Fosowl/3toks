@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ThreeToks code agent — review 2026-10-15</title>
+<style>
+  body { font: 15px/1.55 -apple-system, "Segoe UI", sans-serif; max-width: 1100px; margin: 2em auto; padding: 0 1.2em; color: #1d1d1f; }
+  h1 { font-size: 1.6em; margin-bottom: .2em; }
+  h2 { margin-top: 2em; border-bottom: 2px solid #ddd; padding-bottom: .2em; }
+  h3 { margin-top: 1.4em; }
+  table { border-collapse: collapse; width: 100%; margin: .8em 0; font-size: .92em; }
+  th, td { border: 1px solid #d0d0d0; padding: .35em .55em; text-align: left; vertical-align: top; }
+  th { background: #f2f2f2; }
+  code { background: #f4f4f4; padding: 0 .25em; border-radius: 3px; font-size: .92em; }
+  .p1 { background: #fde2e1; font-weight: 600; }
+  .p2 { background: #fff1d6; }
+  .p3 { background: #eef3fb; }
+  .ok { color: #157a2c; font-weight: 600; }
+  .bad { color: #b3261e; font-weight: 600; }
+  .note { background: #f7f7f7; border-left: 4px solid #999; padding: .6em .9em; margin: 1em 0; }
+  p { margin: .5em 0; }
+</style>
+</head>
+<body>
+
+<h1>ThreeToks code agent — review</h1>
+<p>Date: 2026-10-15. Reviewer: Lantern (lead), with 8 file reviewers.</p>
+<p>Scope: <code>threetoks/agents/code.py</code>, <code>threetoks/code/*</code>, <code>threetoks/code/edit/*</code>.</p>
+<p>Method: one reviewer per file group, read-only. Each finding has a reproduction (R) or is an inference (I).</p>
+<p>Live test: 6 real requests on <code>qwen3.6:27b</code> through <code>code.SPEC.run</code>, on a copy of the <code>threetoks</code> package with one planted bug.</p>
+
+<h2>0. Status after the rework (same day)</h2>
+<p>Items 1–7 of section 4 are implemented. Design record: <code>docs/DESIGN-coding-agent.md</code> §10.</p>
+<p>A second panel (bug hunter, architecture reviewer) checked the rework. Its 2 blocking bugs and 7 blocking duplications are fixed. The 1000-line files it produced are split.</p>
+<table>
+<tr><th>Live probe (qwen3.6:27b)</th><th>Before</th><th>After</th></tr>
+<tr><td>Unnamed bug report, edit</td><td class="bad">12 calls, 936 out-tok, 126 s, no fix</td><td class="ok">6 calls, 67 out-tok, 25 s, fixed, verified by a repo test</td></tr>
+<tr><td>Named bug, edit</td><td>2 calls, 55 out-tok, written without asking</td><td class="ok">4 calls, 61 out-tok, 19 s, verified, written after <code>y</code></td></tr>
+<tr><td>Compute: sum of primes below 1000</td><td class="bad">no answer</td><td class="ok"><code>76127</code></td></tr>
+<tr><td>Read-only question naming <code>add</code> + a file</td><td class="bad">file rewritten</td><td class="ok">navigate, file untouched</td></tr>
+<tr><td>Script reading a secret env var</td><td class="bad">key printed</td><td class="ok">key not visible</td></tr>
+</table>
+<p><b>Fixed:</b> all of section A except the retrieval whitelist. All of B. In C: truncated bodies, <code>undefined_names</code>, <code>_ensure_entry</code>, crashed-run output, compute print, compute cwd and double run. All of D. In E: identical retry, unchanged-means-move-on, import precheck, ladder re-ask, duplicate system prompt. Routing (F).</p>
+<p><b>Still open (backlog):</b></p>
+<p>Retrieval whitelist bypass (retrieval is off by default and cannot be reached from the TUI).</p>
+<p>Plan parser issues (<code>e.g.</code> regex, markdown plans, <code>-&gt;</code> leak, example not shown to the implementer).</p>
+<p><code>_close_or_repair</code> wipes a body; oscillation guard on the no-assert path; stale run report; <code>verified</code> after cross-blame; <code>signature_matches</code> with comma defaults.</p>
+<p>Memory selector call per code request; docstring-only edits read as "unchanged"; one span per edit; <code>tui.py</code> is still over 1000 lines (it was before this work).</p>
+
+<h2>1. Short answer</h2>
+<p>The core idea is correct for editing: the harness owns the file, the model writes only the changed function, and free checks (ast, import, tests) judge the result.</p>
+<p>The live named edit shows this: 2 model calls, 55 output tokens, 9 seconds, correct fix.</p>
+<p>The exploration part is the weakest part. It is not the strongest part, as the design needs.</p>
+<p>Navigation picks the target with a keyword score and no model call. When the score is wrong, the agent spends hundreds of tokens on generation in the wrong function.</p>
+<p>The live unnamed edit shows this: 12 calls, 936 output tokens, 126 seconds, no fix. The wrong function was chosen for free.</p>
+<p>There is also a safety problem. Model code runs without a sandbox in your working directory, with your environment (API keys). The edit mode can write wrong code to your files and report success.</p>
+<p>Fix safety first. Then change navigation to a flat, ranked symbol menu that the model confirms.</p>
+
+<h2>2. Live test results (qwen3.6:27b)</h2>
+<table>
+<tr><th>Request</th><th>Mode (how routed)</th><th>Calls</th><th>Output tokens</th><th>Time</th><th>Result</th></tr>
+<tr><td>where is detect_family defined?</td><td>navigate (free)</td><td>0</td><td>0</td><td>0.1 s</td><td class="ok">correct</td></tr>
+<tr><td>where is the code that picks the chat template family for a model name?</td><td>navigate (menu)</td><td>1</td><td>3</td><td>5.6 s</td><td class="bad">wrong: shows <code>ChatBackend.chat</code>, <code>OpenAIChatBackend.chat</code> (word "chat" matched a name)</td></tr>
+<tr><td>fix _parse_first_digit in nodes.py: it accepts a digit one larger…</td><td>edit (free)</td><td>2</td><td>55</td><td>9.1 s</td><td class="ok">fixed (not verified: no test)</td></tr>
+<tr><td>the menu answer parser accepts a digit one larger…; fix it</td><td>edit (menu)</td><td>12</td><td>936</td><td>125.8 s</td><td class="bad">failed: free-take chose <code>MenuNode.render</code>; model copied it unchanged 9 times; oscillation guard rejected each copy</td></tr>
+<tr><td>write a function is_palindrome(s) that ignores case and non-letters</td><td>author (free)</td><td>3</td><td>68</td><td>22.2 s</td><td class="ok">correct module</td></tr>
+<tr><td>compute the sum of all primes below 1000</td><td>compute (menu)</td><td>6</td><td>185</td><td>59.4 s</td><td class="bad">no answer: <code>main()</code> returns the sum but does not print it; compute reads only stdout</td></tr>
+</table>
+<p>The failed edit has a clear cost pattern. Free navigation saved about 3 tokens. Generation then spent 9 × 103 tokens on a function that had no bug.</p>
+<p>All 9 generations were identical: retry attempt 2 runs at temperature 0 with the same prompt (finding E1).</p>
+
+<h2>3. Findings by theme</h2>
+<p>P1 = wrong result, data loss, or safety. P2 = likely failure or clear waste. P3 = minor.</p>
+
+<h3>A. Safety</h3>
+<table>
+<tr><th>Sev</th><th>Finding</th><th>Where</th><th>Evidence</th></tr>
+<tr class="p1"><td>P1</td><td>Model code runs with no sandbox: your cwd, full env (API keys), network. Every zero-arg function is smoke-called before you see the code. Compute runs the script a second time. Child processes survive the timeout. The docstrings say "sandboxed", which is false.</td><td><code>gates.py:287</code> <code>execute_capture</code>; <code>agents/code.py:71</code> <code>_script_output</code>; <code>runner.py:63</code></td><td>R: script printed <code>OPENROUTER_API_KEY</code> and cwd; <code>main()</code> wrote a file in the cwd; orphan <code>sleep</code> kept running</td></tr>
+<tr class="p1"><td>P1</td><td>Retrieval whitelist can be bypassed: a function-local <code>import os</code>, <code>__builtins__.exec</code>, <code>__loader__</code>, <code>operator.attrgetter('__import__')</code>, and unscanned module constants all pass. Internet code would run and would also be embedded in your file.</td><td><code>retrieve.py:140-216</code></td><td>R: all forms pass <code>extract_candidates</code>. Note: retrieval is off by default, and the TUI path cannot reach it (C9).</td></tr>
+<tr class="p2"><td>P2</td><td>Interpreter is <code>python3</code> from PATH, not <code>sys.executable</code>. A missing <code>python3</code> crashes the agent. A pyenv shim can pick a different Python.</td><td><code>gates.py:287</code>, <code>code.py:71</code></td><td>R: <code>FileNotFoundError</code> with an empty PATH</td></tr>
+<tr class="p2"><td>P2</td><td><code>python3 -</code> puts the cwd on <code>sys.path</code>. A local <code>random.py</code> breaks correct code, and the innocent method gets the blame.</td><td><code>gates.py:287</code></td><td>R</td></tr>
+<tr class="p2"><td>P2</td><td>Output capture has no size limit (200 MB retained) and uses strict UTF-8 (non-UTF-8 output kills the episode).</td><td><code>gates.py:287-291</code></td><td>R</td></tr>
+</table>
+
+<h3>B. Your files: wrong writes and false success</h3>
+<table>
+<tr><th>Sev</th><th>Finding</th><th>Where</th><th>Evidence</th></tr>
+<tr class="p1"><td>P1</td><td>Read-only questions go to edit mode. When a request names a real file and contains an edit verb, the free pre-route chooses edit. Words like <code>add</code>, <code>update</code> and <code>delete</code> are also common function names. "where is the add function in pkg/mod.py?" rewrote <code>add</code> after 1 model call and reported success.</td><td><code>code/route.py:89-94</code></td><td>R: end to end, file changed on disk</td></tr>
+<tr class="p1"><td>P1</td><td>A class target is replaced by a function. A request that names only a class makes the whole class become <code>def Paginator(): …</code>, and the result is success.</td><td><code>edit/vertical.py:199,626-637</code></td><td>R</td></tr>
+<tr class="p1"><td>P1</td><td>Replace rewrites the signature. <code>async</code>, defaults, <code>*args</code>, keyword-only args, <code>**kwargs</code> and annotations are dropped, and the result is success.</td><td><code>edit/ops.py:85-90</code> <code>def_args</code>; <code>gates.reconstruct</code></td><td>R: <code>async def fetch(url, timeout=30.0, *, retries=3, **opts)</code> → <code>def fetch(url, timeout):</code></td></tr>
+<tr class="p1"><td>P1</td><td>Keyword free-take picks the wrong file or function with no model call. The score adds one point per matched token and does not adjust for file size, so a large file wins. The wrong code is then written and reported as success.</td><td><code>edit/vertical.py:315,394,775-791</code></td><td>R (reviewer), and live (section 2)</td></tr>
+<tr class="p1"><td>P1</td><td>Keyword-only, positional-only, lambda and <code>except … as</code> names are treated as a "missing helper". A useless <code>def</code> is inserted for free, and the result is success.</td><td><code>edit/ops.py:142-153</code> via <code>gates.undefined_names</code></td><td>R</td></tr>
+<tr class="p1"><td>P1</td><td>No <code>try/finally</code> around write → oracle → restore. Ctrl-C or an exception leaves the unverified candidate on disk. The TUI says only "cancelled".</td><td><code>edit/vertical.py:679-691</code></td><td>R</td></tr>
+<tr class="p2"><td>P2</td><td>Restore is not byte-exact. CRLF becomes LF and a trailing newline is added, even when the edit failed.</td><td><code>index.py:112</code>, <code>vertical.py:237,690</code></td><td>R</td></tr>
+<tr class="p2"><td>P2</td><td>Replace skips the free undefined-name check, so code that will raise <code>NameError</code> is written with success.</td><td><code>edit/ops.py:265-273</code></td><td>R</td></tr>
+<tr class="p2"><td>P2</td><td>The docstring is offered as a deletable statement and is free-taken: the docstring is deleted and the bug stays.</td><td><code>edit/ops.py:98-104</code></td><td>R</td></tr>
+<tr class="p2"><td>P2</td><td>A property setter is edited with the getter's signature (same-name defs collide).</td><td><code>edit/ops.py:65-82</code></td><td>R</td></tr>
+<tr class="p2"><td>P2</td><td><code>module_level_names</code> misses <code>try/if/for/with</code> and tuple bindings, so an inserted helper shadows the real one.</td><td><code>edit/ops.py:103-128</code></td><td>R</td></tr>
+<tr class="p2"><td>P2</td><td><code>find_missing_helper</code> crashes on calls with more than 8 arguments (<code>"abcdefgh"[i]</code>).</td><td><code>edit/ops.py:151</code></td><td>R</td></tr>
+<tr class="p3"><td>P3</td><td>The insert-after answer shows the unchanged target, not the inserted helper. Replace removes the docstring.</td><td><code>agents/code.py:86-89</code>, <code>vertical.py:243</code></td><td>R</td></tr>
+</table>
+
+<h3>C. Wrong or misleading results (author and compute)</h3>
+<table>
+<tr><th>Sev</th><th>Finding</th><th>Where</th><th>Evidence</th></tr>
+<tr class="p1"><td>P1</td><td>A body cut by the token cap (<code>done_reason=length</code>) is accepted when it still parses. Example: <code>is_prime</code> without its last <code>return True</code> is accepted.</td><td><code>code/nodes.py:17,100-106</code>; same in <code>GenerateSpanNode</code></td><td>R</td></tr>
+<tr class="p1"><td>P1</td><td><code>undefined_names</code> rejects correct code that uses lambda params, <code>except … as e</code>, keyword-only/varargs in nested defs, <code>match</code> captures, or <code>__file__</code>. The method is then stubbed.</td><td><code>gates.py:207-235</code></td><td>R: <code>max(…, key=lambda kv: kv[1])</code> → stub</td></tr>
+<tr class="p1"><td>P1</td><td><code>_ensure_entry</code> skips <code>_plannable</code>, so a goal like <code>convert(amount, from, to)</code> produces an unparseable module. 17 calls are burned and all methods are stubbed.</td><td><code>code/vertical.py:178-192</code></td><td>R</td></tr>
+<tr class="p1"><td>P1</td><td>When the smoke run crashes, its partial stdout is still shown as "output when run", with no error.</td><td><code>runner.py:125</code>, <code>vertical.py:124</code></td><td>R</td></tr>
+<tr class="p1"><td>P1</td><td>Compute never answers when <code>main()</code> returns its result instead of printing it.</td><td><code>agents/code.py:55-80</code></td><td>Live (section 2)</td></tr>
+<tr class="p2"><td>P2</td><td>Compute runs in the TUI cwd, not in <code>files_root</code>, so <code>open('data.csv')</code> fails even though the router confirmed the file exists.</td><td><code>agents/code.py:71</code></td><td>R</td></tr>
+<tr class="p2"><td>P2</td><td>A body that passed the gates is deleted by a later attempt's gate failure, and the method ends as a stub.</td><td><code>code/vertical.py:283-287</code></td><td>R</td></tr>
+<tr class="p2"><td>P2</td><td>The oscillation guard does not fire on the default (no-assert) path after an unlock. The same crashing body uses a whole repair round.</td><td><code>code/vertical.py:209-222</code></td><td>R</td></tr>
+<tr class="p2"><td>P2</td><td>The run report and output describe an older module when the budget ends during a repair. <code>verified</code> stays True for a method whose example fails.</td><td><code>code/vertical.py:80-112,376-381</code></td><td>R</td></tr>
+<tr class="p2"><td>P2</td><td><code>signature_matches</code> rejects defaults that contain a comma (<code>sep=", "</code>), so that method is always stubbed.</td><td><code>gates.py:202</code></td><td>R</td></tr>
+<tr class="p2"><td>P2</td><td>Environment failures (<code>sys.exit</code>, missing argv or file, more than 5 s) are treated as code bugs and burn blind repairs. The runner timeout is 5 s; the compute timeout is 10 s.</td><td><code>runner.py:27,123</code></td><td>R</td></tr>
+<tr class="p2"><td>P2</td><td>Navigate uses exact name tokens with no ranking, takes the first 3 hits by path, and ignores the file the user named. When the 500-file cap hits, it says "not found".</td><td><code>agents/code.py:100-118</code></td><td>R, and live</td></tr>
+<tr class="p2"><td>P2</td><td>Plan: the <code>e.g.</code> regex also matches <code>table.get</code>, which corrupts contracts. The example value never reaches the implement prompt. Markdown, bullets and camelCase plan lines are dropped; code lines are accepted as methods; <code>-&gt; dict</code> leaks into the contract.</td><td><code>code/plan.py:14-71</code></td><td>R</td></tr>
+<tr class="p2"><td>P2</td><td>A pulled-in retrieved helper silently shadows a planned method. <code>from X import y</code> snippets always fail. The cache key is the bare name, so the entry is served before the anchors are checked.</td><td><code>retrieve.py</code></td><td>R</td></tr>
+<tr class="p3"><td>P3</td><td><code>_ENTRY</code> matches <code>json.dumps(data)</code> in prose, so <code>dumps</code> is planned. Advisory asserts burn attempts. Report counters (<code>attempts</code>, <code>rounds</code>, <code>ok</code> with 0 checks) under-report.</td><td><code>code/vertical.py</code></td><td>R</td></tr>
+</table>
+
+<h3>D. Exploration and navigation at real-repo scale</h3>
+<table>
+<tr><th>Sev</th><th>Finding</th><th>Where</th><th>Evidence</th></tr>
+<tr class="p1"><td>P1</td><td>Navigation reaches only <code>root/&lt;folder&gt;/file.py</code>. The folder level shows immediate subfolders; the file level shows only the <code>.py</code> files directly inside. Anything deeper is unreachable unless the request names the symbol.</td><td><code>edit/nav.py:67-76</code>, <code>vertical.py:354-392</code></td><td>R: <code>pkg/sub/deep/money.py</code> → "navigation abandoned", 0 calls</td></tr>
+<tr class="p2"><td>P2</td><td>The folder level lists <code>.venv</code>, <code>node_modules</code>, <code>build</code> and symlinks, all of which the index excludes. Each one costs a menu and a backtrack.</td><td><code>edit/nav.py:67</code></td><td>R</td></tr>
+<tr class="p2"><td>P2</td><td>The router's path check runs <code>rglob("*")</code> on the whole root with no exclusions: 8.5 s on 282k files before any model call. It counts files in <code>venv/</code> as "your file".</td><td><code>code/route.py:77-86</code></td><td>R</td></tr>
+<tr class="p2"><td>P2</td><td>One non-UTF-8 <code>.py</code> file crashes navigation. BOM and <code>coding:</code> files are silently invisible.</td><td><code>index.py:112</code></td><td>R</td></tr>
+<tr class="p2"><td>P2</td><td>Disambiguation labels are clipped from the right, so in deep paths the only difference (the file name) is cut off.</td><td><code>edit/vertical.py:227-232</code></td><td>R</td></tr>
+<tr class="p3"><td>P3</td><td>The index collects <code>call_sites</code>, but no code uses them. Module-level defs under <code>if</code>/<code>try</code> are not indexed. The 500-file cap is alphabetical and silent.</td><td><code>edit/index.py</code></td><td>R</td></tr>
+</table>
+
+<h3>E. Token waste</h3>
+<table>
+<tr><th>Sev</th><th>Finding</th><th>Where</th><th>Evidence</th></tr>
+<tr class="p2"><td>P2</td><td>Generation retry attempt 2 is byte-identical to attempt 1 (temperature 0, no permutation). The ladder was designed for menus.</td><td><code>policy.py:21,113</code></td><td>R, and live (9 identical generations of 103 tokens)</td></tr>
+<tr class="p2"><td>P2</td><td>When the model returns the target unchanged, that means "no bug here", but the agent only resamples. It should move to another candidate at once.</td><td><code>edit/vertical.py</code> repair ladder</td><td>Live</td></tr>
+<tr class="p2"><td>P2</td><td>Without a test there is no "module imports before the edit" check. A module that cannot import uses the whole ladder, and the reason shown is misleading.</td><td><code>edit/vertical.py:163-171</code></td><td>R: 7 calls burned</td></tr>
+<tr class="p2"><td>P2</td><td>Ladder stage 1 ("re-ask the operation") does nothing when only replace is possible. An escape at that menu discards untried candidates.</td><td><code>edit/vertical.py:492,542,718</code></td><td>R</td></tr>
+<tr class="p2"><td>P2</td><td>Each code request spends a memory-selector call that the code agent never reads. Failure texts are saved as good memories.</td><td><code>tui.py:803,835</code></td><td>R</td></tr>
+<tr class="p3"><td>P3</td><td>The system prompt is sent twice in each generation call (once in the system block, once on line 1 of the user turn).</td><td><code>code/vertical.py:461</code></td><td>R: about 45 extra tokens per call</td></tr>
+</table>
+
+<h3>F. Routing (design tension with the "no regex" standard)</h3>
+<p>The code sub-router uses fixed keyword lists. Spike E7 measured them at 97.9% precision, but only on 69 English requests written by the project, in which no verb was also a function name.</p>
+<p>Under real use, the free route sends read-only questions to edit (B, P1) and to compute. It also sends "fix the build function in parser.py" to author.</p>
+<p>The saving per request is about 3 tokens. The cost of a misroute is a rewritten file. Recommendation: allow free routes only to read-only navigate; send every other case to the 1-token menu.</p>
+<p>The top-level agent description ("write or debug Python code") does not mention navigate or compute, so those requests usually go to <code>web</code> or <code>files</code> (I).</p>
+
+<h2>4. Is the design right for minimum-token coding?</h2>
+<h3>What is right (keep it)</h3>
+<p>The model writes only the changed function, never the whole file. In the live named edit this cost 55 output tokens.</p>
+<p>Free judges (ast, import, a caller test) replace model judgement. This is the strongest idea in the project.</p>
+<p>Generation gets a fresh, stateless prompt and repair resamples blindly (E5b). Menus keep the session log.</p>
+<p>A symbol index replaces reading whole files into the prompt. It is the right base for cheap exploration.</p>
+
+<h3>What is wrong (change it)</h3>
+<p><b>1. The most important decision has no model check.</b> The target ("where") is chosen by a keyword score. The only check afterwards is "the module imports". A wrong target costs much more than a 3-token confirmation menu would.</p>
+<p><b>2. Tree navigation does not scale.</b> A folder → file → def walk needs one decision per level and is cut off at depth 1. A flat ranked list does not depend on depth.</p>
+<p><b>3. Exploration has no call graph.</b> Bugs are often in a function that the named function calls. The index already collects call sites, but nothing uses them.</p>
+<p><b>4. Without a test, "success" means only "it imports".</b> The agent always runs without a test, so the edit result is unverified, yet the file is still written.</p>
+
+<h3>Proposed direction (no code changed yet)</h3>
+<table>
+<tr><th>#</th><th>Change</th><th>Token effect</th></tr>
+<tr><td>1</td><td><b>Safety envelope:</b> <code>sys.executable -I</code>, temp cwd (or <code>files_root</code> for compute, read-only by intent), scrubbed env, rlimits, process-group kill, capped and replace-decoded output. Edit: show a diff and ask before writing; byte-exact backup; <code>try/finally</code> restore.</td><td>0</td></tr>
+<tr><td>2</td><td><b>Flat symbol shortlist:</b> rank all indexed symbols at once by qualname, path, docstring and identifiers, normalized by length (BM25-style). Show the top 8 as one menu: <code>qualname — path — first doc line</code>. This replaces the folder/file/def walk.</td><td>about 3 tokens; depth-independent</td></tr>
+<tr><td>3</td><td><b>Confirm by pointing:</b> show the chosen function and ask one menu: "1 = the problem is in this function / 2 = in a function it calls (list callees from <code>call_sites</code>) / 3 = somewhere else".</td><td>about 3 tokens per hop; saves 100-900 tokens per wrong target</td></tr>
+<tr><td>4</td><td><b>"Unchanged" means "move on":</b> when the generation returns the original function, relocate at once instead of resampling.</td><td>saves up to about 900 tokens (live case)</td></tr>
+<tr><td>5</td><td><b>Free oracle from the repo:</b> find the existing tests that reference the target (call sites in <code>tests/</code>), run them before and after the edit, and use them as the trusted check.</td><td>0 model tokens</td></tr>
+<tr><td>6</td><td><b>Generation hygiene:</b> reject output cut by the token cap; skip the identical temperature-0 retry; prefill the original <code>def</code> line exactly (keeps async, defaults, annotations); keep the docstring.</td><td>saves about 1 wasted generation per failure</td></tr>
+<tr><td>7</td><td><b>Routing:</b> free routes only to navigate; edit and compute always go through the menu (or the confirmation in #1).</td><td>+3 tokens on some requests</td></tr>
+</table>
+
+<div class="note">
+<p>Point 2 also matches your "no regex for semantic choice" standard better than the current code. The lexical score only orders the list. The model makes the choice.</p>
+<p>Author mode (plan → per-method generation) was designed for 1.5B models. On 27B models, the plan parser is too strict for markdown output and falls back to a single <code>main()</code> (C, plan row). This should be measured before more is built on the plan step.</p>
+</div>
+
+<h2>5. Hypotheses checked and refuted</h2>
+<p>Path traversal in edit: not possible. Paths come only from the index; symlinks are excluded.</p>
+<p>Step budget and termination: bounded in both verticals.</p>
+<p>Traceback blame line mapping: correct for nested defs, lambdas, chained exceptions, and multi-line strings.</p>
+<p>Stop sequences: they do not cut nested defs, decorators or indented prints.</p>
+<p>The closed think block (today's fix) sits correctly before every generation prefill.</p>
+<p>A wrong trusted anchor from <code>plan.py</code>: not possible (plan asserts are advisory only).</p>
+<p>Decorators are kept on replace.</p>
+
+<h2>6. Evidence locations</h2>
+<p>Live probe: <code>/tmp/3toks_probe/probe.py</code>, results in <code>/tmp/3toks_probe/results.json</code>.</p>
+<p>Reviewer reproductions: <code>/tmp/3toks_review_router/</code>, <code>/tmp/3toks_review_codeagent/</code>, <code>/tmp/3toks_review_vert/</code>, <code>/tmp/3toks_review_gates/</code>, <code>/tmp/3toks_review_retrieve/</code>, <code>/tmp/3toks_review_editvert/</code>, <code>/tmp/3toks_review_spanner/</code>.</p>
+
+</body>
+</html>

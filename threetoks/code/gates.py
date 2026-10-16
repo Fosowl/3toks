@@ -1,20 +1,37 @@
 """Deterministic gates: the free judge that never calls the model.
 
-Every check here is ast analysis or a sandboxed subprocess — zero tokens.
+Every check here is ast analysis or a child process run through
+``threetoks.code.sandbox`` — zero tokens. That child gets isolated
+interpreter flags, a temporary cwd, an allowlisted environment, a
+timeout and (POSIX) process-group kill and resource limits; it can still
+use the network and the user's files, so it is not a security sandbox.
 The undefined-name gate is deliberately conservative (it treats every
-Store-context name anywhere in the body as defined) so it never rejects
-correct code; it only catches a body that references a name that exists
+binding anywhere in the body as defined) so it never rejects correct
+code; it only catches a body that references a name that exists
 nowhere. See docs/DESIGN-coding-agent.md §3.
 """
 import ast
 import builtins
-import subprocess
+from pathlib import Path
+
+from threetoks.code import sandbox
 
 BODY_INDENT = "    "
 _LEADING_WS = " \t"
-SUBPROCESS_TIMEOUT_S = 5
+SUBPROCESS_TIMEOUT_S = sandbox.DEFAULT_TIMEOUT_S
+TIMEOUT_MESSAGE = "TimeoutExpired"
 _BUILTINS = frozenset(dir(builtins))
+_KNOWN_DUNDERS = frozenset({"__file__", "__name__", "__doc__",
+                            "__builtins__"})
+_COMPILE_ERRORS = (SyntaxError, ValueError, OverflowError, RecursionError,
+                   MemoryError)
 _ERROR_MARKER = "Error:"
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+_TYPE_PARAMS = tuple(getattr(ast, kind) for kind in
+                     ("TypeVar", "ParamSpec", "TypeVarTuple")
+                     if hasattr(ast, kind))
+_NAMED_BINDERS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                  ast.ExceptHandler, ast.MatchAs, ast.MatchStar) + _TYPE_PARAMS
 
 
 def docstring(text: str, indent: str = BODY_INDENT) -> str:
@@ -28,11 +45,22 @@ def docstring(text: str, indent: str = BODY_INDENT) -> str:
 
 
 def parses(source: str) -> bool:
-    """True when source is syntactically valid Python (null-byte safe)."""
+    """True when source compiles as a Python module (null-byte safe).
+
+    The vertical and the render invariant use this before they store
+    code. compile() is stricter than ast.parse: it also rejects
+    ``return`` outside a function and bad ``nonlocal``. Nothing runs.
+
+    Args:
+        source: module text, from the caller.
+
+    Returns:
+        bool: True when compile() succeeds.
+    """
     try:
-        ast.parse(source)
+        compile(source, "<gate>", "exec", dont_inherit=True)
         return True
-    except (SyntaxError, ValueError):
+    except _COMPILE_ERRORS:
         return False
 
 
@@ -207,42 +235,87 @@ def signature_matches(source: str, name: str, args: str) -> bool:
 def undefined_names(source: str, allowed: set[str]) -> list[str]:
     """Load-context names that are defined nowhere reachable (conservative).
 
-    Import statements bind names too (``import requests`` anywhere in the
-    body defines ``requests``) — a live gemma run had every legitimate
-    weather implementation falsely rejected because this gate only saw
-    ``ast.Name`` stores and missed import aliases entirely.
+    The implement gate and the edit splice gate call this to reject a
+    body that uses a name that exists nowhere. Every binding anywhere in
+    the tree counts as defined: assignments, all argument kinds of defs
+    and lambdas, def/class names, imports, ``except ... as`` names,
+    match captures, type parameters, the module dunders and
+    ``__builtins__``.
+
+    Args:
+        source: function or module text, from the caller.
+        allowed: extra known names, e.g. sibling method names.
+
+    Returns:
+        list[str]: sorted unknown names; [] when source does not parse.
     """
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
         return []
-    defined = {n.id for n in ast.walk(tree)
-               if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
-    defined |= {a.arg for n in ast.walk(tree)
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                for a in n.args.args}
-    # def/class statements bind their names without an ast.Name node —
-    # a nested helper (`def say_hello(): ...` then `say_hello()`) was
-    # falsely flagged undefined on a live run and stubbed correct code.
-    defined |= {n.name for n in ast.walk(tree)
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                  ast.ClassDef))}
-    defined |= _import_bound_names(tree)
-    known = defined | _BUILTINS | allowed
+    known = _BUILTINS | _KNOWN_DUNDERS | allowed
+    for node in ast.walk(tree):
+        known = known | _names_bound_by(node)
     loads = {n.id for n in ast.walk(tree)
              if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
     return sorted(loads - known)
 
 
-def _import_bound_names(tree: ast.AST) -> set[str]:
-    """Every name an import statement binds, anywhere in the tree."""
+def _names_bound_by(node: ast.AST) -> set[str]:
+    """The names that one ast node binds in its scope.
+
+    undefined_names calls this for every node of the tree.
+
+    Args:
+        node: any ast node, from ast.walk.
+
+    Returns:
+        set[str]: bound names; empty for a node that binds nothing.
+    """
     bound: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            bound |= {a.asname or a.name.split(".")[0] for a in node.names}
-        elif isinstance(node, ast.ImportFrom):
-            bound |= {a.asname or a.name for a in node.names if a.name != "*"}
+    if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+        bound.add(node.id)
+    if isinstance(node, _SCOPES):
+        bound |= _argument_names(node.args)
+    if isinstance(node, _NAMED_BINDERS) and node.name:
+        bound.add(node.name)
+    if isinstance(node, ast.MatchMapping) and node.rest:
+        bound.add(node.rest)
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        bound |= _import_bound_names(node)
     return bound
+
+
+def _argument_names(spec: ast.arguments) -> set[str]:
+    """Every parameter name of a def or lambda, of all kinds.
+
+    _names_bound_by calls this for FunctionDef, AsyncFunctionDef, Lambda.
+
+    Args:
+        spec: the node's ``args`` field.
+
+    Returns:
+        set[str]: positional-only, normal, *args, keyword-only, **kwargs.
+    """
+    params = [*spec.posonlyargs, *spec.args, *spec.kwonlyargs,
+              spec.vararg, spec.kwarg]
+    return {param.arg for param in params if param is not None}
+
+
+def _import_bound_names(node: ast.Import | ast.ImportFrom) -> set[str]:
+    """Every name one import statement binds.
+
+    _names_bound_by calls this for Import and ImportFrom nodes.
+
+    Args:
+        node: the import statement.
+
+    Returns:
+        set[str]: alias or first dotted part; star imports bind nothing.
+    """
+    if isinstance(node, ast.Import):
+        return {a.asname or a.name.split(".")[0] for a in node.names}
+    return {a.asname or a.name for a in node.names if a.name != "*"}
 
 
 def ensure_docstring(source: str, contract: str) -> str:
@@ -266,33 +339,54 @@ def ensure_docstring(source: str, contract: str) -> str:
     return injected if parses(injected) else source
 
 
-def execute(source: str) -> tuple[bool, str]:
-    """Execute source in a fresh python subprocess; (ok, full stderr).
+def execute(source: str, cwd: Path | None = None, *,
+            interpreter: str | None = None) -> tuple[bool, str]:
+    """Execute source in an isolated child process; (ok, full stderr).
 
-    The runner's blame mapping needs the whole traceback (its ``line N``
-    references), so this returns stderr untrimmed; ``_run`` keeps the
-    single-line view the per-method gates report.
+    The vertical, the runner and the oracle call this. The runner's
+    blame mapping needs the whole traceback (its ``line N`` references),
+    so this returns stderr untrimmed; ``_run`` keeps the single-line view
+    the per-method gates report.
+
+    Args:
+        source: module text plus check statements, from the caller.
+        cwd: working directory for the child; None gives a temp dir.
+        interpreter: python to run; None uses sys.executable.
+
+    Returns:
+        tuple[bool, str]: success flag and the full stderr.
     """
-    ok, _, stderr = execute_capture(source)
+    ok, _, stderr = execute_capture(source, cwd, interpreter=interpreter)
     return ok, stderr
 
 
-def execute_capture(source: str) -> tuple[bool, str, str]:
-    """Execute source in a fresh python subprocess; (ok, stdout, stderr).
+def execute_capture(source: str, cwd: Path | None = None, *,
+                    interpreter: str | None = None) -> tuple[bool, str, str]:
+    """Execute source in an isolated child process; (ok, stdout, stderr).
 
-    stdout is what the user's delivered script would print — the runner
-    surfaces it so a run's output is shown, never silently discarded.
+    The runner calls this so that what the delivered script prints is
+    shown, never silently discarded. The run goes through
+    ``sandbox.run_python`` (isolated flags, allowlisted environment,
+    SUBPROCESS_TIMEOUT_S limit).
+
+    Args:
+        source: module text plus check statements, from the caller.
+        cwd: working directory for the child; None gives a temp dir.
+        interpreter: python to run (the project python for user code);
+            None uses the harness interpreter sys.executable.
+
+    Returns:
+        tuple[bool, str, str]: success flag, stdout, stderr; a timeout
+        gives stderr TIMEOUT_MESSAGE.
     """
-    try:
-        done = subprocess.run(["python3", "-"], input=source, text=True,
-                              capture_output=True, timeout=SUBPROCESS_TIMEOUT_S)
-    except subprocess.TimeoutExpired:
-        return False, "", "TimeoutExpired"
-    return done.returncode == 0, done.stdout, done.stderr
+    run = sandbox.run_python(source, cwd, SUBPROCESS_TIMEOUT_S, interpreter)
+    if run.timed_out:
+        return False, run.stdout, TIMEOUT_MESSAGE
+    return run.ok, run.stdout, run.stderr
 
 
 def _run(source: str) -> tuple[bool, str]:
-    """Execute source in a fresh python subprocess; (ok, first_error)."""
+    """Execute source in an isolated child process; (ok, first_error)."""
     ok, stderr = execute(source)
     return ok, first_error(stderr)
 
@@ -386,4 +480,11 @@ if __name__ == "__main__":
     assert not import_ok("import nonexistent_pkg_xyz\n")[0]
     ran_ok, out, err = execute_capture("print('hello')\n")
     assert ran_ok and out == "hello\n" and err == "", (ran_ok, out, err)
+    for bound in ("f = lambda kv: kv[1]\n",
+                  "try:\n    pass\nexcept Exception as err:\n    print(err)\n",
+                  "def f():\n    def g(*, k):\n        return k\n",
+                  "match 1:\n    case [x, *rest]:\n        print(x, rest)\n",
+                  "print(__file__, __name__, __doc__)\n"):
+        assert undefined_names(bound, set()) == [], bound
+    assert not parses("return 1\n")                     # compile is stricter
     print("smoke OK")

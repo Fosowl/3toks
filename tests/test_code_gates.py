@@ -4,6 +4,7 @@ run_asserts / import_ok shell out to a real python3 subprocess (that is the
 gate's design); the modules under test are tiny so these stay fast.
 """
 import ast
+import os
 import unittest
 
 from threetoks.code import gates
@@ -165,6 +166,22 @@ class ExecuteTest(unittest.TestCase):
     def test_success_returns_ok(self):
         self.assertTrue(gates.execute("x = 1\n")[0])
 
+    def test_timeout_reports_timeout_expired(self):
+        original = gates.SUBPROCESS_TIMEOUT_S
+        gates.SUBPROCESS_TIMEOUT_S = 0.5
+        try:
+            ok, stderr = gates.execute("import time\ntime.sleep(10)\n")
+        finally:
+            gates.SUBPROCESS_TIMEOUT_S = original
+        self.assertFalse(ok)
+        self.assertEqual(stderr, gates.TIMEOUT_MESSAGE)
+
+    def test_default_cwd_is_not_the_parent_cwd(self):
+        ok, stdout, _ = gates.execute_capture(
+            "import os\nprint(os.getcwd())\n")
+        self.assertTrue(ok)
+        self.assertNotEqual(stdout.strip(), os.getcwd())
+
 
 class SignatureMatchesTest(unittest.TestCase):
     _SRC = "def f(a, b):\n    return a + b\n"
@@ -215,6 +232,45 @@ class UndefinedNamesTest(unittest.TestCase):
 
     def test_empty_list_on_syntax_error(self):
         self.assertEqual(gates.undefined_names("def f(:\n bad", set()), [])
+
+    def test_every_argument_kind_and_binding_form_is_known(self):
+        # Review regressions: each of these correct bodies was rejected.
+        cases = {
+            "lambda param": "def f(d):\n"
+                            "    return sorted(d.items(), key=lambda kv: kv[1])\n",
+            "except as": "def f():\n    try:\n        return 1\n"
+                         "    except ValueError as err:\n        return str(err)\n",
+            "kw-only in nested def": "def f():\n    def g(a, /, b, *rest, k,"
+                                     " **extra):\n"
+                                     "        return a, b, rest, k, extra\n"
+                                     "    return g\n",
+            "match capture": "def f(p):\n    match p:\n"
+                             "        case [x, *others]:\n"
+                             "            return x, others\n"
+                             "        case {'k': v, **more}:\n"
+                             "            return v, more\n"
+                             "        case Point(x=px) as whole:\n"
+                             "            return px, whole\n",
+            "module dunders": "def f():\n    return __file__, __name__, __doc__\n",
+            "__builtins__": "def f():\n    return __builtins__\n",
+        }
+        for label, source in cases.items():
+            self.assertEqual(gates.undefined_names(source, {"Point"}), [],
+                             label)
+
+    def test_lambda_parameter_does_not_hide_a_real_unknown(self):
+        src = "def f(xs):\n    return map(lambda x: x + offset, xs)\n"
+        self.assertEqual(gates.undefined_names(src, set()), ["offset"])
+
+
+class ParsesTest(unittest.TestCase):
+    def test_valid_module_parses(self):
+        self.assertTrue(gates.parses("def f():\n    return 1\n"))
+
+    def test_compile_only_errors_are_rejected(self):
+        for source in ("return 1\n", "def f():\n    nonlocal x\n",
+                       "x = 1\x00\n"):
+            self.assertFalse(gates.parses(source), repr(source))
 
 
 class EnsureDocstringTest(unittest.TestCase):

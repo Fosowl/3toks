@@ -14,7 +14,7 @@ authors = [{ name = "Martin Legrand" }]
 dependencies = []
 
 [project.optional-dependencies]
-web = ["requests", "beautifulsoup4", "markdownify"]
+web = ["curl_cffi", "beautifulsoup4", "markdownify"]
 browser = ["selenium>=4.6"]
 stt = ["vosk", "sounddevice"]
 tts = ["piper-tts", "sounddevice", "numpy"]

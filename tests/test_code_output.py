@@ -1,9 +1,9 @@
 """The delivered script's stdout reaches the user (runner -> result -> TUI).
 
-The runner's zero-arg smoke call executes exactly what the ``__main__``
-guard will; these tests pin that its captured stdout flows into the
-result payload and renders as an output section in the result panel,
-instead of being silently discarded.
+The runner's smoke call of the script entry executes exactly what the
+``__main__`` guard will; these tests pin that the stdout of a PASSED
+entry run flows into the result payload and renders as an output
+section in the result panel, and that a crashed run reports nothing.
 """
 import unittest
 
@@ -64,6 +64,45 @@ class VerticalOutputTest(unittest.TestCase):
         policy = Policy(backend, PolicyConfig(ModelSpec("m", FAMILY_CHATML)))
         outcome = run_episode(vertical, policy, max_steps=20)
         self.assertEqual(outcome["output"], "")
+
+    def test_crashed_entry_prints_are_not_reported_as_output(self):
+        backend = QueueBackend(["main(): print then crash",
+                                "print('partial')\n    return 1 // 0"])
+        vertical = CodeVertical("print then crash", gen_tests=False)
+        policy = Policy(backend, PolicyConfig(ModelSpec("m", FAMILY_CHATML)))
+        outcome = run_episode(vertical, policy, max_steps=20)
+        self.assertFalse(outcome["run"]["ok"])
+        self.assertEqual(outcome["output"], "")
+
+    def test_echo_result_shows_the_returned_value(self):
+        backend = QueueBackend(["main(): the answer", "return 6 * 7"])
+        vertical = CodeVertical("compute the answer", gen_tests=False,
+                                echo_result=True)
+        policy = Policy(backend, PolicyConfig(ModelSpec("m", FAMILY_CHATML)))
+        outcome = run_episode(vertical, policy, max_steps=20)
+        self.assertEqual(outcome["output"], "42\n")
+        self.assertIn("print(_entry_result)", outcome["answer"])
+
+    def test_without_echo_a_returned_value_is_not_output(self):
+        backend = QueueBackend(["main(): the answer", "return 6 * 7"])
+        vertical = CodeVertical("compute the answer", gen_tests=False)
+        policy = Policy(backend, PolicyConfig(ModelSpec("m", FAMILY_CHATML)))
+        outcome = run_episode(vertical, policy, max_steps=20)
+        self.assertEqual(outcome["output"], "")
+        self.assertTrue(outcome["answer"].endswith("    main()\n"))
+
+    def test_echo_mode_adds_main_when_the_plan_has_no_runnable_entry(self):
+        # Live qwen3.6 plan: only sum_primes(limit) — no answer printed.
+        backend = QueueBackend(["sum_below(limit): sum of 0..limit-1",
+                                "return sum(range(limit))",
+                                "return sum_below(10)"])
+        vertical = CodeVertical("compute the sum of numbers below 10",
+                                gen_tests=False, echo_result=True)
+        policy = Policy(backend, PolicyConfig(ModelSpec("m", FAMILY_CHATML)))
+        outcome = run_episode(vertical, policy, max_steps=20)
+        self.assertEqual([m["name"] for m in outcome["methods"]],
+                         ["sum_below", "main"])
+        self.assertEqual(outcome["output"], "45\n")
 
 
 class PanelOutputTest(unittest.TestCase):

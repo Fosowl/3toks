@@ -101,15 +101,16 @@ Core (orchestrator-written, panel-reviewed):
 - `backend/` — ModelSpec families "r1"/"chatml", raw-prompt builders,
   OllamaBackend (stdlib urllib).
 - `config.py` + `config.ini` — [llm] model/host/vote_k, [browser]
-  mode=http|plain|stealth + visible, [search], [research], [files].
+  mode=http|plain + visible, [search], [research], [files].
   Type-safe fallbacks, THREETOKS_CONFIG env override.
 
 Web vertical (`web/`): `search.py` (SearxngProvider with per-query engine
 rotation, BingHtmlProvider, DdgHtmlProvider, FallbackProvider chain that
 retries on EMPTY results, 5s pacing, bounded cache that never caches empty),
-`fetch.py` (HTTP), `browser.py` (plain Selenium), `stealth_browser.py`
-(agenticSeek port: undetected-chromedriver + selenium_stealth, one reused
-driver, visible option — pulls GitHub READMEs where HTTP gets bot walls),
+`fetch.py` (HTTP via curl_cffi Chrome impersonation), `browser.py` (Chrome
+via Selenium, automation switches hidden, persistent profile in
+`chrome_profile.py`), `blockpage.py` (bot-check page detection; a blocked
+host is skipped for the session — DESIGN.md §20),
 `textify.py` (HTML→sentences: markdownify, junk deny-list incl. forum
 chrome/timestamps/"signed in", glued-camelCase soup filter, table-pipe
 cleanup, dedupe), `notes.py` (NoteStore: verbatim + provenance, near-dup
@@ -153,8 +154,8 @@ design in docs/DESIGN-coding-agent.md.
 TUI (`tui.py`, `python3 -m threetoks`): cyberpunk REPL, live ticker (one
 line per decision incl. per-pick resolved sentences, judge/curate/requery
 tags), wrapped no-trim result panels, `WEB · UNVERIFIED` badge when
-judges exhausted, /help /agents /deep N /browser http|plain|stealth
-[on-screen] /model /quit. One-shot: `python3 -m threetoks.cli "q" [--rounds N]`.
+judges exhausted, /help /agents /deep N /browser http|plain
+[on-screen|headless] /model /quit. One-shot: `python3 -m threetoks.cli "q" [--rounds N]`.
 Eval: `python3 eval/run_eval.py` (10 tasks, scores retrieval vs answer
 separately; historical: 6-7/10 answers, ~11s/task).
 
@@ -193,11 +194,12 @@ sections too).
 - **Search fragility is the #1 practical limiter**: searxng engine
   suspensions now 5min (was 24h) and rotation+Bing+DDG fallbacks exist,
   but heavy automated use gets the residential IP CAPTCHA'd everywhere;
-  HTTPS_PROXY env is honored by all requests paths. Stealth browser is the
-  reliable fetch path; a BrowserSearchProvider (search THROUGH stealth
-  Chrome) is designed-but-unbuilt and would close the class.
+  HTTPS_PROXY env is honored by curl_cffi (trust_env). The `plain`
+  browser in a visible window is the reliable fetch path (the user can
+  solve a CAPTCHA); a BrowserSearchProvider (search THROUGH Chrome) is
+  designed-but-unbuilt and would close the class.
 - searxng runs via infra/searxng (docker compose, container left running).
-  Machine: stale homebrew chromedriver v139 (uc bypasses it; the plain
+  Machine: stale homebrew chromedriver on PATH (the plain
   browser masks it out of PATH at startup so selenium-manager resolves a
   matching driver); Chrome BETA 151 installed, not stable.
 - Advisory nits (reviewed, logged, unfixed): TUI float() strictness on
@@ -208,7 +210,7 @@ sections too).
 
 ## 6. Next-step queue (in rough priority)
 
-1. BrowserSearchProvider — search via stealth Chrome (kills the IP-block
+1. BrowserSearchProvider — search via Chrome (kills the IP-block
    class). Then re-run the 10-task eval + the user's live questions
    ("what is agenticSeek", pizza-in-Antibes, model comparisons).
 2. Digest view — top-K scored sentences page-wide instead of

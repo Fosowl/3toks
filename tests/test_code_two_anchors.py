@@ -88,7 +88,7 @@ class RunnerMultiAnchorTest(unittest.TestCase):
                 self.body, self.examples = body, list(examples)
 
         checks = runner.collect_checks(
-            [_M("f", "n", "x", ["f(1) == 2", "f(0) == 1"])])
+            [_M("f", "n", "x", ["f(1) == 2", "f(0) == 1"])], None)
         self.assertEqual([c.statement for c in checks],
                          ["assert f(1) == 2", "assert f(0) == 1"])
 

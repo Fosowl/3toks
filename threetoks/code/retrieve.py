@@ -314,15 +314,26 @@ class Retriever:
             return []
 
     def _fetch(self, url: str) -> str | None:
-        import requests                              # web extra, lazy
-        from threetoks.web.search import BROWSER_USER_AGENT
+        """Download one search hit as text, or give None when it fails.
+
+        Retrieval-as-repair uses this to read code pages found by search.
+        ``_fetched_texts`` calls it with a hit URL or its raw GitHub URL.
+        It GETs the URL with an impersonated Chrome fingerprint.
+
+        Args:
+            url (str): the page or raw-file URL to download.
+
+        Returns:
+            str | None: the response text, or None on a network/HTTP error.
+        """
+        from curl_cffi import requests as curl_requests  # web extra, lazy
+        from threetoks.web.fetch import IMPERSONATE
         try:
-            response = requests.get(
-                url, headers={"User-Agent": BROWSER_USER_AGENT},
-                timeout=FETCH_TIMEOUT_S)
+            response = curl_requests.get(url, impersonate=IMPERSONATE,
+                                         timeout=FETCH_TIMEOUT_S)
             response.raise_for_status()
             return response.text
-        except Exception:
+        except (curl_requests.exceptions.RequestException, UnicodeDecodeError):
             return None
 
     def _code_blocks(self, url: str, text: str) -> list[str]:

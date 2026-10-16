@@ -39,6 +39,7 @@ class FakeServices:
     def __init__(self):
         self.max_research_rounds = 3
         self.fetch_page = None
+        self.blocked_hosts = set()
 
 
 def make_state(**overrides):
@@ -660,18 +661,26 @@ class SlashCommandTest(unittest.TestCase):
         with mock.patch.object(tui, "_make_browser_fetcher",
                                return_value=fake) as maker:
             reply = tui.handle_command(state, "/browser plain")
-        maker.assert_called_once_with("plain", False)
+        maker.assert_called_once_with(False)
         self.assertIs(state.fetcher, fake)
         self.assertEqual(state.services.fetch_page, fake.fetch_page)
         self.assertIn("plain", reply)
 
-    def test_browser_stealth_on_screen_passes_visible(self):
+    def test_browser_on_screen_passes_visible(self):
         state = make_state(enabled=False)
         fake = _RecordingFetcher()
         with mock.patch.object(tui, "_make_browser_fetcher",
                                return_value=fake) as maker:
-            tui.handle_command(state, "/browser stealth on-screen")
-        maker.assert_called_once_with("stealth", True)
+            tui.handle_command(state, "/browser plain on-screen")
+        maker.assert_called_once_with(True)
+
+    def test_browser_switch_gives_blocked_sites_a_fresh_chance(self):
+        state = make_state(enabled=False)
+        state.services.blocked_hosts.add("walled.example")
+        with mock.patch.object(tui, "_make_browser_fetcher",
+                               return_value=_RecordingFetcher()):
+            tui.handle_command(state, "/browser plain on-screen")
+        self.assertEqual(state.services.blocked_hosts, set())
 
     def test_browser_visibility_defaults_from_the_config(self):
         # [browser] visible = true must show the window without the user
@@ -682,7 +691,7 @@ class SlashCommandTest(unittest.TestCase):
         with mock.patch.object(tui, "_make_browser_fetcher",
                                return_value=fake) as maker:
             tui.handle_command(state, "/browser plain")
-        maker.assert_called_once_with("plain", True)
+        maker.assert_called_once_with(True)
 
     def test_browser_headless_overrides_a_visible_config(self):
         state = make_state(enabled=False)
@@ -690,8 +699,8 @@ class SlashCommandTest(unittest.TestCase):
         fake = _RecordingFetcher()
         with mock.patch.object(tui, "_make_browser_fetcher",
                                return_value=fake) as maker:
-            tui.handle_command(state, "/browser stealth headless")
-        maker.assert_called_once_with("stealth", False)
+            tui.handle_command(state, "/browser plain headless")
+        maker.assert_called_once_with(False)
 
     def test_browser_switch_closes_previous_fetcher(self):
         state = make_state(enabled=False)
@@ -699,7 +708,7 @@ class SlashCommandTest(unittest.TestCase):
         with mock.patch.object(tui, "_make_browser_fetcher",
                                side_effect=[first, second]):
             tui.handle_command(state, "/browser plain")
-            tui.handle_command(state, "/browser stealth")
+            tui.handle_command(state, "/browser plain headless")
         self.assertEqual(first.closed, 1)
         self.assertIs(state.fetcher, second)
 
@@ -707,7 +716,7 @@ class SlashCommandTest(unittest.TestCase):
         state = make_state(enabled=False)
         with mock.patch.object(tui, "_make_browser_fetcher",
                                side_effect=RuntimeError("no chrome")):
-            reply = tui.handle_command(state, "/browser stealth")
+            reply = tui.handle_command(state, "/browser plain")
         self.assertIn("unavailable", reply)
         self.assertIsNone(state.fetcher)
 
@@ -756,12 +765,12 @@ class InitialFetcherFallbackTest(unittest.TestCase):
         lines = []
         with mock.patch.object(tui, "_make_browser_fetcher",
                                side_effect=RuntimeError("no chromedriver")):
-            fetcher = tui._initial_fetcher(self._config("stealth"), services,
+            fetcher = tui._initial_fetcher(self._config("plain"), services,
                                            lines.append)
         self.assertIsNone(fetcher)
         self.assertIsNotNone(services.fetch_page)   # degraded to http
         [notice] = lines
-        self.assertIn("stealth unavailable", notice)
+        self.assertIn("plain unavailable", notice)
         self.assertIn("no chromedriver", notice)
 
     def test_http_mode_stays_quiet(self):
@@ -939,6 +948,55 @@ class ModelSwapOptionalAgentsTest(unittest.TestCase):
         chat.llm_provider = "openrouter"
         self.assertNotIn("unknown template family",
                          tui.handle_command(chat, "/model gpt-4o-mini"))
+
+
+class ConfirmEditTest(unittest.TestCase):
+    """The code agent's edit confirm: only an explicit yes applies."""
+
+    DIFF = "--- a/m.py\n+++ b/m.py\n@@ -1 +1 @@\n-x = 1\n+x = 2"
+
+    def _confirm(self, reader):
+        printed, prompts = [], []
+
+        def read_input(prompt):
+            prompts.append(prompt)
+            return reader()
+
+        confirm = tui.make_confirm_edit(make_state(enabled=False),
+                                        read_input, printed.append)
+        return confirm("m.py", self.DIFF), printed, prompts
+
+    def test_yes_applies_and_the_diff_is_shown_first(self):
+        answer, printed, prompts = self._confirm(lambda: " Y ")
+        self.assertTrue(answer)
+        self.assertIn("+x = 2", printed[0])
+        self.assertIn("apply this edit to m.py? [y/N]", prompts[0])
+
+    def test_empty_reply_declines(self):
+        self.assertFalse(self._confirm(lambda: "")[0])
+
+    def test_eof_and_ctrl_c_decline(self):
+        for error in (EOFError, KeyboardInterrupt):
+            def raise_it(error=error):
+                raise error
+            self.assertFalse(self._confirm(raise_it)[0], error)
+
+    def test_long_diff_is_clipped_with_a_count(self):
+        diff = "\n".join(f"+line {n}" for n in
+                         range(tui.CONFIRM_DIFF_MAX_LINES + 3))
+        shown = []
+        confirm = tui.make_confirm_edit(make_state(enabled=False),
+                                        lambda prompt: "n", shown.append)
+        self.assertFalse(confirm("m.py", diff))
+        self.assertIn("3 more lines", shown[0])
+        self.assertNotIn(f"+line {tui.CONFIRM_DIFF_MAX_LINES}", shown[0])
+
+    def test_repl_confirm_reads_from_the_repl_input(self):
+        state = make_state(enabled=False)
+        replies = iter(["/quit", "yes"])
+        tui.repl(state, read_input=lambda prompt: next(replies),
+                 sink=[].append)
+        self.assertTrue(state.services.confirm_edit("m.py", self.DIFF))
 
 
 if __name__ == "__main__":
