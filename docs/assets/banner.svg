@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 400" width="1280" height="400" role="img" aria-labelledby="t d">
+  <title id="t">ThreeToks</title>
+  <desc id="d">A neon flying fish leaps from a night sea in front of a striped sun. Its wing fins are drawn as a tree of decisions.</desc>
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0B1020"/>
+      <stop offset="1" stop-color="#16203A"/>
+    </linearGradient>
+    <linearGradient id="sun" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8E6CFF"/>
+      <stop offset="1" stop-color="#FF4FA3"/>
+    </linearGradient>
+    <linearGradient id="fish" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#E9FFFB"/>
+      <stop offset="0.45" stop-color="#57E0CB"/>
+      <stop offset="1" stop-color="#2BA8D8"/>
+    </linearGradient>
+    <linearGradient id="ink" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#33E6F2"/>
+      <stop offset="0.55" stop-color="#9B8CFF"/>
+      <stop offset="1" stop-color="#FF5CAB"/>
+    </linearGradient>
+    <linearGradient id="sea" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#57E0CB" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#57E0CB" stop-opacity="0.08"/>
+    </linearGradient>
+    <clipPath id="above-sea"><rect x="0" y="0" width="1280" height="302"/></clipPath>
+    <mask id="stripes">
+      <rect x="0" y="0" width="1280" height="400" fill="#fff"/>
+      <rect x="0" y="236" width="1280" height="4" fill="#000"/>
+      <rect x="0" y="256" width="1280" height="6" fill="#000"/>
+      <rect x="0" y="276" width="1280" height="8" fill="#000"/>
+    </mask>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="4" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="400" rx="18" fill="url(#sky)"/>
+
+  <!-- stars -->
+  <g fill="#EDF4FF" opacity="0.7">
+    <circle cx="60" cy="48" r="1.6"/><circle cx="150" cy="96" r="1.2"/><circle cx="470" cy="40" r="1.5"/>
+    <circle cx="560" cy="110" r="1.1"/><circle cx="980" cy="52" r="1.4"/><circle cx="1180" cy="90" r="1.6"/>
+    <circle cx="1100" cy="30" r="1.1"/><circle cx="40" cy="170" r="1.3"/><circle cx="1230" cy="200" r="1.2"/>
+  </g>
+
+  <!-- striped sun -->
+  <g clip-path="url(#above-sea)">
+    <circle cx="300" cy="232" r="150" fill="url(#sun)" opacity="0.9" mask="url(#stripes)"/>
+  </g>
+
+  <!-- sea: horizon glow and wave lines -->
+  <rect x="0" y="302" width="1280" height="2" fill="#57E0CB" opacity="0.9"/>
+  <g fill="none" stroke="url(#sea)" stroke-linecap="round">
+    <path d="M0 322 Q40 312 80 322 T160 322 T240 322 T320 322 T400 322 T480 322 T560 322 T640 322 T720 322 T800 322 T880 322 T960 322 T1040 322 T1120 322 T1200 322 T1280 322" stroke-width="2.4"/>
+    <path d="M0 344 Q50 332 100 344 T200 344 T300 344 T400 344 T500 344 T600 344 T700 344 T800 344 T900 344 T1000 344 T1100 344 T1200 344 T1300 344" stroke-width="2" opacity="0.7"/>
+    <path d="M0 366 Q60 354 120 366 T240 366 T360 366 T480 366 T600 366 T720 366 T840 366 T960 366 T1080 366 T1200 366 T1320 366" stroke-width="1.6" opacity="0.45"/>
+    <path d="M0 388 Q70 376 140 388 T280 388 T420 388 T560 388 T700 388 T840 388 T980 388 T1120 388 T1260 388" stroke-width="1.2" opacity="0.25"/>
+  </g>
+
+  <!-- splash where the fish left the water -->
+  <g fill="none" stroke="#57E0CB" stroke-width="2" stroke-linecap="round">
+    <ellipse cx="150" cy="304" rx="46" ry="6" opacity="0.8"/>
+    <ellipse cx="150" cy="304" rx="78" ry="10" opacity="0.4"/>
+  </g>
+  <g fill="#9FF3E6">
+    <circle cx="196" cy="276" r="3.4"/><circle cx="214" cy="252" r="2.6"/><circle cx="108" cy="282" r="2.8"/>
+    <circle cx="128" cy="258" r="2.2"/><circle cx="238" cy="290" r="2"/>
+  </g>
+
+  <!-- flying fish: drawn pointing right, then tilted into the leap -->
+  <g transform="translate(330 168) rotate(-24) scale(1.12)" filter="url(#glow)">
+    <!-- far wing, behind body -->
+    <path d="M36 -14 C20 -70 -30 -118 -118 -142 C-96 -104 -66 -64 -36 -18 Z" fill="#2BA8D8" opacity="0.45"/>
+    <!-- tail: long lower lobe -->
+    <path d="M-116 -3 L-170 -36 L-148 2 L-188 54 L-116 6 Z" fill="url(#fish)"/>
+    <!-- belly fin -->
+    <path d="M18 20 C0 52 -28 72 -70 86 C-60 58 -40 34 -10 22 Z" fill="#2BA8D8" opacity="0.8"/>
+    <!-- body -->
+    <path d="M136 0 C104 -30 40 -38 -36 -20 C-78 -10 -104 -4 -122 0 C-104 6 -78 14 -36 24 C40 34 104 28 136 0 Z" fill="url(#fish)"/>
+    <!-- main wing -->
+    <path d="M62 -18 C42 -86 -22 -138 -126 -158 C-104 -116 -70 -72 -34 -22 Z" fill="url(#fish)" opacity="0.92"/>
+    <!-- wing ribs as a decision tree -->
+    <g fill="none" stroke="#0B1020" stroke-width="2.2" stroke-linecap="round">
+      <path d="M56 -20 C30 -78 -34 -122 -118 -150"/>
+      <path d="M30 -52 L-8 -34"/>
+      <path d="M2 -88 L-38 -60"/>
+      <path d="M-40 -112 L-72 -90"/>
+    </g>
+    <g fill="#0B1020">
+      <circle cx="-118" cy="-150" r="4"/><circle cx="-8" cy="-34" r="3.4"/>
+      <circle cx="-38" cy="-60" r="3.4"/><circle cx="-72" cy="-90" r="3.4"/><circle cx="56" cy="-20" r="4.4"/>
+    </g>
+    <!-- circuit trace along the body -->
+    <g fill="none" stroke="#0B1020" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.7">
+      <path d="M-100 2 H-60 L-48 10 H-4 L8 2 H40"/>
+    </g>
+    <g fill="#0B1020" opacity="0.7"><circle cx="-100" cy="2" r="3"/><circle cx="40" cy="2" r="3"/></g>
+    <!-- gill and eye -->
+    <path d="M78 -20 C70 -8 70 8 78 20" fill="none" stroke="#0B1020" stroke-width="2.4" stroke-linecap="round" opacity="0.6"/>
+    <circle cx="104" cy="-6" r="7" fill="#EDF4FF"/>
+    <circle cx="106" cy="-6" r="3.6" fill="#0B1020"/>
+  </g>
+
+  <!-- wordmark -->
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace">
+    <text x="560" y="168" font-size="86" font-weight="700" letter-spacing="2" fill="url(#ink)">ThreeToks</text>
+    <text x="564" y="216" font-size="28" fill="#EDF4FF">Small choices. Deep research.</text>
+    <text x="564" y="254" font-size="19" fill="#91A3BF">A fast, token-frugal AI agent for small local models.</text>
+    <text x="564" y="282" font-size="19" fill="#57E0CB">&#10095; threetoks</text>
+  </g>
+</svg>

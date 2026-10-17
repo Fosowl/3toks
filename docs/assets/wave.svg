@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 24" width="1280" height="24" role="img" aria-label="Wave divider">
+  <defs>
+    <linearGradient id="ink" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#33E6F2" stop-opacity="0"/>
+      <stop offset="0.2" stop-color="#33E6F2"/>
+      <stop offset="0.6" stop-color="#9B8CFF"/>
+      <stop offset="0.85" stop-color="#FF5CAB"/>
+      <stop offset="1" stop-color="#FF5CAB" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <g fill="none" stroke="url(#ink)" stroke-linecap="round">
+    <path d="M0 9 Q40 1 80 9 T160 9 T240 9 T320 9 T400 9 T480 9 T560 9 T640 9 T720 9 T800 9 T880 9 T960 9 T1040 9 T1120 9 T1200 9 T1280 9" stroke-width="2.2"/>
+    <path d="M0 18 Q50 11 100 18 T200 18 T300 18 T400 18 T500 18 T600 18 T700 18 T800 18 T900 18 T1000 18 T1100 18 T1200 18 T1300 18" stroke-width="1.4" opacity="0.5"/>
+  </g>
+</svg>
