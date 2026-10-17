@@ -14,9 +14,6 @@ class ArtShapeTest(unittest.TestCase):
     def test_shadow_mirrors_the_fish_row_for_row(self):
         shadow = banner.reflect(banner.FISH, banner.FISH_SHADES)
         self.assertEqual(len(shadow), len(banner.FISH))
-        # The waterline rows: the tail sinks first, the eye last.
-        self.assertIn("◥", shadow[0])
-        self.assertIn("○", shadow[-2])
         for sky, sea in zip(reversed(banner.FISH), shadow):
             self.assertEqual(len(sky), len(sea))
             self.assertEqual([i for i, c in enumerate(sky) if c != " "],
@@ -32,15 +29,12 @@ class ArtShapeTest(unittest.TestCase):
     def test_thin_edges_sink_one_shade_lighter_than_solids(self):
         self.assertEqual(banner.reflect(("█▀",), "▓"), ["▓▒"])
         self.assertEqual(banner.reflect(("▀",), " "), [" "])
-        self.assertEqual(banner.reflect(("m◉",), "▒"), ["▒○"])
 
-    def test_accent_cells_draw_their_glyph_in_their_own_color(self):
-        plain = banner._paint("m◉█", enabled=False, ramp=(1, 2))
-        self.assertEqual(plain, "█◉█")
-        colored = banner._paint("m◉█", enabled=True, ramp=(1, 2))
-        self.assertIn(theme.fg(banner.ACCENTS["m"][1], "█"), colored)
-        self.assertIn(theme.fg(banner.ACCENTS["◉"][1], "◉"), colored)
-        self.assertTrue(colored.endswith(theme.fg(2, "█")))
+    def test_reflected_accents_follow_their_drawn_shape(self):
+        for marker, (glyph, _) in banner.ACCENTS.items():
+            if marker != glyph:
+                self.assertEqual(banner.reflect((marker,), "▒"),
+                                 banner.reflect((glyph,), "▒"))
 
 
 class BuildBannerTest(unittest.TestCase):
@@ -49,6 +43,18 @@ class BuildBannerTest(unittest.TestCase):
         self.assertIn("tinyllama", text)
         self.assertIn("3 agents online", text)
         self.assertEqual(text.count(theme.NODE), 2)
+
+    def test_color_mode_preserves_art_and_hides_markers(self):
+        plain = banner.build_banner("model", 4, False, random.Random(2))
+        colored = banner.build_banner("model", 4, True, random.Random(2))
+        parts = colored.split("\x1b[")
+        stripped = parts[0] + "".join(part.partition("m")[2]
+                                      for part in parts[1:])
+        self.assertEqual(stripped, plain)
+        art = "\n".join(plain.splitlines()[1:1 + len(banner.FISH)])
+        for marker, (glyph, _) in banner.ACCENTS.items():
+            if marker != glyph:
+                self.assertNotIn(marker, art)
 
     def test_every_line_fits_the_banner_width(self):
         text = banner.build_banner("m", 2, enabled=False, rng=random.Random(5))

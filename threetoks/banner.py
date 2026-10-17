@@ -18,22 +18,21 @@ import random
 from threetoks.theme import (GRAY_LIGHT, ZAP, dim, fg, gradient, hairline,
                              ramp_at)
 
-# Upper bowl of the 3. Blunt snout with a closed mouth (one ``m`` accent
-# cell), big eye ◉, body █, see-through wing and pelvic fin ░▒▓ with ribs,
-# thin forked tail ◢ whose lower lobe is the longer one, as on the real
-# fish, reaching the water.
+# V5 design; see docs/banner-design-review.html for comparisons.
+# The main fin and rear fin stay separate.
+# Two tail lobes meet at a narrow base.
 FISH = (
-    "        ▄▄▄▄▄▄▟███████▙▄     ",
-    "     ▄███◉█████████████▙▄    ",
-    "     ▀█m████████████████▙    ",
-    "         ▓▓▓▒▓▒░▒░   ▜████▙  ",
-    "           ▓▓▒▓▒░▒░   ▜███▌  ",
-    "             ▓▒▓▒░▒░  ▐███▌  ",
-    "         ░▒    ▒▓▒░▒  ▟███▛  ",
-    "          ░▒▓▓   ▒░  ▟███▛   ",
-    "       ◢▄▄▄▄▄▄▄▄▄▄▄▟████▛    ",
-    "     ◢▀▀▀▀▀█████████████▛▀   ",
-    "   ◢▀▀                       ",
+    "          ▄▄▄▄▄▄▄▄▄▄▄        ",
+    "     ▄██◉████████████▙▄      ",
+    "     m▀▀▀▀▓▓▒░▀▀▀▀▀▀▜██▙     ",
+    "           ▓▒░▒░░    ▜██▌    ",
+    "            ▒░▒░▒░    ██▌    ",
+    "             ░▒░▒░░   ██▌    ",
+    "         ░░    ░░░░  ▟██▘    ",
+    "          ▒░░       ▟██▘     ",
+    "    ◣      ▄▄▄▄▄▄▄▟██▀       ",
+    "     ▀▄▄▄██▀▀▀▀▀▀▀▀          ",
+    "   ▄▄▀▀                      ",
 )
 # Wordmark; :func:`banner_rows` stands it on the horizon beside the fish.
 WORDMARK = (
@@ -50,9 +49,9 @@ INDENT = "  "
 HORIZON = "▔"
 WIDTH = len(INDENT) + len(FISH[0]) + len(GAP) + len(WORDMARK[0])
 # Accent cells keep a fixed color instead of the ramp: art marker →
-# (glyph, xterm color). The eye is pale; the mouth is one dark cell.
-ACCENTS = {"◉": ("◉", 231), "m": ("█", 18)}
-FULL = "█▙▜▟▛▌▐m"             # solid glyphs: take the depth shade in water
+# (glyph, xterm color). Pale eye, navy lip.
+ACCENTS = {"◉": ("◉", 153), "m": ("▀", 19)}
+FULL = "█▙▜▟▛▌▐"              # solid glyphs: take the depth shade in water
 HALF = "▀▄▘▗▝▖"               # thin edges: one step lighter than the row
 LADDER = "█▓▒░ "              # shade steps, dark to gone
 MIRROR = {"▄": "▀", "▀": "▄", "▙": "▜", "▜": "▙", "▟": "▛", "▛": "▟",
@@ -81,6 +80,7 @@ def _lighter(shade: str) -> str:
 
 def _sink(char: str, shade: str) -> str:
     """One glyph as seen in the water at a row whose shade is ``shade``."""
+    char = ACCENTS.get(char, (char, None))[0]
     char = MIRROR.get(char, char)
     if char in FULL:
         return shade
