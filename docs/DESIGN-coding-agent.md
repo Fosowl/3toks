@@ -481,3 +481,28 @@ limits, not fixed here: functions may disagree on the state layout
 runner's smoke call of a GUI `main()` fails on a missing `pygame` (or
 times out) and spends two repair rounds, because only EOF/interrupt count
 as inconclusive.
+
+### 11a. Stubs inside a planner step (2026-10-17)
+
+Report: the planner step "create and save the plot as a PNG file"
+(qwen3.8:27b) shipped 3 of 3 stubs, twice in a row. A replay probe with
+the same task and plan context (`/tmp/3toks_stubs/probe.py`, gate result
+per body) reproduced it 2 of 2 times. The plan context did reach every
+implement prompt (qwen3.6 bodies used the 4,209 / 4,030 figures of the
+web step), so missing context was not the cause. Two harness causes:
+
+| # | Cause | Evidence | Fix |
+|---|---|---|---|
+| 5 | A planned signature with a type hint that names a module (`save_plot(fig: matplotlib.figure.Figure, …)`) is rendered into every candidate module, also as a stub. Python evaluates the hint when the module loads, so the import gate failed for **every** method, also for correct bodies of other methods. The undefined-name gate also rejected `save_plot` itself on `['matplotlib']`, a name only in the hint (the body had `import matplotlib.pyplot as plt`). | `plot_economy_data`: 3 of 3 bodies `NameError: name 'matplotlib' is not defined`; `save_plot`: `undefined ['matplotlib']` | `MethodStore.render_module` adds `from __future__ import annotations` when a planned signature has a hint (`gates.has_annotations`); `undefined_names` skips names that are only in annotations |
+| 6 | The implement prefill ended with the 4-space body indent (`def main():\n    `). When the natural first token carries its own indent, qwen3.8 stops at once: empty answer, 1 token, `done_reason=stop`. | `main()`: 18 of 18 answers `''`. Same prompt with the prefill cut at the newline: a full body, 2 of 2 | `ImplementNode.prefill` ends at the newline; `reconstruct` re-indents the first line to 4 spaces as before |
+
+The plan parser also put a return hint into the purpose: `f(x) -> Figure:
+draw` gave the docstring `> Figure: draw`, because the `-` separator rule
+took only the dash. `plan._split_returns` now moves it to the end of the
+contract (`draw Returns Figure.`).
+
+Same replay after the fix: 0 stubs in 3 of 3 runs (qwen3.8 ×2, qwen3.6),
+and `is_palindrome` still passes its gates on both models. Not changed:
+the edit vertical's `spans.body_prefill` also ends with the body indent
+(no empty answers seen there yet), and `TestNode`'s prefill ends with a
+space.

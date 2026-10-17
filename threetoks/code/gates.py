@@ -67,10 +67,13 @@ def parses(source: str) -> bool:
 def reconstruct(name: str, args: str, completion: str) -> str:
     """Full source = the prefill def line plus the model's body text.
 
-    The prefill already supplies the first line's four-space indent, so a
-    stray leading space from the model is stripped — otherwise the first
-    body line lands at five spaces and later lines (or an inserted
-    docstring) at four, an IndentationError that corrupts the module.
+    The implement prefill ends at the newline after the def line, so the
+    model writes the indent itself. A prefill that also gave the four
+    spaces made qwen3.8 stop at once (empty answers) when the body's
+    natural first token carried its own indent. The first line is
+    re-indented to exactly four spaces here, so a model that writes
+    three or five still lines up with later lines (or with an inserted
+    docstring) instead of raising IndentationError.
     """
     return f"def {name}({args}):\n{BODY_INDENT}{completion.lstrip(_LEADING_WS)}"
 
@@ -221,6 +224,33 @@ def zero_arg_callable(args: str) -> bool:
     return required <= 0 and kwonly_missing == 0
 
 
+def has_annotations(args: str) -> bool:
+    """True when a planned argument list carries a type annotation.
+
+    The method store uses this to know if the module needs
+    ``from __future__ import annotations``. MethodStore.render_module
+    calls it with each planned argument text. It parses the text as a
+    def and looks for an annotation on any parameter.
+
+    Args:
+        args (str): the argument text of a plan line, e.g.
+            ``"fig: plt.Figure, name: str"``, from the method record.
+
+    Returns:
+        bool: True when one parameter or more is annotated; False for
+        plain names and for text that does not parse.
+    """
+    try:
+        tree = ast.parse(f"def _probe({args}):\n    pass")
+    except _COMPILE_ERRORS:
+        return False
+    spec = tree.body[0].args
+    params = [*spec.posonlyargs, *spec.args, *spec.kwonlyargs,
+              spec.vararg, spec.kwarg]
+    return any(param is not None and param.annotation is not None
+               for param in params)
+
+
 def signature_matches(source: str, name: str, args: str) -> bool:
     """True when the parsed def's argument names match the plan's."""
     node = function_def(source, name)
@@ -240,7 +270,9 @@ def undefined_names(source: str, allowed: set[str]) -> list[str]:
     the tree counts as defined: assignments, all argument kinds of defs
     and lambdas, def/class names, imports, ``except ... as`` names,
     match captures, type parameters, the module dunders and
-    ``__builtins__``.
+    ``__builtins__``. Names used only inside type annotations do not
+    count: the rendered module never evaluates them (``from __future__
+    import annotations``), so ``fig: plt.Figure`` needs no import.
 
     Args:
         source: function or module text, from the caller.
@@ -256,9 +288,39 @@ def undefined_names(source: str, allowed: set[str]) -> list[str]:
     known = _BUILTINS | _KNOWN_DUNDERS | allowed
     for node in ast.walk(tree):
         known = known | _names_bound_by(node)
+    hinted = _annotation_node_ids(tree)
     loads = {n.id for n in ast.walk(tree)
-             if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+             if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+             and id(n) not in hinted}
     return sorted(loads - known)
+
+
+def _annotation_node_ids(tree: ast.AST) -> set[int]:
+    """Give the ids of the ast nodes in hints that never run in a call.
+
+    undefined_names uses this to skip names that are only type hints.
+    It receives the parsed source. It collects the parameter and return
+    hints of the top-level defs (the rendered module defers them with
+    ``from __future__ import annotations``; an edit keeps the file's own
+    header) and the hints of annotated assignments (never evaluated in a
+    function body). Hints of a nested def run when the outer function
+    runs, so their names stay checked.
+
+    Args:
+        tree (ast.AST): the parsed source, from undefined_names.
+
+    Returns:
+        set[int]: ``id()`` of each node that sits in a skipped hint.
+    """
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef)
+    tops = [node for node in tree.body if isinstance(node, defs)]
+    roots = [node.annotation for node in ast.walk(tree)
+             if isinstance(node, ast.AnnAssign)]
+    roots += [top.returns for top in tops]
+    roots += [param.annotation for top in tops
+              for param in ast.walk(top.args) if isinstance(param, ast.arg)]
+    return {id(inner) for root in roots if root is not None
+            for inner in ast.walk(root)}
 
 
 def _names_bound_by(node: ast.AST) -> set[str]:

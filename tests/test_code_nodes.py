@@ -153,9 +153,18 @@ class ImplementNodeConstructionTest(unittest.TestCase):
     def test_system_is_the_implement_system_prompt(self):
         self.assertEqual(ImplementNode("f", "x", "c").system, IMPLEMENT_SYSTEM)
 
-    def test_prefill_supplies_the_def_line_and_four_space_indent(self):
-        self.assertEqual(ImplementNode("f", "x", "c").prefill,
-                         "def f(x):\n    ")
+    def test_prefill_ends_at_the_newline_not_inside_the_indent(self):
+        """Regression: a trailing indent made qwen3.8 answer empty."""
+        self.assertEqual(ImplementNode("f", "x", "c").prefill, "def f(x):\n")
+
+    def test_model_indented_body_reconstructs(self):
+        node = ImplementNode("f", "x", "c")
+        for completion in ("    y = x * 2\n    return y",
+                           "     y = x * 2\n     return y"):
+            decision = node.parse(completion, PERM)
+            self.assertEqual(decision.value,
+                             "def f(x):\n    y = x * 2\n    return y",
+                             repr(completion))
 
 
 class TestNodeTest(unittest.TestCase):

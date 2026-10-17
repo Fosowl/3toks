@@ -92,7 +92,8 @@ class ImplementNode:
         self.contract = contract
         self.examples = list(examples or [])
         self.temperature = temperature
-        self.prefill = f"def {name}({args}):\n    "
+        # No trailing indent: qwen3.8 then answers empty.
+        self.prefill = f"def {name}({args}):\n"
         self.question = f"write {name}({args})"
         self.placeholder_rejections = 0
         self.retry = RetryState() if retry is None else retry

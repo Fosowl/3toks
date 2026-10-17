@@ -262,6 +262,33 @@ class UndefinedNamesTest(unittest.TestCase):
         src = "def f(xs):\n    return map(lambda x: x + offset, xs)\n"
         self.assertEqual(gates.undefined_names(src, set()), ["offset"])
 
+    def test_names_only_in_type_hints_are_not_undefined(self):
+        src = ("def save(fig: plt.Figure, n: np.int64 = 1) -> mpl.Axes:\n"
+               "    shape: pd.Index = fig.size\n"
+               "    return fig.savefig(n)\n")
+        self.assertEqual(gates.undefined_names(src, set()), [])
+
+    def test_a_hinted_name_used_at_runtime_is_still_caught(self):
+        src = "def save(fig: plt.Figure):\n    return plt.close(fig)\n"
+        self.assertEqual(gates.undefined_names(src, set()), ["plt"])
+
+    def test_nested_def_hints_still_count_because_they_run(self):
+        src = ("def draw(data):\n"
+               "    def scale(xs: np.ndarray):\n"
+               "        return xs\n"
+               "    return scale(data)\n")
+        self.assertEqual(gates.undefined_names(src, set()), ["np"])
+
+
+class HasAnnotationsTest(unittest.TestCase):
+    def test_detects_hints_on_any_parameter_kind(self):
+        for args in ("fig: plt.Figure", "a, *rest: int", "a, **kw: str"):
+            self.assertTrue(gates.has_annotations(args), args)
+
+    def test_plain_defaults_with_colons_are_not_hints(self):
+        for args in ("", "a, b=2", 'sep=":"', 'table={"a": 1}', "f(:"):
+            self.assertFalse(gates.has_annotations(args), args)
+
 
 class ParsesTest(unittest.TestCase):
     def test_valid_module_parses(self):

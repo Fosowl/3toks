@@ -2,6 +2,7 @@
 import ast
 import unittest
 
+from threetoks.code.gates import execute_asserts
 from threetoks.code.store import (STATUS_TESTED, STUB_BODY, MethodStore)
 
 
@@ -10,6 +11,22 @@ class RenderModuleTest(unittest.TestCase):
         store = MethodStore("do a thing")
         module = store.render_module()
         self.assertEqual(ast.get_docstring(ast.parse(module)), "do a thing")
+
+    def test_hint_naming_an_unimported_module_never_breaks_import(self):
+        """Regression: one hinted stub signature stubbed every method."""
+        store = MethodStore("plot data")
+        drawn = store.add("draw", "data: list[dict]", "make a figure")
+        drawn.body = "def draw(data: list[dict]):\n    return len(data)"
+        store.add("save", "fig: matplotlib.figure.Figure, name: str", "save")
+        module = store.render_module()
+        passed, stderr = execute_asserts(module, ["assert draw([{}]) == 1"])
+        self.assertTrue(passed, stderr)
+        self.assertEqual(ast.get_docstring(ast.parse(module)), "plot data")
+
+    def test_unhinted_module_gets_no_future_import(self):
+        store = MethodStore("g")
+        store.add("f", "x, sep=':'", "c")
+        self.assertNotIn("__future__", store.render_module())
 
     def test_bodied_method_renders_its_body_and_parses(self):
         store = MethodStore("double")

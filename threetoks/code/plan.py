@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass
 
 MAX_METHODS = 4
+RETURN_HINT_ENDS = (":", " - ", " = ", " e.g")  # what may follow "-> Type"
 _LEAD = re.compile(r"^\s*(?:\d+\s*[.)]\s*)?\**(?:def\s+)?")
 _NAME = re.compile(r"([a-z_][a-z0-9_]*)")
 _ARGS = re.compile(r"\(([^)]*)\)")
@@ -58,12 +59,42 @@ def _parse_line(line: str) -> ParsedMethod | None:
     args_match = _ARGS.match(tail)
     if args_match is not None:
         tail = tail[args_match.end():].lstrip("*")
+    tail, returns = _split_returns(tail)
     if args_match is None and _SEP.match(tail) is None:
         return None
     args = args_match.group(1).strip() if args_match else ""
     contract, advisory = _split_example(_SEP.sub("", tail).strip())
+    if returns:
+        contract = f"{contract} Returns {returns}.".strip()
     return ParsedMethod(name_match.group(1), args,
                         contract or f"implement {name_match.group(1)}", advisory)
+
+
+def _split_returns(tail: str) -> tuple[str, str]:
+    """Take a ``-> Type`` return hint off the text after the signature.
+
+    _parse_line uses this so ``f(x) -> Figure: draw it`` gives the
+    purpose "draw it", not "> Figure: draw it" (the "-" separator rule
+    used to eat only the dash). _parse_line calls it with the text that
+    follows the argument list. The hint ends at the first purpose
+    separator or example clause (RETURN_HINT_ENDS), so a later
+    ``e.g. f(1)==2`` still becomes the advisory assert.
+
+    Args:
+        tail (str): text after ``name(args)``, from _parse_line.
+
+    Returns:
+        tuple[str, str]: (the text from the separator on, the return
+        type); (tail, "") when the text has no ``->`` hint.
+    """
+    stripped = tail.lstrip()
+    if not stripped.startswith("->"):
+        return tail, ""
+    hint = stripped[len("->"):]
+    lowered = hint.lower()
+    ends = [lowered.find(end) for end in RETURN_HINT_ENDS if end in lowered]
+    cut = min(ends, default=len(hint))
+    return hint[cut:], hint[:cut].strip()
 
 
 def _split_example(purpose: str) -> tuple[str, str | None]:
@@ -107,5 +138,8 @@ if __name__ == "__main__":
     assert power.contract == "a**b", power
     assert power.advisory_assert == "assert power(2, 3)==2**3", power
     assert _as_assert("f(1)") is None            # not a comparison
+    hinted = parse_plan("1. save(fig: plt.Figure) -> None: save the figure")[0]
+    assert hinted.args == "fig: plt.Figure", hinted
+    assert hinted.contract == "save the figure Returns None.", hinted
     assert len(parse_plan("\n".join(f"m{i}(): x" for i in range(9)))) == MAX_METHODS
     print("smoke OK")

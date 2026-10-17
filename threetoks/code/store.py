@@ -8,12 +8,14 @@ render is also the dependency order (see docs/DESIGN-coding-agent.md §3).
 """
 from dataclasses import dataclass, field
 
-from threetoks.code.gates import docstring
+from threetoks.code.gates import docstring, has_annotations
 
 STATUS_PLANNED = "planned"
 STATUS_TESTED = "tested"
 STATUS_STUBBED = "stubbed"
 STUB_BODY = "    raise NotImplementedError"
+# Hints like "fig: plt.Figure" must not run at import.
+LAZY_ANNOTATIONS = "from __future__ import annotations"
 
 
 @dataclass
@@ -121,10 +123,23 @@ class MethodStore:
         return "\n".join(f"{m.name}({m.args}): {m.contract}" for m in records)
 
     def render_module(self) -> str:
-        """The full .py text: module docstring then every method or stub."""
+        """Give the full .py text: docstring, then every method or stub.
+
+        Every gate and the final answer use this text.
+        The vertical calls it whenever it needs the current module.
+        A planned signature can carry type hints that name a module the
+        file never imports (``fig: plt.Figure``); Python would evaluate
+        them at import and fail the whole file, so such a module gets
+        ``from __future__ import annotations`` after its docstring.
+
+        Returns:
+            str: the module source, ending with a newline.
+        """
         header = docstring(self.goal, "")
+        if any(has_annotations(method.args) for method in self.methods):
+            header += "\n" + LAZY_ANNOTATIONS
         blocks = [self._render_one(method) for method in self.methods]
-        return "\n\n\n".join([header, *blocks]) + "\n" if blocks else header + "\n"
+        return "\n\n\n".join([header, *blocks]) + "\n"
 
     def _render_one(self, method: MethodRecord) -> str:
         """A method's accepted body, or a NotImplementedError stub."""

@@ -12,6 +12,29 @@ class ParseLineRecoveryTest(unittest.TestCase):
             (methods[0].name, methods[0].args, methods[0].contract),
             ("count_vowels", "text", "counts vowels"))
 
+    def test_return_hint_moves_out_of_the_purpose(self):
+        method = parse_plan("1. save(fig: plt.Figure, name: str) -> None: "
+                            "write the figure; e.g. save(f, 'a')==None")[0]
+        self.assertEqual(method.args, "fig: plt.Figure, name: str")
+        self.assertEqual(method.contract, "write the figure Returns None.")
+        self.assertEqual(method.advisory_assert, "assert save(f, 'a')==None")
+
+    def test_return_hint_without_purpose_still_parses(self):
+        method = parse_plan("total(xs) -> int")[0]
+        self.assertEqual((method.name, method.contract),
+                         ("total", "Returns int."))
+
+    def test_return_hint_ends_at_any_separator_or_example(self):
+        cases = {"f(x) -> None e.g. f(1)==None": ("Returns None.",
+                                                  "assert f(1)==None"),
+                 "f(x) -> int = double e.g. f(2)==4": ("double Returns int.",
+                                                       "assert f(2)==4"),
+                 "f(x) -> int - compute it": ("compute it Returns int.", None)}
+        for line, expected in cases.items():
+            method = parse_plan(line)[0]
+            self.assertEqual((method.contract, method.advisory_assert),
+                             expected, line)
+
     def test_strips_dotted_list_numbering(self):
         methods = parse_plan("1. tally(words): count each word")
         self.assertEqual(methods[0].name, "tally")
