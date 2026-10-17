@@ -22,6 +22,9 @@ Rules:
   a path ("my notes folder", "this directory"). A search or research
   request NEVER goes to files.
 - Writing or debugging a program goes to code.
+- planner is ONLY for a request that needs SEVERAL steps done by
+  different agents, e.g. look something up AND then write code with it.
+  A request one agent can finish NEVER goes to planner.
 
 Example — small talk:
 Request: hey there, how are you
@@ -83,7 +86,23 @@ Request: what's inside my notes folder
 ACTIONS:
 1 = files — browse local files and folders
 2 = web — look up facts on the internet
-ANSWER: 1"""
+ANSWER: 1
+
+Example — several steps by different agents:
+Request: find the population of Japan, then write a python script that prints it
+ACTIONS:
+1 = web — look up facts on the internet
+2 = planner — plan several steps and run the agents in order
+3 = code — write or debug Python code
+ANSWER: 2
+
+Example — one agent is enough:
+Request: write a script that prints the first 10 primes
+ACTIONS:
+1 = planner — plan several steps and run the agents in order
+2 = code — write or debug Python code
+3 = web — look up facts on the internet
+ANSWER: 2"""
 
 
 def route(task: str, specs: list[AgentSpec], policy: Policy) -> AgentSpec:

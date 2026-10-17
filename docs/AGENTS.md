@@ -32,12 +32,17 @@ def run(task: str, services: Services, policy: Policy) -> dict:
     ...
 ```
 
-- `task: str` — the raw user request text.
+- `task: str` — the raw user request text. When the planner runs your
+  agent as one step of a trajectory (see below), the task is only that
+  step's short purpose (e.g. `find the population of Japan`), so search
+  queries and keyword rules see a clean request. The overall goal and the
+  earlier step answers reach every model call of the step through the
+  policy (`policy.context`, added after the system block), not the task.
 - `services: Services` (`threetoks/services.py`) — shared capabilities:
   `provider` (search), `fetch_page` (url -> `PageText`), `files_root`,
-  `max_research_rounds`. Take what you need, ignore the rest; do not assume
-  every field is populated for every agent (e.g. `files` never touches
-  `provider`).
+  `max_research_rounds`, `on_progress` (optional `line -> None` progress
+  printer). Take what you need, ignore the rest; do not assume every field
+  is populated for every agent (e.g. `files` never touches `provider`).
 - `policy: Policy` (`threetoks/policy.py`) — the only way to consult the
   model. Call `policy.decide(episode, node)`; never call a backend directly.
 
@@ -70,6 +75,7 @@ budgets, and escape handling are shared instead of reimplemented.
 |---|---|---|
 | `MenuNode(question, options, escape=True)` | one digit | any single-choice decision: "what next", judge verdicts, routing |
 | `PickManyNode(question, n_items, max_picks=4)` | comma-separated indices | "which numbered sentences/lines answer this" — the note-taking step |
+| `SequenceNode(question, n_items, max_len)` | numbers in order, repeats allowed | an ordered plan, e.g. the planner's agent order |
 | `ShortTextNode(question, prefill, max_tokens=24)` | bounded free text | search queries, final free-text answers |
 | `confirm_node(question)` | `MenuNode` with `["yes", "no"]`, no escape | rarely — see the design-rules note on judge phrasing below |
 
@@ -155,6 +161,52 @@ vision families appear). List any such agent's name in
 `OPTIONAL_AGENT_NAMES` so `/model` can re-derive the set at runtime.
 Import the agent module lazily inside `optional_agents` — the registry
 must import on a bare install.
+
+The TUI then calls `with_planner(specs)` on the final list. It appends the
+`planner` agent last, bound to exactly those agents, so a plan never names
+an agent that is not ready. With fewer than `MIN_PLANNED_AGENTS = 2`
+agents there is nothing to plan, and no planner is added. Do not add
+`planner.SPEC` to `default_agents`: it has no module-level `SPEC`. After
+`/model` re-derives the optional agents, the planner is rebuilt the same
+way, so `/agents` lists it last.
+
+## The planner and trajectories
+
+The router picks `planner` (`threetoks/agents/planner.py`) for a request
+that needs several steps done by different agents. The plan is a
+**trajectory** (`threetoks/trajectory.py`): an ordered list of steps, each
+with one agent and one very short purpose sentence.
+
+1. **Draft.** The model sees the other agents with a number each and gives
+   their numbers in order (one `SequenceNode`, e.g. `PLAN: 2,4`; an agent
+   can come back). Then one `ShortTextNode` per step gives the purpose
+   (`STEP 1 (web): find the population of Japan`). An invalid purpose
+   falls back to the full request.
+2. **Follow.** Each agent runs with its purpose as the task and with
+   `policy.with_context(trajectory.context())`: every model call of the
+   step then carries `OVERALL GOAL: ...` and (after the first step)
+   `EARLIER STEPS:` with one clipped answer per done step, also for nodes
+   that bring their own system block.
+3. **Correct.** After each step, one two-option menu asks if the plan needs
+   an update. The options describe what yes and no mean (see the design
+   rule on judge phrasing). On yes, the remaining steps are drafted again,
+   with the done steps shown; an unparseable new draft keeps the old steps.
+
+Caps: `MAX_PLAN_STEPS = 4` per draft (the reply rule says "at most 4";
+extra numbers are dropped), `MAX_REPLANS = 2` update answers of "yes"
+(counted even when the new draft fails to parse), and
+`MAX_TRAJECTORY_STEPS = 6` per request. When a cap is reached the update
+question is no longer asked; steps cut by the step cap are reported as
+`step cap reached › N step(s) not run`. If the first draft fails to
+parse, the planner asks the one-agent router instead and returns that
+agent's result unchanged (no `trajectory` key). Otherwise the result has
+only `agent` (`planner`), `answer` (the step answer itself for a one-step
+plan, or every step answer under a numbered `N. agent — purpose` title),
+`trajectory` (the done steps as dicts: `agent`, `purpose`, `answer`), and
+`judged_good: False` when any step result had it. Progress lines
+(`plan ›`, `step N › agent: purpose`, `plan updated ›`, `no plan › routed
+to X`, `step cap reached › …`) go to `services.on_progress`; the TUI
+prints them dimmed in the ticker.
 
 ## Hardware agents (Raspberry Pi): the light agent is a template
 

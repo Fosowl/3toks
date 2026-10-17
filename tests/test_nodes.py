@@ -1,8 +1,8 @@
 """Unit tests for decision-node rendering and parsing."""
 import unittest
 
-from threetoks.nodes import (ESCAPE, MenuNode, PickManyNode, ShortTextNode,
-                            confirm_node)
+from threetoks.nodes import (ESCAPE, MenuNode, PickManyNode, SequenceNode,
+                            ShortTextNode, confirm_node)
 
 
 class MenuNodeTest(unittest.TestCase):
@@ -63,6 +63,30 @@ class PickManyNodeTest(unittest.TestCase):
 
     def test_empty_is_invalid(self):
         self.assertFalse(PickManyNode("Which?", 5).parse("none", ()).valid)
+
+
+class SequenceNodeTest(unittest.TestCase):
+    def test_keeps_order_and_repeats(self):
+        node = SequenceNode("Which?", 3, max_len=4)
+        self.assertEqual(node.parse(" 3, 1, 3", ()).value, [3, 1, 3])
+
+    def test_drops_out_of_range_and_caps_length(self):
+        node = SequenceNode("Which?", 3, max_len=2)
+        self.assertEqual(node.parse("0, 4, 2, 1, 3", ()).value, [2, 1])
+
+    def test_tolerates_punctuation_and_spaces(self):
+        node = SequenceNode("Which?", 3, max_len=4)
+        self.assertEqual(node.parse("2. 3) [1]", ()).value, [2, 3, 1])
+
+    def test_parse_only_first_line(self):
+        node = SequenceNode("Which?", 3, max_len=4)
+        self.assertEqual(node.parse("2\n3", ()).value, [2])
+
+    def test_words_and_odd_digits_are_invalid(self):
+        node = SequenceNode("Which?", 3, max_len=4)
+        self.assertFalse(node.parse("web then code", ()).valid)
+        self.assertFalse(node.parse("²", ()).valid)
+
 
 
 class ShortTextNodeTest(unittest.TestCase):

@@ -47,8 +47,47 @@ class Policy:
         self.config = config
         self.tracer = tracer or Tracer(None)
         self.debug = debug
+        self.context = ""  # plan context added to every system block
         chat = getattr(backend, "chat", None)  # chat-API vs raw transport
         self._chat = chat if callable(chat) else None
+
+    def with_context(self, context: str) -> "Policy":
+        """Give a sibling policy that adds a context text to every call.
+
+        The planner agent uses this so each step agent sees the overall
+        goal and the earlier answers, while its task text stays short.
+        The planner calls it with the context of one trajectory step.
+        The sibling shares the backend, config, tracer and debug flag;
+        this policy does not change.
+
+        Args:
+            context (str): text to put after the system block of every
+                model call, from Trajectory.context.
+
+        Returns:
+            Policy: the new policy with ``context`` set.
+        """
+        sibling = Policy(self.backend, self.config, self.tracer, self.debug)
+        sibling.context = context
+        return sibling
+
+    def _system(self, system: str) -> str:
+        """Add the plan context (when set) after a system block.
+
+        Every model call uses this, so a node with its own system block
+        (code plan and implement nodes) also sees the plan context.
+        _call and _think call it with the system text they would send.
+        It joins the two texts with a blank line.
+
+        Args:
+            system (str): the node or config system block, can be "".
+
+        Returns:
+            str: the system block to send.
+        """
+        if not self.context:
+            return system
+        return f"{system}\n\n{self.context}" if system else self.context
 
     def decide(self, episode: Episode, node, think_budget: int = 0) -> Decision:
         """Run voting (menus, if configured) or the retry ladder."""
@@ -157,6 +196,7 @@ class Policy:
         family template and must let the family stops ride along.
         """
         images = tuple(getattr(node, "images", ()))
+        system = self._system(system)
         if self._chat is not None:
             opts = GenOpts(max_tokens=node.max_tokens,
                            temperature=temperature,
@@ -218,7 +258,8 @@ class Policy:
         shared prompt prefix keeps the second call cheap (KV reuse).
         """
         prompt = build_raw_prompt(self.config.spec, user,
-                                  system=self.config.system, think=True)
+                                  system=self._system(self.config.system),
+                                  think=True)
         opts = GenOpts(max_tokens=budget, temperature=temperature,
                        stop=(THINK_STOP,), num_ctx=self.config.num_ctx)
         result = self.backend.complete(self.config.spec.name, prompt, opts)

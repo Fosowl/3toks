@@ -218,5 +218,34 @@ class RejectTruncatedTest(unittest.TestCase):
         self.assertEqual(len(events), 1)
 
 
+class PlanContextTest(unittest.TestCase):
+    """with_context: every call of a step sees the plan context."""
+
+    CONTEXT = "OVERALL GOAL: print the population"
+
+    def _prompt(self, policy, node):
+        policy.decide(Episode("S", "t"), node)
+        return policy.backend.calls[-1][0]
+
+    def test_context_follows_a_node_own_system_block(self):
+        node = ShortTextNode("Q?", "Q:")
+        node.system = "NODE SYSTEM"
+        step = make_policy(FakeBackend([" a"])).with_context(self.CONTEXT)
+        prompt = self._prompt(step, node)
+        self.assertIn("NODE SYSTEM", prompt)
+        self.assertIn(self.CONTEXT, prompt)
+
+    def test_caller_policy_keeps_no_context(self):
+        policy = make_policy(FakeBackend([" a"]))
+        policy.with_context(self.CONTEXT)
+        prompt = self._prompt(policy, ShortTextNode("Q?", "Q:"))
+        self.assertNotIn(self.CONTEXT, prompt)
+
+    def test_sibling_shares_the_tracer(self):
+        policy = make_policy(FakeBackend([" a"]))
+        self.assertIs(policy.with_context(self.CONTEXT).tracer,
+                      policy.tracer)
+
+
 if __name__ == "__main__":
     unittest.main()

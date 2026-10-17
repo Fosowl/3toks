@@ -172,7 +172,7 @@ class MakeVoiceSessionTest(unittest.TestCase):
 
 
 def make_state(**overrides):
-    fields = dict(services=object(), specs=[], policy=FakePolicy("x"),
+    fields = dict(services=SimpleNamespace(), specs=[], policy=FakePolicy("x"),
                   model="m", policy_factory=None, enabled=False)
     fields.update(overrides)
     return ReplState(**fields)

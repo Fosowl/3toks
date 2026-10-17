@@ -23,6 +23,8 @@ class Services:
     capture_frame: object = None       # callable -> base64 JPEG (camera extra)
     # callable (rel_path: str, diff: str) -> bool; None: never apply
     confirm_edit: object = None
+    # callable (line: str) -> None for planner progress; None: silent
+    on_progress: object = None
 
 
 if __name__ == "__main__":

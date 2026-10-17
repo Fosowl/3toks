@@ -1,8 +1,8 @@
 """Offline tests for the agent registry (default and optional agents)."""
 import unittest
 
-from threetoks.agents import (OPTIONAL_AGENT_NAMES, AgentSpec,
-                              default_agents, optional_agents)
+from threetoks.agents import (OPTIONAL_AGENT_NAMES, PLANNER_NAME, AgentSpec,
+                              default_agents, optional_agents, with_planner)
 from threetoks.services import Services
 
 
@@ -58,6 +58,26 @@ class OptionalAgentsTest(unittest.TestCase):
     def test_optional_names_never_collide_with_defaults(self):
         defaults = {s.name for s in default_agents(Services())}
         self.assertFalse(defaults & set(OPTIONAL_AGENT_NAMES))
+
+
+class WithPlannerTest(unittest.TestCase):
+    """The planner comes last and plans only with the agents given."""
+
+    def test_planner_is_last_and_plans_over_the_given_agents(self):
+        specs = default_agents(Services())
+        planned = with_planner(specs)
+        self.assertEqual(planned[:-1], specs)
+        self.assertEqual(planned[-1].name, PLANNER_NAME)
+        self.assertEqual(planned[-1].run.specs, specs)
+
+    def test_a_single_agent_gets_no_planner(self):
+        specs = default_agents(Services())[:1]
+        self.assertEqual(with_planner(specs), specs)
+
+    def test_planner_name_never_collides(self):
+        names = {s.name for s in default_agents(Services())}
+        self.assertNotIn(PLANNER_NAME, names | set(OPTIONAL_AGENT_NAMES))
+
 
 
 if __name__ == "__main__":

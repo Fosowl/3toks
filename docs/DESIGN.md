@@ -236,6 +236,17 @@ around a judged multi-round research loop, and added an interactive TUI.
   same menu/notes/answer shape as the web vertical), `web` (thin wrapper
   over the new deep-research loop). Registry (`default_agents()`) is a flat
   list; adding an agent is one module + one line — see `docs/AGENTS.md`.
+- **Planner agent and trajectories** (`threetoks/agents/planner.py`,
+  `threetoks/trajectory.py`): the router can pick `planner` for a
+  multi-step request. It drafts a trajectory with one `SequenceNode`
+  (agent numbers in order, repeats allowed) plus one short purpose per
+  step, runs each agent with its purpose as the task and the goal plus
+  earlier answers as plan context on every model call
+  (`Policy.with_context`), and
+  after every step asks one described two-option menu whether the
+  remaining steps must change. Capped at 4 steps per draft, 2 replans,
+  6 steps per request. `with_planner()` appends it last, bound to the
+  ready agents.
 - **Deep research** (`threetoks/research.py`): judged rounds. Each round runs
   a full `WebResearchVertical` episode, then a judge decides accept/reject;
   on reject, the model proposes a new search query that must differ from
@@ -268,6 +279,12 @@ around a judged multi-round research loop, and added an interactive TUI.
   free, and needs no new infrastructure. Fallback on an invalid pick is the
   first registered spec (`casual`), chosen because it is the cheapest and
   safest default action.
+- **Planning stays classification.** The planner never writes a plan as
+  free text to parse: the agent order is a list of menu numbers and each
+  purpose is a bounded one-line text. The replan check reuses the judge
+  rule below — options that say what "yes" and "no" mean — and an
+  unparseable answer always keeps the current plan, so a confused model
+  degrades to "follow the first draft", never to a loop.
 - **Judge: deterministic pre-checks before a semantic model decision.**
   `research._obviously_bad` rejects empty, digits-only, or note-less
   answers in code, with zero model calls, before anything reaches the

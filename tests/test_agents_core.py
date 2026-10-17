@@ -59,7 +59,8 @@ class RouterPrefixTest(unittest.TestCase):
     EXPECTED = {"hey there": "casual", "Ada Lovelace": "web",
                 "FooBar project": "web", "reverses a string": "code",
                 "notes folder": "files", "housing market": "web",
-                "economy projections": "web", "Marianas trench": "web"}
+                "economy projections": "web", "Marianas trench": "web",
+                "population of Japan": "planner", "first 10 primes": "code"}
 
     def test_every_example_answer_points_at_the_right_agent(self):
         import re

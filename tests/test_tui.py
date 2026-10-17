@@ -114,6 +114,12 @@ class TickerFormatTest(unittest.TestCase):
                  "out_tokens": 5, "wall_s": 0.4}
         self.assertIn("3,7", tui.build_ticker_line(event, enabled=False))
 
+    def test_plan_sequence_shows_ordered_agent_numbers(self):
+        event = {"node": "sequence", "value": [2, 3, 2], "valid": True}
+        line = tui.build_ticker_line(event, enabled=False)
+        self.assertIn("plan", line)
+        self.assertIn("2,3,2", line)
+
     def test_short_text_clips_to_forty_chars(self):
         long_value = "a" * 80
         event = {"node": "short_text", "value": long_value, "valid": True}
@@ -900,11 +906,22 @@ class ModelSwapOptionalAgentsTest(unittest.TestCase):
         tui.handle_command(state, "/model qwen3.5:2b")
         self.assertIn("light", [spec.name for spec in state.specs])
 
-    def test_without_capabilities_specs_stay_untouched(self):
+    def test_without_capabilities_only_the_planner_is_added(self):
         state = make_state()
         before = list(state.specs)
         tui.handle_command(state, "/model qwen3.5:2b")
-        self.assertEqual(state.specs, before)
+        self.assertEqual(state.specs[:-1], before)
+        self.assertEqual(state.specs[-1].name, "planner")
+
+    def test_planner_plans_only_with_agents_ready_after_a_swap(self):
+        state = make_state()
+        state.services.capture_frame = lambda: "b64"
+        tui.handle_command(state, "/model llava:7b")
+        tui.handle_command(state, "/model qwen3.5:2b")
+        names = [spec.name for spec in state.specs]
+        self.assertEqual(names.count("planner"), 1)
+        planned = [spec.name for spec in state.specs[-1].run.specs]
+        self.assertEqual(planned, ["casual", "web"])  # look left, no planner
 
     def test_family_notice_only_applies_to_the_ollama_provider(self):
         raw = make_state()

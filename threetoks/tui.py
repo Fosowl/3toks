@@ -44,7 +44,7 @@ DEBUG_RESULT_CLIP = 120     # /debug: result text clipped to this
 UNDER_INDENT = " " * 12     # column where a ticker line's value starts
 SIGN_OFF = "⌁ mesh offline — tokens saved, see you"
 _KIND_LABELS = {"menu": "menu", "pick_many": "pick", "short_text": "text",
-                "fetch": "fetch"}
+                "sequence": "plan", "fetch": "fetch"}
 
 
 def build_debug_tokens_line(event: dict, enabled: bool = True) -> str:
@@ -78,7 +78,7 @@ def _compress_value(event: dict) -> str:
     value = event.get("value")
     if not event.get("valid", False) or value is None:
         return "—"  # em dash for no/invalid decision
-    if kind == "pick_many":
+    if kind in ("pick_many", "sequence"):
         return ",".join(str(index) for index in value) or "—"
     if kind == "short_text":
         return _clip(value, SHORT_TEXT_CLIP)
@@ -434,11 +434,15 @@ def _cmd_deep(state: ReplState, arg: str) -> str:
 
 
 def _refresh_optional_agents(state: ReplState, model: str) -> None:
-    """Re-derive the capability agents for ``model`` (look needs vision)."""
-    from threetoks.agents import OPTIONAL_AGENT_NAMES, optional_agents
-    kept = [spec for spec in state.specs
-            if spec.name not in OPTIONAL_AGENT_NAMES]
-    state.specs = kept + optional_agents(state.services, model)
+    """Re-derive the capability agents for ``model`` (look needs vision).
+
+    The planner is rebuilt last, so its plans only use agents that exist.
+    """
+    from threetoks.agents import (OPTIONAL_AGENT_NAMES, PLANNER_NAME,
+                                  optional_agents, with_planner)
+    derived = OPTIONAL_AGENT_NAMES + (PLANNER_NAME,)
+    kept = [spec for spec in state.specs if spec.name not in derived]
+    state.specs = with_planner(kept + optional_agents(state.services, model))
 
 
 def _cmd_model(state: ReplState, arg: str) -> str:
@@ -748,6 +752,8 @@ def _run_task(state: ReplState, task: str, route, sink) -> None:
     router = route or route_fn
     counter = _TickerCounter(state, sink)
     state.policy.tracer.on_event = counter
+    state.services.on_progress = lambda line: sink(
+        dim(f"  {ZAP} {line}", state.enabled))
     start = time.time()  # the task includes routing and recall
     spec = router(task, state.specs, state.policy)
     sink(dim(f"  {ZAP} routed {CHEVRON} ", state.enabled)
@@ -1137,7 +1143,7 @@ def build_state(model: str = None, sink=print):
     """
     from pathlib import Path
 
-    from threetoks.agents import default_agents, optional_agents
+    from threetoks.agents import default_agents, optional_agents, with_planner
     from threetoks.backend.providers import make_backend
     from threetoks.cli import make_policy_config
     from threetoks.config import load_config
@@ -1160,6 +1166,7 @@ def build_state(model: str = None, sink=print):
     specs = default_agents(services) + optional_agents(services, chosen_model)
     if provider is None:  # bare install: never route to the web agent
         specs = [spec for spec in specs if spec.name != "web"]
+    specs = with_planner(specs)
     no_think = config.llm.disable_think
     factory = lambda name: Policy(make_backend(config.llm),
                                   make_policy_config(name, no_think),

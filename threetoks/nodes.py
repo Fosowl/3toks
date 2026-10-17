@@ -13,6 +13,8 @@ ESCAPE_LABEL = "none of these fit — do something else"
 MENU_MAX_OPTIONS = 9
 MENU_PREFILL = "ANSWER:"
 PICK_PREFILL = "RELEVANT:"
+SEQUENCE_PREFILL = "PLAN:"
+SEQUENCE_PUNCTUATION = ".;:()[]-"  # stripped around each number token
 
 
 @dataclass(frozen=True)
@@ -114,6 +116,70 @@ class PickManyNode:
         return Decision(self.kind, picked, text, valid=bool(picked))
 
 
+class SequenceNode:
+    """Ordered list of item numbers; one item can come back more than once.
+
+    The planner agent uses this node to put agents in order for a plan.
+    The planner calls it with the number of agents it shows in the prompt.
+    The model gives numbers in order, so "2,3,2" means agent 2, then
+    agent 3, then agent 2 again. Order is kept and repeats are allowed;
+    numbers out of range are dropped, and only the first ``max_len``
+    numbers of the first line are kept.
+    """
+
+    kind = "sequence"
+    prefill = SEQUENCE_PREFILL
+    max_tokens = 16
+    stop = ("\n",)
+
+    def __init__(self, question: str, n_items: int, max_len: int,
+                 items: list[str] | None = None):
+        """Store the question and the limits of the list.
+
+        Args:
+            question (str): the line shown above the reply rule, from the
+                planner.
+            n_items (int): how many numbered items the prompt shows.
+            max_len (int): the most numbers to keep (the step limit).
+            items (list[str] | None): item texts, for the trace only.
+        """
+        self.question = question
+        self.n_items = n_items
+        self.max_len = max_len
+        self.items = items
+
+    def render(self, perm: tuple[int, ...]) -> str:
+        """Give the question and the reply rule; ``perm`` is not used.
+
+        Args:
+            perm (tuple[int, ...]): option order from the policy (empty).
+
+        Returns:
+            str: the node text that goes after the episode prompt.
+        """
+        return (f"{self.question}\n"
+                f"Reply with at most {self.max_len} numbers in order, "
+                "separated by commas (e.g. 2,1).")
+
+    def parse(self, text: str, perm: tuple[int, ...]) -> Decision:
+        """Read the numbers on the first line, in the order given.
+
+        Args:
+            text (str): the model completion, from the policy.
+            perm (tuple[int, ...]): option order (not used).
+
+        Returns:
+            Decision: value is a list[int] of 1-based item numbers; the
+            decision is valid when at least one number is in range.
+        """
+        first_line = text.strip().splitlines()[0] if text.strip() else ""
+        tokens = first_line.replace(",", " ").split()
+        numbers = [token.strip(SEQUENCE_PUNCTUATION) for token in tokens]
+        picked = [int(number) for number in numbers if number.isdecimal()
+                  and 1 <= int(number) <= self.n_items][:self.max_len]
+        return Decision(self.kind, picked, text, valid=bool(picked))
+
+
 # End/turn markers any supported family might leak into a completion
 # (raw-mode models sometimes emit their own end token inline).
 TEMPLATE_MARKERS = ("<|im_start|>", "<|im_end|>", "<|endoftext|>", "</s>",
@@ -164,6 +230,9 @@ if __name__ == "__main__":
     assert not menu.parse("x", perm).valid
     pick = PickManyNode("Which?", 10)
     assert pick.parse(" 3, 7, 12", ()).value == [3, 7]
+    sequence = SequenceNode("Which?", 3, max_len=3)
+    assert sequence.parse(" 2, 3, 2, 9, 1", ()).value == [2, 3, 2]
+    assert not sequence.parse("none", ()).valid
     short = ShortTextNode("Query?", "QUERY:")
     assert short.parse(" france population \n junk", ()).value == "france population"
     assert short.parse("1<|im_end|>", ()).value == "1"

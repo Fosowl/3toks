@@ -267,6 +267,8 @@ Put the flags `-m`, `-c`, and `--no-color` *before* the subcommand.
 Every request goes through a **router**. The router shows the model a menu of agent names. Each name has a one-line description. The model picks one digit.
 If the answer is not valid, ThreeToks uses the first agent in the list, `casual`.
 
+A request with **several steps** goes to the `planner`. Example: "find the population of Japan, then write a script that prints it".
+
 | Agent | What it does | Details |
 |---|---|---|
 | `casual` | Small talk and quick replies | It ranks ready-made replies by shared keywords. An exact match needs **no** model call. If nothing fits, it writes a short free reply. |
@@ -275,6 +277,7 @@ If the answer is not valid, ThreeToks uses the first agent in the list, `casual`
 | `code` | "Where is X?", "Fix the bug in Y", "Work out Z from data.csv", "Write a script that…" | Four modes. See the list below. |
 | `light` | "Turn on the light" | Needs a Raspberry Pi and the `relay` add-on. Clear phrases are matched by simple rules, with no model call. Other phrases cost one menu decision. |
 | `look` | "What am I holding?" | Needs the `camera` add-on and a vision model (llava, qwen-vl, gpt-4o, claude, gemini, …). It takes one frame and makes one short vision decision. |
+| `planner` | "Find X, then write code with it" | It writes a plan, called a **trajectory**: the agents in order, each with a very short task. See below. |
 
 The `code` agent has four modes:
 
@@ -284,6 +287,15 @@ The `code` agent has four modes:
 - **Author** plans small functions and writes them one by one.
 
 Code that the agent writes runs in a closed box: a temporary folder, and no API keys in its environment.
+
+The `planner` works in three parts:
+
+1. **Plan.** The model sees the other agents, each with a number. It gives the numbers in order, for example `2,4`. An agent can come back. Then it writes one very short task for each step.
+2. **Run.** Each agent does its step. Its task is only its own short task. Every model call of the step also sees the overall goal and the answers of the steps before it.
+3. **Correct.** After each step, the model says yes or no: must the next steps change? On yes, it plans the remaining steps again.
+
+A plan has 4 steps or fewer. A request runs 6 steps at most, and the plan changes 2 times at most. The ticker shows the plan and each step while they run.
+If the plan is not valid, the router picks one agent for the full request. When a plan has 2 or more steps, the final answer shows the answer of each step under its number. The planner is always the last agent in `/agents`. It is added only when 2 or more other agents are ready.
 
 ### Chat commands
 
