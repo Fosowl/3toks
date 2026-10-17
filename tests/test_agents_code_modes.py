@@ -74,6 +74,19 @@ class AuthorModeTest(unittest.TestCase):
         self.assertEqual((outcome["mode"], outcome["routed_by"]),
                          ("author", "menu"))
         self.assertIn("return n * n", outcome["answer"])
+        self.assertNotIn("INCOMPLETE", outcome["answer"])
+
+    def test_unwritten_function_is_named_in_a_note_before_the_code(self):
+        backend = KeywordBackend(["author —"],
+                                 ["square(n): multiply n by itself",
+                                  "return((("])       # repeats forever
+        outcome = code_agent.run("write a function that squares a number",
+                                 Services(files_root=_corpus(self, {})),
+                                 _policy(backend))
+        first_line = outcome["answer"].splitlines()[0]
+        self.assertEqual(first_line, code_agent.INCOMPLETE_NOTE.format(
+            count=1, total=1, names="square"))
+        self.assertEqual(outcome["stubbed"], ["square"])
 
 
 class ComputeModeTest(unittest.TestCase):
@@ -98,6 +111,21 @@ class ComputeModeTest(unittest.TestCase):
         self.assertEqual(outcome["mode"], "compute")
         self.assertIn("did not produce output", outcome["answer"])
         self.assertIn(outcome["script"], outcome["answer"])
+
+    def test_unwritten_function_is_named_instead_of_printed_nothing(self):
+        # No entry can run (the only zero-argument function is not the
+        # entry once a sibling is stubbed): the answer must say why.
+        backend = KeywordBackend(["compute —"],
+                                 ["load(): get the data\n2. total(items): "
+                                  "sum the items",
+                                  "return [1, 2]", "return((("])
+        outcome = code_agent.run("sum the numbers in this data for me",
+                                 Services(files_root=_corpus(self, {})),
+                                 _policy(backend))
+        self.assertEqual(outcome["stubbed"], ["total"])
+        self.assertIn(code_agent.UNWRITTEN_REASON.format(names="total"),
+                      outcome["answer"])
+        self.assertFalse(outcome["run"]["ok"])
 
 
 class NavigateModeTest(unittest.TestCase):

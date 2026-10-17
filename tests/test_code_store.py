@@ -95,6 +95,20 @@ class BodiedExceptTest(unittest.TestCase):
         store = MethodStore("g")
         self.assertEqual(store.signature_lines([]), "(none)")
 
+    def test_unwritten_except_lists_bodyless_siblings_only(self):
+        store = self._store_with_three()
+        store.methods[0].body = "def a(a):\n    return 1"
+        self.assertEqual([m.name for m in store.unwritten_except(1)], ["c"])
+
+
+class StubbedNamesTest(unittest.TestCase):
+    def test_only_stubbed_methods_are_named_in_declaration_order(self):
+        store = MethodStore("g")
+        for name, status in (("a", "stubbed"), ("b", "tested"),
+                             ("c", "stubbed"), ("d", "planned")):
+            store.add(name, "", "").status = status
+        self.assertEqual(store.stubbed_names(), ["a", "c"])
+
 
 class StatusRoundTripTest(unittest.TestCase):
     def test_tested_status_does_not_change_the_render(self):

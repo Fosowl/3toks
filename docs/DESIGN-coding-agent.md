@@ -438,3 +438,46 @@ corpus now carries one repo test covering the planted bug):
 Known limits: docstring-only edits read as "unchanged"; one span per
 edit (no multi-site refactors); the oracle needs the project's test
 runner importable by the project interpreter.
+
+## 11. Unfinished code (2026-10-17): why `NotImplementedError` shipped
+
+Probe: author request "write a code for a 2d flappy bird" on
+qwen3.6:27b. It delivered three `raise NotImplementedError` stubs and a
+`__main__` guard that called an unrelated helper (34 calls, 441 s). The
+model never wrote a placeholder; the harness stubbed every method after
+its attempts failed. Four causes, each seen in the raw completions
+(probe: `CodeVertical` with a `Tracer` that keeps `raw_text`):
+
+| # | Cause | Evidence | Fix |
+|---|---|---|---|
+| 1 | Token cap cut the body off, and a retry repeats the same cap | `done_reason=length` at 200 tokens, 27 identical failures | `ImplementNode.max_tokens` doubles after each cut-off (200 → 800); `Policy._parse` calls `node.on_truncated()`; the count lives in `MethodRecord.retry` (`RetryState`, shared with the node), so it survives across vertical attempts |
+| 2 | The `TASK:` line names the whole program, so a one-function prompt produced setup code, constants and a game loop | completions began with `import pygame`, `WIDTH = 400`, … | the prompt says "write ONLY this function"; siblings without a body are listed as `WRITTEN SEPARATELY` (`MethodStore.unwritten_except`) |
+| 3 | The undefined-name gate rejects `pygame`, `random` and module constants, because functions are written alone and the module has no import header | 9 of 9 `draw_game` candidates were rejected on `['pygame']` only | the prompt says to import inside the function and to pass data in arguments (the plan prompt says the same); a rejected body leaves its undefined names in `RetryState.undefined`, and the next attempt names them; the note is cleared when the next answer has no such names, when a body is accepted, and on unlock |
+| 4 | The plan parser dropped every line with markdown ticks (`` `name(args):` ``), so the plan was empty and the run fell back to "solve the whole task in one function" | 3 of 3 plans invalid on qwen3.6 | `_parse_line` drops ticks and skips a bold mark around the signature; a `**` power operator in the purpose is kept |
+
+Safeguards against shipping unfinished code:
+
+- **Incentive.** `IMPLEMENT_SYSTEM` and the node prompt say a placeholder
+  is rejected, the program cannot run without the function, and a short
+  complete function beats a long unfinished one.
+- **Stub rescue.** When every method is terminal, each stubbed method is
+  reopened once (`CodeVertical._rescue_stubs`, step budget permitting).
+  By then its siblings have bodies and its cap has grown. A method that
+  was cut off even at the highest cap is not reopened (same prompt, same
+  cut).
+- **A repair never makes a stub from finished code.** `_unlock` keeps the
+  old body in `MethodRecord.fallback`; a repair that ends in a stub
+  restores it (`_finalize`).
+- **No guessed entry.** The "sole zero-argument function" guard is not
+  written when any method is stubbed (`_script_entry`).
+- **Honest delivery.** `result()["stubbed"]` lists the stubs; `run.ok` is
+  never true with a stub; the author answer starts with `(INCOMPLETE: n of
+  m functions could not be written … : names)`; a compute answer without
+  output names the unwritten functions instead of "printed nothing".
+
+Same probe after the change: 4 functions, 0 stubs, 13 calls, 245 s. Known
+limits, not fixed here: functions may disagree on the state layout
+(`init_game` returns `bird_vel`, `update_state` reads `velocity`); the
+runner's smoke call of a GUI `main()` fails on a missing `pygame` (or
+times out) and spends two repair rounds, because only EOF/interrupt count
+as inconclusive.

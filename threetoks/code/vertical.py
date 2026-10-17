@@ -20,7 +20,8 @@ import re
 from pathlib import Path
 
 from threetoks.code import gates, runner, sandbox
-from threetoks.code.nodes import ImplementNode, PlanNode, TestNode
+from threetoks.code.nodes import (MAX_CAP_DOUBLINGS, ImplementNode, PlanNode,
+                                 TestNode)
 from threetoks.code.store import (STATUS_PLANNED, STATUS_STUBBED,
                                  STATUS_TESTED, MethodStore)
 from threetoks.render import Episode
@@ -108,6 +109,8 @@ class CodeVertical:
             return PlanNode(self.goal)
         self._seek_pending()
         if self.index >= len(self.store.methods):
+            self._rescue_stubs()
+        if self.index >= len(self.store.methods):
             self._run_module_checks()
             if self.index >= len(self.store.methods):
                 return None
@@ -139,6 +142,7 @@ class CodeVertical:
         return {"goal": self.goal,
                 "answer": self._render_script(self._script_entry()),
                 "methods": [self._method_row(m) for m in self.store.methods],
+                "stubbed": self.store.stubbed_names(),
                 "output": self._entry_output(),
                 "run": self._run_report()}
 
@@ -184,7 +188,9 @@ class CodeVertical:
         the module's sole bodied zero-arg-callable function (all-default
         params count — ``say_hello(name="World")`` runs as a script).
         Never a stub and never an arbitrary helper — a script that
-        crashes or picks randomly is worse than no guard at all.
+        crashes or picks randomly is worse than no guard at all. The
+        "sole function" guess is skipped when a method is stubbed: the
+        module is unfinished, and that one helper is not its entry.
         """
         zero_arg = [m.name for m in self.store.methods
                     if m.body is not None
@@ -194,7 +200,8 @@ class CodeVertical:
         match = _ENTRY.search(self.goal)
         if match and match.group(1) in zero_arg:
             return match.group(1)
-        return zero_arg[0] if len(zero_arg) == 1 else None
+        sole = len(zero_arg) == 1 and not self.store.stubbed_names()
+        return zero_arg[0] if sole else None
 
     # ------------------------------------------------------------ planning
 
@@ -275,21 +282,23 @@ class CodeVertical:
             self._set_episode(f"{method.name}({method.args}):"
                               f" {method.contract}")
             return TestNode(method.name, method.args)
-        self._set_episode(self._implemented_context())
+        self._set_episode(self._sibling_context())
         heated = method.attempts or method.repairs   # repairs resample varied
         temperature = REPAIR_TEMPERATURE if heated else None
         return ImplementNode(method.name, method.args, method.contract,
-                             method.examples, temperature)
+                             method.examples, temperature, method.retry)
 
     def _apply_implement(self, decision) -> None:
         """Gate a fresh body; store it and move to tests, or repair/stub."""
         method = self.store.methods[self.index]
         method.attempts += 1
+        method.retry.undefined = []
         source = decision.value if decision.valid else None
         self._repeated = source is not None and self._is_repeat(method, source)
         if source is None or not self._gates_pass(source, method):
             self._close_or_repair(method, discard=True)
             return
+        method.retry.cut_off = False
         method.body = gates.ensure_docstring(source, method.contract)
         if self.gen_tests and not method.asserts and not method.examples:
             self.await_test = True
@@ -395,7 +404,14 @@ class CodeVertical:
         return True
 
     def _finalize(self, method, verified: bool, stub: bool = False) -> None:
-        """Lock a method as tested (has body) or stubbed, and advance."""
+        """Lock a method as tested (has body) or stubbed, and advance.
+
+        A repair that ends in a stub gets the body from before the repair
+        back: finished code never turns into a NotImplementedError stub.
+        """
+        if stub and method.fallback is not None:
+            method.body = method.fallback
+            stub, verified = False, False
         method.verified = verified
         method.status = STATUS_STUBBED if stub else STATUS_TESTED
         if stub:
@@ -406,12 +422,18 @@ class CodeVertical:
     # ------------------------------------------------------------ gates
 
     def _gates_pass(self, source: str, method) -> bool:
-        """Signature, no-placeholder, undefined-name, import — deterministic."""
+        """Signature, no-placeholder, undefined-name, import — deterministic.
+
+        Undefined names are kept on the method, so the next attempt's
+        prompt can name them (a mechanical fact, not a guess).
+        """
         if not gates.signature_matches(source, method.name, method.args):
             return False
         if gates.is_placeholder(source, method.name):
             return False                       # pass / NotImplementedError cheat
-        if gates.undefined_names(source, set(self.store.names())):
+        method.retry.undefined = gates.undefined_names(
+            source, set(self.store.names()))
+        if method.retry.undefined:
             return False
         candidate = self._candidate_module(method, source)
         return gates.import_ok(candidate)[0]
@@ -488,6 +510,10 @@ class CodeVertical:
         method.repairs += 1
         method.status = STATUS_PLANNED
         method.attempts = 0
+        if method.body is not None:
+            method.fallback = method.body
+        method.retry.cut_off = False
+        method.retry.undefined = []
         method.verified = False
         self._seek_pending()
         return True
@@ -512,7 +538,9 @@ class CodeVertical:
         runner phase never got to execute" (budget spent, all stubs) — the
         two must not read the same in an honest report.
         """
-        return {"ok": self._run_clean, "ran": self._run_attempted,
+        stubbed = bool(self.store.stubbed_names())
+        return {"ok": self._run_clean and not stubbed,
+                "ran": self._run_attempted,
                 "checks": len(self.run_results), "rounds": self.repair_round,
                 "failures": [{"check": r.check.name, "kind": r.check.kind,
                               "error": r.error, "blamed": r.blamed}
@@ -537,6 +565,24 @@ class CodeVertical:
             if method.status not in {STATUS_TESTED, STATUS_STUBBED}:
                 self._finalize(method, verified=False, stub=method.body is None)
 
+    def _rescue_stubs(self) -> None:
+        """Give every stubbed method one more try before the module ends.
+
+        next_node calls this when all methods are terminal. A stub means
+        unfinished code, so each stubbed method is reopened once while
+        the step budget allows. By now its siblings have bodies, so the
+        prompt shows more context, and its token cap has already grown.
+        The method may stub again; it is never reopened twice here. A
+        method cut off even at the highest cap is not reopened: the same
+        prompt would be cut off again.
+        """
+        if self.steps_left <= MIN_STEPS_TO_REPAIR:
+            return
+        for method in self.store.methods:
+            if method.status == STATUS_STUBBED and method.repairs == 0 \
+                    and method.retry.truncations <= MAX_CAP_DOUBLINGS:
+                self._unlock(method.name)
+
     def _is_repeat(self, method, source: str) -> bool:
         """Track body hashes; True if this body was already generated."""
         key = hash(source.strip())
@@ -544,11 +590,22 @@ class CodeVertical:
         method.seen_hashes.add(key)
         return repeat
 
-    def _implemented_context(self) -> str:
-        """Signature lines of every other method that already has a body."""
+    def _sibling_context(self) -> str:
+        """Signature lines of the other methods, written or not yet.
+
+        Methods that have no body are listed as "written separately": the
+        model then sees the scope of the other functions and keeps its
+        own function small (a whole-program answer was cut off by the
+        token cap, again and again).
+        """
         done = self.store.bodied_except(self.index)
-        return ("ALREADY IMPLEMENTED (you may call these):\n"
+        text = ("ALREADY IMPLEMENTED (you may call these):\n"
                 + self.store.signature_lines(done))
+        later = self.store.unwritten_except(self.index)
+        if not later:
+            return text
+        return (text + "\nWRITTEN SEPARATELY (you may call these, do not "
+                "write them):\n" + self.store.signature_lines(later))
 
     def _set_episode(self, observation: str = "") -> None:
         """Rebuild a fresh stateless micro-prompt for the next generation.

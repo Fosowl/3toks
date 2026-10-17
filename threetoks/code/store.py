@@ -17,6 +17,18 @@ STUB_BODY = "    raise NotImplementedError"
 
 
 @dataclass
+class RetryState:
+    """What the refused answers for one method taught the harness.
+
+    The record owns it and the implement node shares it, so a retry
+    prompt can tell the model why the last answer was refused.
+    """
+    truncations: int = 0            # times the token cap cut an answer off
+    cut_off: bool = False           # the last answer was cut off
+    undefined: list[str] = field(default_factory=list)  # last gate miss
+
+
+@dataclass
 class MethodRecord:
     """One planned method and everything the harness learns about it."""
     name: str
@@ -27,7 +39,9 @@ class MethodRecord:
     status: str = STATUS_PLANNED
     verified: bool = False          # passed its asserts (not just gated)
     retrieved: bool = False         # body came from retrieval, not the model
+    fallback: str | None = None     # body before a repair, restored on stub
     attempts: int = 0
+    retry: RetryState = field(default_factory=RetryState)
     repairs: int = 0                # times the runner unlocked it to fix
     asserts: list[str] = field(default_factory=list)
     seen_hashes: set[int] = field(default_factory=set)
@@ -63,6 +77,17 @@ class MethodStore:
         """All planned method names, in declaration order."""
         return [method.name for method in self.methods]
 
+    def stubbed_names(self) -> list[str]:
+        """Names of the methods that ended as NotImplementedError stubs.
+
+        The vertical reports these so the user never gets unfinished code
+        without a warning.
+
+        Returns:
+            list[str]: stubbed method names, in declaration order.
+        """
+        return [m.name for m in self.methods if m.status == STATUS_STUBBED]
+
     def bodied_except(self, index: int) -> list[MethodRecord]:
         """Every record with a body other than the one at ``index``.
 
@@ -72,6 +97,22 @@ class MethodStore:
         """
         return [m for i, m in enumerate(self.methods)
                 if i != index and m.body is not None]
+
+    def unwritten_except(self, index: int) -> list[MethodRecord]:
+        """Every record with no body yet, other than the one at ``index``.
+
+        The prompt lists these as "written separately", so the model
+        knows what the other functions will do and does not do their
+        work inside the one it writes.
+
+        Args:
+            index: int, position of the method being written.
+
+        Returns:
+            list[MethodRecord]: the methods that still have no body.
+        """
+        return [m for i, m in enumerate(self.methods)
+                if i != index and m.body is None]
 
     def signature_lines(self, records: list[MethodRecord]) -> str:
         """Signature + contract lines for prompt context, one per method."""

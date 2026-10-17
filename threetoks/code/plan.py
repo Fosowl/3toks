@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass
 
 MAX_METHODS = 4
-_LEAD = re.compile(r"^\s*(?:\d+\s*[.)]\s*)?(?:def\s+)?")
+_LEAD = re.compile(r"^\s*(?:\d+\s*[.)]\s*)?\**(?:def\s+)?")
 _NAME = re.compile(r"([a-z_][a-z0-9_]*)")
 _ARGS = re.compile(r"\(([^)]*)\)")
 _SEP = re.compile(r"^\s*[:=\-]\s*")
@@ -44,16 +44,20 @@ def _parse_line(line: str) -> ParsedMethod | None:
 
     A line qualifies only if it carries a structural signal — parentheses
     or a ``:``/``-``/``=`` separator after the name — so free prose that
-    happens to start with a word is not mistaken for a method.
+    happens to start with a word is not mistaken for a method. Markdown
+    code ticks are dropped and a bold mark around the signature is
+    skipped: Qwen models write ``1. `name(args):` purpose``, and without
+    this every line of a valid plan was rejected (the run then fell back
+    to one huge function). A ``**`` power operator in the purpose stays.
     """
-    rest = _LEAD.sub("", line, count=1)
+    rest = _LEAD.sub("", line.replace("`", ""), count=1)
     name_match = _NAME.match(rest)
     if name_match is None:
         return None
     tail = rest[name_match.end():]
     args_match = _ARGS.match(tail)
     if args_match is not None:
-        tail = tail[args_match.end():]
+        tail = tail[args_match.end():].lstrip("*")
     if args_match is None and _SEP.match(tail) is None:
         return None
     args = args_match.group(1).strip() if args_match else ""
@@ -96,6 +100,12 @@ if __name__ == "__main__":
     assert plan[0].advisory_assert == "assert count_vowels('hi')==1", plan[0]
     assert plan[1].args == "" and plan[1].contract == "lowercase the text"
     assert plan[2].args == "text"
+    ticked = parse_plan("1. `add(a, b):` **sums** them\n2. **`sub(a, b)`**: minus")
+    assert [m.name for m in ticked] == ["add", "sub"], ticked
+    assert ticked[1].contract == "minus", ticked[1]
+    power = parse_plan("1. power(a, b): a**b e.g. power(2, 3)==2**3")[0]
+    assert power.contract == "a**b", power
+    assert power.advisory_assert == "assert power(2, 3)==2**3", power
     assert _as_assert("f(1)") is None            # not a comparison
     assert len(parse_plan("\n".join(f"m{i}(): x" for i in range(9)))) == MAX_METHODS
     print("smoke OK")

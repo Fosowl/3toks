@@ -50,6 +50,9 @@ CHANGED_REASON = "the file changed since it was read"
 UNDECODABLE_REASON = ("the file on disk can no longer be decoded as "
                       "Python source")
 NO_OUTPUT_REASON = "the script printed nothing"
+UNWRITTEN_REASON = "these functions could not be written: {names}"
+INCOMPLETE_NOTE = ("(INCOMPLETE: {count} of {total} functions could not be "
+                   "written and still raise NotImplementedError: {names})")
 
 
 def run(task: str, services: Services, policy) -> dict:
@@ -87,7 +90,9 @@ def _author(task: str, services: Services, policy) -> dict:
     run calls it with the task, the services and the policy.
     It runs the greenfield vertical without self-tests: E6 showed that
     model-written asserts do not improve whole-module correctness on a
-    1.5b model; the deterministic gates carry the quality.
+    1.5b model; the deterministic gates carry the quality. Stubbed
+    functions are named in a note at the top of the answer, so unfinished
+    code is never delivered without a warning.
 
     Args:
         task (str): the user's coding request, from run.
@@ -99,7 +104,14 @@ def _author(task: str, services: Services, policy) -> dict:
     """
     vertical = CodeVertical(task, gen_tests=False,
                             retriever=services.retriever)
-    return run_episode(vertical, policy, max_steps=MAX_STEPS)
+    result = run_episode(vertical, policy, max_steps=MAX_STEPS)
+    stubbed = result.get("stubbed") or []
+    if stubbed:
+        note = INCOMPLETE_NOTE.format(count=len(stubbed),
+                                      total=len(result["methods"]),
+                                      names=", ".join(stubbed))
+        result["answer"] = f"{note}\n{result['answer']}"
+    return result
 
 
 def _compute(task: str, services: Services, policy) -> dict:
@@ -135,17 +147,23 @@ def _compute_fallback(result: dict) -> str:
 
     The compute mode uses this so the user sees why there is no answer.
     _compute calls it with the vertical result after the script was set.
-    It takes the first run failure error, or a "printed nothing" reason.
+    It takes the first run failure error; else the names of the functions
+    that could not be written; else a "printed nothing" reason.
 
     Args:
-        result (dict): the CodeVertical result with "script", from
-            _compute.
+        result (dict): the CodeVertical result with "script" and
+            "stubbed", from _compute.
 
     Returns:
         str: the fallback answer text.
     """
     failures = (result.get("run") or {}).get("failures") or []
-    error = failures[0]["error"] if failures else NO_OUTPUT_REASON
+    stubbed = result.get("stubbed") or []
+    error = NO_OUTPUT_REASON
+    if stubbed:
+        error = UNWRITTEN_REASON.format(names=", ".join(stubbed))
+    if failures:
+        error = failures[0]["error"]
     return (f"(the computation did not produce output: {error}; "
             f"here is the script)\n{result['script']}")
 

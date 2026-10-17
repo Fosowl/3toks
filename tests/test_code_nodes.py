@@ -3,7 +3,9 @@ import ast
 import unittest
 
 from threetoks.backend.base import FAMILY_R1, GenResult, ModelSpec
-from threetoks.code.nodes import (IMPLEMENT_SYSTEM, ImplementNode, PlanNode,
+from threetoks.code.nodes import (IMPLEMENT_MAX_TOKENS,
+                                 IMPLEMENT_MAX_TOKENS_CEILING,
+                                 IMPLEMENT_SYSTEM, ImplementNode, PlanNode,
                                  TestNode)
 from threetoks.policy import Policy, PolicyConfig
 from threetoks.render import Episode
@@ -50,6 +52,47 @@ class ImplementNodeTruncationTest(unittest.TestCase):
         self.assertTrue(decision.valid)
         self.assertIn("min(high, max(low, value))", decision.value)
         self.assertEqual(replies, [])
+
+
+class ImplementNodeCapEscalationTest(unittest.TestCase):
+    def _decide(self, replies):
+        caps = []
+
+        class Backend:
+            def complete(self, model, raw_prompt, opts):
+                caps.append(opts.max_tokens)
+                return replies.pop(0)
+
+        policy = Policy(Backend(), PolicyConfig(ModelSpec("m", FAMILY_R1)))
+        node = ImplementNode("one", "", "return one")
+        return caps, policy.decide(Episode("", "g"), node), node
+
+    def test_cap_doubles_after_each_cut_off_in_one_ladder(self):
+        cut = GenResult("x = 1", 10, 200, 0.0, "length")
+        done = GenResult("return 1", 10, 3, 0.0, "stop")
+        caps, decision, node = self._decide([cut, cut, done])
+        self.assertEqual(caps, [IMPLEMENT_MAX_TOKENS,
+                                IMPLEMENT_MAX_TOKENS * 2,
+                                IMPLEMENT_MAX_TOKENS * 4])
+        self.assertTrue(decision.valid)
+        self.assertEqual(node.retry.truncations, 2)
+
+    def test_cap_never_passes_the_ceiling(self):
+        node = ImplementNode("one", "", "c")
+        node.retry.truncations = 10
+        self.assertEqual(node.max_tokens, IMPLEMENT_MAX_TOKENS_CEILING)
+
+    def test_a_normal_stop_never_raises_the_cap(self):
+        done = GenResult("return 1", 10, 3, 0.0, "stop")
+        caps, _, node = self._decide([done])
+        self.assertEqual((caps, node.retry.truncations),
+                         ([IMPLEMENT_MAX_TOKENS], 0))
+
+    def test_prompt_changes_after_a_cut_off(self):
+        node = ImplementNode("one", "", "c")
+        before = node.render(PERM)
+        node.on_truncated()
+        self.assertNotEqual(node.render(PERM), before)
 
 
 class ImplementNodeParseTest(unittest.TestCase):

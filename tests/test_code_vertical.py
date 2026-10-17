@@ -16,7 +16,10 @@ import unittest
 from pathlib import Path
 
 from threetoks.backend.base import FAMILY_CHATML, GenResult, ModelSpec
-from threetoks.code.vertical import CodeVertical
+from threetoks.code.nodes import (IMPLEMENT_MAX_TOKENS,
+                                 IMPLEMENT_MAX_TOKENS_CEILING, ImplementNode)
+from threetoks.code.store import RetryState
+from threetoks.code.vertical import MAX_METHOD_ATTEMPTS, CodeVertical
 from threetoks.engine import run_episode
 from threetoks.policy import Policy, PolicyConfig
 
@@ -313,6 +316,21 @@ class RunnerRepairLoopTest(unittest.TestCase):
         self.assertIn("ZeroDivisionError", failure["error"])
         ast.parse(outcome["answer"])
 
+    def test_failed_repair_restores_the_finished_body_not_a_stub(self):
+        # The runner blames main, the blind resamples never parse: the
+        # run-crashing body is kept (and reported), never a stub.
+        policy, _ = make_policy([
+            "main(): computes the answer",
+            "return 1 // 0",
+            *["return ((("] * 18])           # both repair rounds fail
+        vertical = CodeVertical("compute the answer", gen_tests=False)
+        outcome = run_episode(vertical, policy, MAX_STEPS)
+        row = _row(outcome, "main")
+        self.assertEqual(row["status"], "tested")
+        self.assertEqual(outcome["stubbed"], [])
+        self.assertIn("return 1 // 0", outcome["answer"])
+        self.assertFalse(outcome["run"]["ok"])
+
     def test_interactive_input_code_is_not_treated_as_broken(self):
         # input() dies with EOFError in the sandbox; that is inconclusive,
         # so the body must survive with zero repairs and a clean report.
@@ -452,6 +470,137 @@ class ScriptGuardTest(unittest.TestCase):
             "show_squares(): prints the squares", "print([1, 4, 9])"])
         self.assertIn(self.GUARD + "\n    show_squares()\n",
                       outcome["answer"])
+
+
+class SpyBackend(ScriptedBackend):
+    """A ScriptedBackend that also keeps every raw prompt it was sent."""
+
+    def __init__(self, texts):
+        super().__init__(texts)
+        self.prompts = []
+
+    def complete(self, model, raw_prompt, opts):
+        self.prompts.append(raw_prompt)
+        return super().complete(model, raw_prompt, opts)
+
+
+def _chatml_policy(backend):
+    return Policy(backend, PolicyConfig(ModelSpec("m", FAMILY_CHATML)))
+
+
+class IncompleteModuleSafeguardsTest(unittest.TestCase):
+    GUARD = 'if __name__ == "__main__":'
+    CALLS_PER_ROUND = MAX_METHOD_ATTEMPTS * PolicyConfig(
+        ModelSpec("m", FAMILY_CHATML)).max_attempts
+    NEVER_PARSES = ["return((("] * CALLS_PER_ROUND   # one method, a round
+
+    def _drive(self, goal, texts):
+        policy, backend = make_policy(texts)
+        vertical = CodeVertical(goal, gen_tests=False)
+        return run_episode(vertical, policy, MAX_STEPS), backend
+
+    def test_stub_is_reopened_once_and_can_still_succeed(self):
+        outcome, _ = self._drive("double a number", [
+            "double(n): returns n times two",
+            *self.NEVER_PARSES, "return n * 2"])       # rescue answer
+        row = _row(outcome, "double")
+        self.assertEqual((row["status"], row["repairs"]), ("tested", 1))
+        self.assertEqual(outcome["stubbed"], [])
+        self.assertNotIn("NotImplementedError", outcome["answer"])
+
+    def test_stub_is_reopened_only_once(self):
+        outcome, backend = self._drive("double a number", [
+            "double(n): returns n times two",
+            *self.NEVER_PARSES, *self.NEVER_PARSES])
+        self.assertEqual(outcome["stubbed"], ["double"])
+        self.assertEqual(backend.calls, 1 + 2 * self.CALLS_PER_ROUND)
+
+    def test_unfinished_module_has_no_sole_function_guard(self):
+        outcome, _ = self._drive("make a game", [
+            "setup(): set up\n2. update(x): update the state",
+            "return 1", *self.NEVER_PARSES, *self.NEVER_PARSES])
+        self.assertEqual(outcome["stubbed"], ["update"])
+        self.assertNotIn(self.GUARD, outcome["answer"])
+        self.assertFalse(outcome["run"]["ok"])
+
+    def test_unwritten_sibling_is_shown_to_the_model(self):
+        backend = SpyBackend(["setup(): set up\n2. update(x): update the state",
+                              "return 1", "return x"])
+        run_episode(CodeVertical("make a game", gen_tests=False),
+                    _chatml_policy(backend), MAX_STEPS)
+        plan_prompt, setup_prompt = backend.prompts[:2]
+        self.assertNotIn("update(x): update the state", plan_prompt)
+        self.assertIn("update(x): update the state", setup_prompt)
+
+
+class TokenCapEscalationTest(unittest.TestCase):
+    def _drive(self):
+        caps = []
+
+        class Cutting:
+            def complete(self, model, raw_prompt, opts):
+                caps.append(opts.max_tokens)
+                if len(caps) == 1:
+                    return GenResult("double(n): twice", 8, 4, 0.0, "stop")
+                return GenResult("x = 1", 8, opts.max_tokens, 0.0, "length")
+
+        run_episode(CodeVertical("double", gen_tests=False),
+                    _chatml_policy(Cutting()), MAX_STEPS)
+        return caps
+
+    def test_cap_raised_by_a_cut_off_survives_the_next_attempt(self):
+        caps = self._drive()
+        self.assertEqual(caps[1:7], [IMPLEMENT_MAX_TOKENS,
+                                     IMPLEMENT_MAX_TOKENS * 2,
+                                     *[IMPLEMENT_MAX_TOKENS_CEILING] * 4])
+
+    def test_method_cut_off_at_the_highest_cap_is_not_reopened(self):
+        per_round = MAX_METHOD_ATTEMPTS * PolicyConfig(
+            ModelSpec("m", FAMILY_CHATML)).max_attempts
+        self.assertEqual(len(self._drive()), 1 + per_round)  # plan + a round
+
+
+class RetryNotesTest(unittest.TestCase):
+    def test_retry_prompt_names_the_missing_module_and_then_succeeds(self):
+        backend = SpyBackend(["root(n): square root of n",
+                              "return math.sqrt(n)",       # math not imported
+                              "import math\n    return math.sqrt(n)"])
+        outcome = run_episode(CodeVertical("square root", gen_tests=False),
+                              _chatml_policy(backend), MAX_STEPS)
+        self.assertNotIn("math", backend.prompts[1])
+        self.assertIn("math", backend.prompts[2])
+        self.assertEqual(_row(outcome, "root")["status"], "tested")
+        self.assertEqual(outcome["stubbed"], [])
+
+    def test_hint_is_dropped_when_the_next_answer_has_no_names(self):
+        backend = SpyBackend(["root(n): square root of n",
+                              "return math.sqrt(n)",       # math not imported
+                              *["return((("] * 3,          # next attempt
+                              "import math\n    return math.sqrt(n)"])
+        run_episode(CodeVertical("square root", gen_tests=False),
+                    _chatml_policy(backend), MAX_STEPS)
+        self.assertNotIn("math", backend.prompts[-1])
+
+    def test_cut_off_note_does_not_reach_a_later_repair_prompt(self):
+        prompts = []
+
+        class CutThenCrash:
+            def complete(self, model, raw_prompt, opts):
+                prompts.append(raw_prompt)
+                step = len(prompts)
+                texts = {1: "main(): computes the answer",
+                         3: "return 1 // 0", 4: "return 42"}
+                if step == 2:
+                    return GenResult("x = 1", 8, opts.max_tokens, 0.0,
+                                     "length")
+                return GenResult(texts[step], 8, 4, 0.0, "stop")
+
+        run_episode(CodeVertical("compute the answer", gen_tests=False),
+                    _chatml_policy(CutThenCrash()), MAX_STEPS)
+        noted = ImplementNode("main", "", "computes the answer",
+                              retry=RetryState(1, True)).render(())
+        self.assertIn(noted, prompts[2])       # retry right after the cut
+        self.assertNotIn(noted, prompts[3])    # runner repair of a good body
 
 
 class ReturnShapedCheatsAreRejectedTest(unittest.TestCase):

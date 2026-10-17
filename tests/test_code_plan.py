@@ -40,6 +40,30 @@ class ParseLineRecoveryTest(unittest.TestCase):
         self.assertEqual(methods[0].contract, "implement helper")
 
 
+class MarkdownPlanTest(unittest.TestCase):
+    # Real qwen3.6 completion after the "1. " prefill: every line has
+    # code ticks around the signature. All four lines were rejected once.
+    LIVE_PLAN = (
+        " `init_game():` Initialize game state (bird, pipes, score).\n"
+        "2.  `update_game_state(keys_pressed, dt):` Move the bird.\n"
+        "3.  **`draw_game(screen, pipes)`**: Render the frame.")
+
+    def test_ticked_signatures_are_recovered(self):
+        methods = parse_plan("FUNCTIONS:\n1. " + self.LIVE_PLAN)
+        self.assertEqual([m.name for m in methods],
+                         ["init_game", "update_game_state", "draw_game"])
+        self.assertEqual(methods[1].args, "keys_pressed, dt")
+        self.assertEqual(methods[0].contract,
+                         "Initialize game state (bird, pipes, score).")
+
+    def test_power_operator_in_the_purpose_is_kept(self):
+        [method] = parse_plan(
+            "1. **`power(a, b)`**: a**b, e.g. power(2, 3)==2**3")
+        self.assertEqual(method.name, "power")
+        self.assertEqual(method.contract, "a**b")
+        self.assertEqual(method.advisory_assert, "assert power(2, 3)==2**3")
+
+
 class ProseSkipTest(unittest.TestCase):
     def test_prose_line_with_no_structural_signal_is_skipped(self):
         # No parentheses and no :/-/= separator after the first word.

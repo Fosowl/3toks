@@ -10,11 +10,15 @@ ladder resamples on a parse failure; correctness is the vertical's job.
 import ast
 
 from threetoks.code import gates, plan
+from threetoks.code.store import RetryState
 from threetoks.nodes import Decision
 
 PLAN_PREFILL = "FUNCTIONS:\n1. "
 PLAN_MAX_TOKENS = 140
 IMPLEMENT_MAX_TOKENS = 200
+MAX_CAP_DOUBLINGS = 2                # cap doubles after each cut-off
+IMPLEMENT_MAX_TOKENS_CEILING = IMPLEMENT_MAX_TOKENS << MAX_CAP_DOUBLINGS
+MAX_HINT_NAMES = 6                   # undefined names named in a retry
 TEST_MAX_TOKENS = 60
 IMPLEMENT_STOP = ("\ndef ", "\nclass ", "\nif __name__", "\n@", "\nprint(")
 
@@ -23,7 +27,10 @@ PLAN_SYSTEM = "You plan Python programs as a list of small functions."
 IMPLEMENT_SYSTEM = ("You are a Python programmer. Write exactly one small "
                     "Python function with a complete, working body. Output "
                     "only code, no explanations, no markdown. Never leave it "
-                    "unfinished: no pass, no ..., no raise NotImplementedError.")
+                    "unfinished: no pass, no ..., no raise NotImplementedError. "
+                    "A placeholder is rejected and the program cannot run "
+                    "without the function: a short complete function is "
+                    "better than a long unfinished one.")
 TEST_SYSTEM = "You write Python assert statements to test a function."
 
 
@@ -44,7 +51,9 @@ class PlanNode:
         """One instruction line; the goal is already in the episode task."""
         return (f"List the {plan.MAX_METHODS} or fewer small functions to "
                 "write, one per line, as name(args): purpose. "
-                "Helpers before the functions that call them.")
+                "Helpers before the functions that call them. The functions "
+                "share no global state: pass data in arguments and return "
+                "it.")
 
     def parse(self, text: str, perm: tuple[int, ...]) -> Decision:
         """Recover methods from the prefill-prefixed completion."""
@@ -61,18 +70,23 @@ class ImplementNode:
     of a full vertical attempt — and the retry prompt escalates: it tells
     the model outright that its last answer was an empty placeholder and
     to write the real logic.
+
+    A body cut off by the token cap is rejected too (``reject_truncated``).
+    The same prompt with the same cap would be cut off again, so the
+    policy calls ``on_truncated``: the cap doubles (up to the ceiling) and
+    the prompt asks for a shorter, function-only answer.
     """
 
     kind = "implement"
     tag = "impl"
     system = IMPLEMENT_SYSTEM
     stop = IMPLEMENT_STOP
-    max_tokens = IMPLEMENT_MAX_TOKENS
     reject_truncated = True  # a cut-off body is not code
 
     def __init__(self, name: str, args: str, contract: str,
                  examples: list[str] | None = None,
-                 temperature: float | None = None):
+                 temperature: float | None = None,
+                 retry: RetryState | None = None):
         self.name = name
         self.args = args
         self.contract = contract
@@ -81,6 +95,27 @@ class ImplementNode:
         self.prefill = f"def {name}({args}):\n    "
         self.question = f"write {name}({args})"
         self.placeholder_rejections = 0
+        self.retry = RetryState() if retry is None else retry
+
+    @property
+    def max_tokens(self) -> int:
+        """The token cap now: doubles per cut-off, up to the ceiling.
+
+        The policy reads this before every generation call.
+
+        Returns:
+            int: the cap for the next call.
+        """
+        doublings = min(self.retry.truncations, MAX_CAP_DOUBLINGS)
+        return IMPLEMENT_MAX_TOKENS << doublings
+
+    def on_truncated(self) -> None:
+        """Record that the token cap cut the last answer off.
+
+        The policy calls this when a completion ended on the cap.
+        """
+        self.retry.truncations += 1
+        self.retry.cut_off = True
 
     def render(self, perm: tuple[int, ...]) -> str:
         """The one method's spec; goal and siblings live in the episode."""
@@ -88,13 +123,41 @@ class ImplementNode:
                  f"{self.name}({self.args}): {self.contract}"]
         for example in self.examples:
             lines.append(f"Example: {example}")
+        lines.append("Write ONLY this function. The other functions are "
+                     "written separately: do not write them, and do not "
+                     "write setup code or the whole program.")
+        lines.append("Import every module inside the function. Use no "
+                     "global variable or constant that the function does "
+                     "not define: data comes in through the arguments.")
         lines.append("Do not use pass or raise NotImplementedError — "
                      "actually implement it.")
+        return "\n".join(lines + self._retry_notes())
+
+    def _retry_notes(self) -> list[str]:
+        """Lines that say why the earlier answers were refused.
+
+        render adds these after the spec, so a retry is not a blind
+        repeat of the same prompt.
+
+        Returns:
+            list[str]: zero or more note lines.
+        """
+        notes = []
         if self.placeholder_rejections:
-            lines.append("Your previous answer was an empty placeholder. "
+            notes.append("Your previous answer was an empty placeholder. "
                          "That is not acceptable: write the COMPLETE "
                          "working logic of the function now.")
-        return "\n".join(lines)
+        if self.retry.cut_off:
+            notes.append("Your previous answer was too long and was cut "
+                         "off. Write a SHORTER version of only this "
+                         "function. Call the other functions instead of "
+                         "doing their work.")
+        if self.retry.undefined:
+            names = ", ".join(self.retry.undefined[:MAX_HINT_NAMES])
+            notes.append("Your previous answer used names that do not "
+                         f"exist: {names}. Import modules inside the "
+                         "function and take the data from the arguments.")
+        return notes
 
     def parse(self, text: str, perm: tuple[int, ...]) -> Decision:
         """Reconstruct and trim to the named function; a body that does

@@ -77,7 +77,9 @@ class Policy:
         The retry ladder calls this with each completion. A node with
         ``reject_truncated = True`` (code generation) must not accept a
         body that the token cap cut off, so that completion becomes an
-        invalid Decision and the ladder tries again.
+        invalid Decision and the ladder tries again. A node that has an
+        ``on_truncated`` method is told about the cut, so it can raise
+        its cap before the next try (the same cap would cut again).
 
         Args:
             node: the decision node (from the vertical).
@@ -91,6 +93,9 @@ class Policy:
         truncated = result.done_reason in TRUNCATED_REASONS
         if not (truncated and getattr(node, "reject_truncated", False)):
             return decision
+        notify = getattr(node, "on_truncated", None)
+        if callable(notify):
+            notify()
         return Decision(node.kind, decision.value, decision.raw_text,
                         valid=False)
 
