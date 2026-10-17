@@ -113,7 +113,7 @@ You need three things: a model server, ThreeToks, and one command.
 **1. Get a model.** Install [Ollama](https://ollama.com). Then download the default model:
 
 ```sh
-ollama pull qwen3.5:2b
+ollama pull qwen3.5:4b
 ```
 
 Other local servers also work. See [Choose a model](#choose-a-model).
@@ -468,14 +468,14 @@ When search fails completely, ThreeToks says so. It does not make up an answer:
 
 - **Architecture.** [docs/DESIGN.md](docs/DESIGN.md) explains the decision nodes, the append-only prompt layout, the model and backend plan, the ladder that recovers from wrong picks, and the layout of the repository.
 - **New agents.** [docs/AGENTS.md](docs/AGENTS.md).
-- **Default model.** `qwen3.5:2b` through Ollama, for every node. `deepseek-r1:1.5b` also works (ThreeToks switches off its thinking in raw mode), but it is not the default.
+- **Default model.** `qwen3.5:4b` through Ollama, for every node. `deepseek-r1:1.5b` also works (ThreeToks switches off its thinking in raw mode), but it is not the default.
 - **Experiments.** The folders in `spikes/` hold tests of the code agent: E7 code routing, E8 the edit vertical, E9 code retrieval. The Phase 0 results (E1 to E4) are in [docs/DESIGN.md §11](docs/DESIGN.md).
 
 ### What the experiments showed
 
 Phase 0 chose the default model and the shape of the decision nodes from **measured behavior**, not from guesses:
 
-- `qwen3.5:2b` picks the right menu option **76.7%** of the time. `deepseek-r1:1.5b` gets only 23 – 26%. So it cannot be the policy model.
+- `qwen3.5:4b` picks the right menu option **76.7%** of the time. `deepseek-r1:1.5b` gets only 23 – 26%. So it cannot be the policy model.
 - The "escape" option must be the **last numbered choice**, not the digit `0`. Tiny models almost never write a `0`.
 - A retry ladder (a new temperature and a shuffled menu) fixes about **half** of the first-try failures.
 
