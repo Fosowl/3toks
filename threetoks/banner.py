@@ -1,36 +1,39 @@
 """Startup banner: a flying fish and its sea shadow drawn as a "3".
 
 The fish leaps head first: forked tail at the waist, where it left the
-water, back arcing up the right side and over the top, head at the top
-left tip with its mouth open and its eye on the upper side. That arc is
-the upper bowl of the 3. Under the horizon its shadow is the same shape
-mirrored and shaded, so the two halves read as one glyph. The veined
-pectoral wing, drawn in light shades so the water shows through, sweeps
-back under the body; a small pelvic fin sits near the tail. The TOKS
-wordmark stands on the horizon and casts a shorter reflection that fades
-with depth.
+water, back arcing up the right side and over the top, blunt head at the
+top left tip with its eye on the upper side and a closed mouth. That arc
+is the upper bowl of the 3. Under the horizon its shadow is the same
+shape mirrored and shaded, so the two halves read as one glyph. The
+veined pectoral wing, drawn in light shades so the water shows through,
+sweeps back under the body; a small pelvic fin sits near the tail. The
+TOKS wordmark stands on the horizon and casts a shorter reflection that
+fades with depth.
 
-Every row is pure text; :func:`build_banner` adds the color.
+Every row is pure text; :func:`build_banner` adds the color, with two
+accent cells (eye, mouth) painted outside the ramp.
 """
 import random
 
-from threetoks.theme import GRAY_LIGHT, ZAP, dim, fg, gradient, hairline
+from threetoks.theme import (GRAY_LIGHT, ZAP, dim, fg, gradient, hairline,
+                             ramp_at)
 
-# Upper bowl of the 3. Open mouth: thin upper jaw ▀, longer lower jaw ◢▄;
-# eye ▞◉▚; body █; see-through wing and pelvic fin ░▒▓ with ribs; forked
-# tail ◢◤ on the water.
+# Upper bowl of the 3. Blunt snout with a closed mouth (one ``m`` accent
+# cell), big eye ◉, body █, see-through wing and pelvic fin ░▒▓ with ribs,
+# thin forked tail ◢ whose lower lobe is the longer one, as on the real
+# fish, reaching the water.
 FISH = (
-    "         ▄▄▄▄▟███████▙▄      ",
-    "     ▀▀▀█▞◉▚███████████▙▄    ",
-    "   ◢▄▄▄▄███████████████▙     ",
+    "        ▄▄▄▄▄▄▟███████▙▄     ",
+    "     ▄███◉█████████████▙▄    ",
+    "     ▀█m████████████████▙    ",
     "         ▓▓▓▒▓▒░▒░   ▜████▙  ",
     "           ▓▓▒▓▒░▒░   ▜███▌  ",
     "             ▓▒▓▒░▒░  ▐███▌  ",
     "         ░▒    ▒▓▒░▒  ▟███▛  ",
     "          ░▒▓▓   ▒░  ▟███▛   ",
-    "    ◢███████████████████▛    ",
-    "   ◢▛▀▀▀▀▜█████████████▛▀    ",
-    "   ◤      ▀▀▀▜███████▛▀      ",
+    "       ◢▄▄▄▄▄▄▄▄▄▄▄▟████▛    ",
+    "     ◢▀▀▀▀▀█████████████▛▀   ",
+    "   ◢▀▀                       ",
 )
 # Wordmark; :func:`banner_rows` stands it on the horizon beside the fish.
 WORDMARK = (
@@ -46,7 +49,10 @@ GAP = "  "
 INDENT = "  "
 HORIZON = "▔"
 WIDTH = len(INDENT) + len(FISH[0]) + len(GAP) + len(WORDMARK[0])
-FULL = "█▙▜▟▛▌▐"              # solid glyphs: take the depth shade in water
+# Accent cells keep a fixed color instead of the ramp: art marker →
+# (glyph, xterm color). The eye is pale; the mouth is one dark cell.
+ACCENTS = {"◉": ("◉", 231), "m": ("█", 18)}
+FULL = "█▙▜▟▛▌▐m"             # solid glyphs: take the depth shade in water
 HALF = "▀▄▘▗▝▖"               # thin edges: one step lighter than the row
 LADDER = "█▓▒░ "              # shade steps, dark to gone
 MIRROR = {"▄": "▀", "▀": "▄", "▙": "▜", "▜": "▙", "▟": "▛", "▛": "▟",
@@ -81,6 +87,17 @@ def _sink(char: str, shade: str) -> str:
     if char in HALF:
         return _lighter(shade)
     return char
+
+
+def _paint(row: str, enabled: bool, ramp) -> str:
+    """Color ``row`` through ``ramp``, except ``ACCENTS`` cells, which
+    draw their own glyph in their own color (plain when disabled)."""
+    cells = []
+    for index, char in enumerate(row):
+        glyph, color = ACCENTS.get(
+            char, (char, ramp_at(index, len(row), ramp)))
+        cells.append(fg(color, glyph, enabled))
+    return "".join(cells)
 
 
 def reflect(rows, shades: str) -> list:
@@ -143,8 +160,9 @@ def build_banner(model: str, agent_count: int, enabled: bool = True,
 
     Returns:
         The banner text, ``WIDTH`` columns wide. The sky uses the whole
-        ramp; the horizon and the water stop at ``WATER_DEPTH`` of it, so
-        the shadow reads as a reflection yet stays legible on black.
+        ramp with ``ACCENTS`` for the eye and mouth; the horizon and the
+        water stop at ``WATER_DEPTH`` of it, so the shadow reads as a
+        reflection yet stays legible on black.
     """
     rng = rng or random.Random()
     ramp = rng.choice(BANNER_RAMPS)
@@ -153,7 +171,7 @@ def build_banner(model: str, agent_count: int, enabled: bool = True,
     meta = f"{ZAP} {model} · {agent_count} agents online"
     return "\n".join([
         hairline(6, enabled, ramp, WIDTH),
-        *(INDENT + gradient(row, enabled, ramp) for row in sky),
+        *(INDENT + _paint(row, enabled, ramp) for row in sky),
         INDENT + gradient(horizon, enabled, water),
         *(INDENT + gradient(row, enabled, water) for row in sea),
         INDENT + dim(TAGLINE, enabled),

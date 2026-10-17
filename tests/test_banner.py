@@ -15,7 +15,7 @@ class ArtShapeTest(unittest.TestCase):
         shadow = banner.reflect(banner.FISH, banner.FISH_SHADES)
         self.assertEqual(len(shadow), len(banner.FISH))
         # The waterline rows: the tail sinks first, the eye last.
-        self.assertIn("◣", shadow[0])
+        self.assertIn("◥", shadow[0])
         self.assertIn("○", shadow[-2])
         for sky, sea in zip(reversed(banner.FISH), shadow):
             self.assertEqual(len(sky), len(sea))
@@ -32,6 +32,15 @@ class ArtShapeTest(unittest.TestCase):
     def test_thin_edges_sink_one_shade_lighter_than_solids(self):
         self.assertEqual(banner.reflect(("█▀",), "▓"), ["▓▒"])
         self.assertEqual(banner.reflect(("▀",), " "), [" "])
+        self.assertEqual(banner.reflect(("m◉",), "▒"), ["▒○"])
+
+    def test_accent_cells_draw_their_glyph_in_their_own_color(self):
+        plain = banner._paint("m◉█", enabled=False, ramp=(1, 2))
+        self.assertEqual(plain, "█◉█")
+        colored = banner._paint("m◉█", enabled=True, ramp=(1, 2))
+        self.assertIn(theme.fg(banner.ACCENTS["m"][1], "█"), colored)
+        self.assertIn(theme.fg(banner.ACCENTS["◉"][1], "◉"), colored)
+        self.assertTrue(colored.endswith(theme.fg(2, "█")))
 
 
 class BuildBannerTest(unittest.TestCase):
@@ -72,7 +81,8 @@ class BuildBannerTest(unittest.TestCase):
 
     def test_colors_come_from_one_ramp_and_water_from_its_dark_end(self):
         text = banner.build_banner("m", 2, enabled=True, rng=random.Random(1))
-        art_codes = _codes(text) - {theme.GRAY, theme.GRAY_LIGHT}
+        accents = {color for _, color in banner.ACCENTS.values()}
+        art_codes = _codes(text) - {theme.GRAY, theme.GRAY_LIGHT} - accents
         ramp = next(r for r in banner.BANNER_RAMPS if art_codes <= set(r))
         sea = text[text.index(banner.HORIZON):text.index(banner.TAGLINE)]
         self.assertTrue(_codes(sea) - {theme.GRAY} <= set(ramp[:banner.WATER_DEPTH]))
