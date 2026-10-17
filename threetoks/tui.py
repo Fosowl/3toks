@@ -26,12 +26,12 @@ import sys
 import time
 from dataclasses import dataclass, field
 
-from threetoks.theme import (CYAN, VIOLET, PINK, GREEN, AMBER, GRAY, GRAY_LIGHT, WHITE, RAMP, SPINE, NODE, ZAP, CHEVRON, NOTE_BULLET, CROSS, color_enabled, dim, fg, gradient, ramp_at)
+from threetoks.banner import build_banner
+from threetoks.theme import (CYAN, VIOLET, PINK, GREEN, AMBER, GRAY, GRAY_LIGHT, WHITE, RAMP, PANEL_WIDTH, SPINE, NODE, ZAP, CHEVRON, NOTE_BULLET, CROSS, color_enabled, dim, fg, gradient, hairline, ramp_at)
 
 TOKEN_BARS = "▁▂▃▄▅▆▇█"     # ticker token-cost bar, 1..8+ tokens
 
 # --- misc constants ------------------------------------------------------
-PANEL_WIDTH = 64
 STAT_COLUMN = 56            # ticker column where the trailing stats start
 FAST_S, STEADY_S = 0.4, 1.2 # decision-speed thresholds for bar color
 SHORT_TEXT_CLIP = 40
@@ -64,12 +64,6 @@ def build_debug_tokens_line(event: dict, enabled: bool = True) -> str:
     reason = event.get("done_reason") or "?"
     return dim(f"{UNDER_INDENT}· in {prompt} → out {result}"
                f" · {pt}pt/{ot}ot · {reason}", enabled)
-
-
-def hairline(node_at: int, enabled: bool = True, ramp=RAMP) -> str:
-    """A gradient hairline rule with a ◈ node at column ``node_at``."""
-    line = "─" * PANEL_WIDTH
-    return gradient(line[:node_at] + NODE + line[node_at + 1:], enabled, ramp)
 
 
 def _clip(text: str, limit: int) -> str:
@@ -365,84 +359,6 @@ def render_task_report(stats: dict, enabled: bool = True) -> str:
         parts.append(f"{retries} retries")
     return "\n".join((dim(head, enabled),
                       dim("    " + " · ".join(parts), enabled)))
-
-
-# "3 TOKS" wordmark: a glitch-dissolve "3" beside DOS-shadow "TOKS".
-# Rendered rows are led by random motion trails (:func:`_motion_trail`)
-# hugging each line's first glyph, plus a streak under the 3, as if the
-# wordmark were speeding rightward; the TOKS shadow row is static.
-BANNER_ART = (
-    "▓█████▙   ████████╗ ██████╗ ██╗  ██╗ ███████╗",
-    " ░░▒▓██▌  ╚══██╔══╝██╔═══██╗██║ ██╔╝ ██╔════╝",
-    "  ▟███▛░     ██║   ██║   ██║█████╔╝  ███████╗",
-    " ░▒▀▜██▌     ██║   ██║   ██║██╔═██╗  ╚════██║",
-    "▓█████▛      ██║   ╚██████╔╝██║  ██╗ ███████║",
-)
-BANNER_SHADOW = "╚═╝    ╚═════╝ ╚═╝  ╚═╝ ╚══════╝"
-STREAK_COLUMN = 13   # art column where the TOKS shadow row starts
-BAR_INDENT = 7       # under-3 trail may reach the bottom bar's right edge
-TRAIL_WIDTH = 6      # columns left of the art reserved for motion trails
-TRAIL_SHADES = " ░▒"
-
-# Launch ramps: build_banner draws one per call; all run dark to neon so
-# the left trail zone stays in shadow and the wordmark brightens rightward.
-BANNER_RAMPS = (
-    (54, 55, 56, 92, 93, 129),     # midnight: deep purple → electric violet
-    (19, 25, 26, 32, 38, 44),      # blade rain: navy → azure → turquoise
-    (23, 29, 30, 36, 37, 43),      # deep sea: dark teal → aqua
-    (53, 89, 125, 161, 162, 197),  # noir crimson: wine → neon crimson
-    (22, 28, 29, 35, 41, 42),      # ghost circuit: dark green → sea green
-)
-
-
-def _motion_trail(rng, indent: int) -> str:
-    """A motion trail ``TRAIL_WIDTH + indent`` columns wide: light shades
-    densening rightward against the glyphs, flickering per column."""
-    span = TRAIL_WIDTH + indent
-    top = len(TRAIL_SHADES) - 1
-    length = rng.randint(2, span)
-    shades = []
-    for column in range(length):
-        rise = top * (column + 1) / length
-        flicker = rng.choice((-1, -1, 0, 0, 1))
-        shades.append(TRAIL_SHADES[max(0, min(top, round(rise) + flicker))])
-    return "".join(shades).rjust(span)
-
-
-def _banner_rows(rng) -> list:
-    """The art rows, each led by a fresh trail hugging its first glyph."""
-    rows = []
-    for row in BANNER_ART:
-        indent = len(row) - len(row.lstrip())
-        rows.append(_motion_trail(rng, indent) + row.lstrip())
-    streak = _motion_trail(rng, BAR_INDENT)
-    rows.append(streak.ljust(TRAIL_WIDTH + STREAK_COLUMN) + BANNER_SHADOW)
-    return rows
-
-
-def build_banner(model: str, agent_count: int, enabled: bool = True,
-                 rng=None) -> str:
-    """The startup banner: the gradient "3 TOKS" art between hairline rules.
-
-    Each call draws a random dark-neon ramp from ``BANNER_RAMPS`` plus
-    fresh motion trails; pass a seeded ``rng`` for a reproducible banner.
-    Rows are padded to a common width before :func:`gradient` so the ramp
-    colors align into vertical bands across all rows.
-    """
-    rng = rng or random.Random()
-    ramp = rng.choice(BANNER_RAMPS)
-    rows = _banner_rows(rng)
-    width = max(len(row) for row in rows)
-    art = ["  " + gradient(row.ljust(width), enabled, ramp) for row in rows]
-    tagline = "3 tokens per action or bust — local · frugal · fast"
-    meta = f"{ZAP} {model} · {agent_count} agents online"
-    return "\n".join([
-        hairline(6, enabled, ramp),
-        *art,
-        "  " + dim(tagline, enabled),
-        "  " + fg(GRAY_LIGHT, meta, enabled),
-        hairline(PANEL_WIDTH - 7, enabled, ramp),
-    ])
 
 
 def prompt_text(enabled: bool = True) -> str:

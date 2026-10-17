@@ -4,8 +4,6 @@ Covers ticker-line formatting from fake events, NO_COLOR stripping, slash
 command dispatch with injected specs and a scripted input function, and
 result-panel rendering with missing optional keys.
 """
-import random
-import re
 import unittest
 from dataclasses import dataclass
 from unittest import mock
@@ -498,51 +496,7 @@ class TaskReportTest(unittest.TestCase):
         self.assertIn("0.0s", report)
 
 
-class BannerAndPromptTest(unittest.TestCase):
-    def test_banner_names_model_and_agent_count(self):
-        banner = tui.build_banner("tinyllama", 3, enabled=False)
-        self.assertIn("tinyllama", banner)
-        self.assertIn("3 agents online", banner)
-        self.assertEqual(banner.count(tui.NODE), 2)  # one node per hairline
-
-    def test_banner_art_fits_the_panel(self):
-        banner = tui.build_banner("m", 2, enabled=False, rng=random.Random(5))
-        longest = max(len(line) for line in banner.splitlines())
-        self.assertLessEqual(longest, tui.PANEL_WIDTH)
-
-    def test_banner_shows_every_art_line(self):
-        banner = tui.build_banner("m", 2, enabled=False)
-        for line in tui.BANNER_ART + (tui.BANNER_SHADOW,):
-            self.assertIn(line.lstrip(), banner)
-
-
-class RandomBannerTest(unittest.TestCase):
-    def test_same_seed_reproduces_the_banner(self):
-        one = tui.build_banner("m", 2, enabled=True, rng=random.Random(7))
-        two = tui.build_banner("m", 2, enabled=True, rng=random.Random(7))
-        self.assertEqual(one, two)
-
-    def test_trail_is_light_shades_hugging_the_glyph(self):
-        trail = tui._motion_trail(random.Random(3), indent=2)
-        self.assertEqual(len(trail), tui.TRAIL_WIDTH + 2)
-        self.assertLessEqual(set(trail), set(tui.TRAIL_SHADES))
-        self.assertNotEqual(trail[-1], " ")  # flush against the glyph
-
-    def test_every_art_row_gets_a_trail(self):
-        rows = tui._banner_rows(random.Random(9))
-        self.assertEqual(len(rows), len(tui.BANNER_ART) + 1)
-        for row, art in zip(rows, tui.BANNER_ART):
-            self.assertTrue(row.endswith(art.lstrip()))
-            trail = row[: len(row) - len(art.lstrip())]
-            self.assertLessEqual(set(trail), set(tui.TRAIL_SHADES))
-
-    def test_banner_colors_come_from_one_launch_ramp(self):
-        banner = tui.build_banner("m", 2, enabled=True, rng=random.Random(1))
-        codes = {int(code) for code in re.findall(r"38;5;(\d+)m", banner)}
-        art_codes = codes - {tui.GRAY, tui.GRAY_LIGHT}
-        self.assertTrue(
-            any(art_codes <= set(ramp) for ramp in tui.BANNER_RAMPS))
-
+class PromptTest(unittest.TestCase):
     def test_prompt_shows_you_and_chevron_without_escapes(self):
         prompt = tui.prompt_text(enabled=False)
         self.assertIn("you", prompt)

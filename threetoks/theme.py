@@ -19,6 +19,7 @@ WHITE = 253      # answer text
 
 # Signature ramp: neon dawn, cyan → lavender → hot pink.
 RAMP = (51, 81, 111, 141, 171, 205)
+PANEL_WIDTH = 64  # result panels, hairline rules, and text wrapping
 
 # --- glyphs --------------------------------------------------------------
 SPINE = "▍"                 # ▍ panel gutter
@@ -64,6 +65,13 @@ def gradient(text: str, enabled: bool = True, ramp=RAMP) -> str:
         return text
     return "".join(fg(ramp_at(index, len(text), ramp), char)
                    for index, char in enumerate(text))
+
+
+def hairline(node_at: int, enabled: bool = True, ramp=RAMP,
+             width: int = PANEL_WIDTH) -> str:
+    """A gradient hairline rule with a ◈ node at column ``node_at``."""
+    line = "─" * width
+    return gradient(line[:node_at] + NODE + line[node_at + 1:], enabled, ramp)
 
 
 if __name__ == "__main__":
