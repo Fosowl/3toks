@@ -330,7 +330,7 @@ def onboarding_target() -> str:
     return os.environ.get(CONFIG_ENV_VAR) or user_config_path()
 
 
-def _resolve_path(path: str = None) -> str:
+def resolve_path(path: str = None) -> str:
     """Pick the config path: explicit arg, else the found file, else where
     one would be written (a missing file reads as pure defaults)."""
     if path:
@@ -472,7 +472,7 @@ def config_problem(path: str = None) -> str | None:
     so a broken edit is visible instead of mysterious. Returns None when
     the file parses or does not exist.
     """
-    resolved = _resolve_path(path)
+    resolved = resolve_path(path)
     if not os.path.isfile(resolved):
         return None
     parser = configparser.ConfigParser(interpolation=None)
@@ -498,7 +498,7 @@ def load_config(path: str = None) -> ThreetoksConfig:
     with it on, ``.get()`` would raise at build time, outside this guard.
     """
     parser = configparser.ConfigParser(interpolation=None)
-    resolved = _resolve_path(path)
+    resolved = resolve_path(path)
     try:
         parser.read(resolved, encoding="utf-8")
     except (OSError, configparser.Error):

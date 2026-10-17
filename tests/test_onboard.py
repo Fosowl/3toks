@@ -365,20 +365,20 @@ class VoiceStepTest(unittest.TestCase):
     def test_piper_problem_walks_missing_file_then_missing_sidecar(self):
         with tempfile.TemporaryDirectory() as tmp:
             onnx = os.path.join(tmp, "voice.onnx")
-            self.assertIn("not found", onboard._piper_voice_problem(onnx))
+            self.assertIn("not found", onboard.piper_voice_problem(onnx))
             with open(onnx, "w", encoding="utf-8") as handle:
                 handle.write("x")
             # The .onnx alone is the classic half-done piper download.
-            self.assertIn("sidecar", onboard._piper_voice_problem(onnx))
+            self.assertIn("sidecar", onboard.piper_voice_problem(onnx))
             with open(onnx + _PIPER_SIDECAR, "w", encoding="utf-8") as handle:
                 handle.write("{}")
-            self.assertIsNone(onboard._piper_voice_problem(onnx))
+            self.assertIsNone(onboard.piper_voice_problem(onnx))
 
     def test_vosk_problem_is_about_the_folder(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertIsNone(onboard._vosk_folder_problem(tmp))
+            self.assertIsNone(onboard.vosk_folder_problem(tmp))
         self.assertIn("not found",
-                      onboard._vosk_folder_problem("/gone/model"))
+                      onboard.vosk_folder_problem("/gone/model"))
 
     def test_verify_voice_notes_an_empty_piper_path(self):
         lines = []

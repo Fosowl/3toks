@@ -26,30 +26,11 @@ import sys
 import time
 from dataclasses import dataclass, field
 
-# --- palette (xterm-256) -------------------------------------------------
-CYAN = 51        # decision values, prompt chevron
-VIOLET = 141     # agent identity, headings
-PINK = 205       # answer labels, slow decisions
-GREEN = 84       # fast decisions
-AMBER = 214      # warnings / errors
-GRAY = 240       # structural chrome
-GRAY_LIGHT = 246 # secondary text
-WHITE = 253      # answer text
+from threetoks.theme import (CYAN, VIOLET, PINK, GREEN, AMBER, GRAY, GRAY_LIGHT, WHITE, RAMP, SPINE, NODE, ZAP, CHEVRON, NOTE_BULLET, CROSS, color_enabled, dim, fg, gradient, ramp_at)
 
-# Signature ramp: neon dawn, cyan → lavender → hot pink.
-RAMP = (51, 81, 111, 141, 171, 205)
-
-# --- glyphs --------------------------------------------------------------
-SPINE = "▍"                 # ▍ panel gutter
-NODE = "◈"                  # ◈ hairline node
-ZAP = "⌁"                   # ⌁ mesh events
-CHEVRON = "❯"               # ❯ prompt
-NOTE_BULLET = "▪"           # ▪
-CROSS = "✖"                 # ✖
 TOKEN_BARS = "▁▂▃▄▅▆▇█"     # ticker token-cost bar, 1..8+ tokens
 
 # --- misc constants ------------------------------------------------------
-_ESC = "\x1b"
 PANEL_WIDTH = 64
 STAT_COLUMN = 56            # ticker column where the trailing stats start
 FAST_S, STEADY_S = 0.4, 1.2 # decision-speed thresholds for bar color
@@ -83,41 +64,6 @@ def build_debug_tokens_line(event: dict, enabled: bool = True) -> str:
     reason = event.get("done_reason") or "?"
     return dim(f"{UNDER_INDENT}· in {prompt} → out {result}"
                f" · {pt}pt/{ot}ot · {reason}", enabled)
-
-
-def _color_enabled(stream=None) -> bool:
-    """True when ANSI color is appropriate for the given stream."""
-    if os.environ.get("NO_COLOR") is not None:
-        return False
-    stream = stream or sys.stdout
-    return bool(getattr(stream, "isatty", lambda: False)())
-
-
-def fg(code: int, text: str, enabled: bool = True) -> str:
-    """Wrap ``text`` in a 256-color foreground escape (or return it plain)."""
-    if not enabled:
-        return text
-    return f"{_ESC}[38;5;{code}m{text}{_ESC}[0m"
-
-
-def dim(text: str, enabled: bool = True) -> str:
-    """Render ``text`` in dim gray, or plain when color is disabled."""
-    return fg(GRAY, text, enabled)
-
-
-def _ramp_at(position: int, total: int, ramp=RAMP) -> int:
-    """Color code for step ``position`` of ``total`` along ``ramp``."""
-    if total <= 1:
-        return ramp[0]
-    return ramp[round(position * (len(ramp) - 1) / (total - 1))]
-
-
-def gradient(text: str, enabled: bool = True, ramp=RAMP) -> str:
-    """Color each character through ``ramp`` (plain when disabled)."""
-    if not enabled:
-        return text
-    return "".join(fg(_ramp_at(index, len(text), ramp), char)
-                   for index, char in enumerate(text))
 
 
 def hairline(node_at: int, enabled: bool = True, ramp=RAMP) -> str:
@@ -298,7 +244,7 @@ def _spined(rows: list[str], enabled: bool, color: int = None) -> list[str]:
     """
     out = []
     for index, row in enumerate(rows):
-        code = color if color is not None else _ramp_at(index, len(rows))
+        code = color if color is not None else ramp_at(index, len(rows))
         out.append((fg(code, " " + SPINE, enabled) + " " + row).rstrip())
     return out
 
@@ -545,7 +491,7 @@ def _cmd_help(state: ReplState, arg: str) -> str:
         ("/voice [on|off|debug]", "talk instead of typing (voice extras)"),
         ("/debug [on|off|full]",
          "raw model answer per decision; full: whole prompts"),
-        ("/setup", "re-run the config wizard"),
+        ("/config", "open the config screen (alias /setup)"),
         ("/quit", "leave the mesh"),
     ]
     out = [fg(VIOLET, f"{ZAP} commands", state.enabled)]
@@ -660,13 +606,19 @@ def _cmd_browser(state: ReplState, arg: str) -> str:
 
 
 def _cmd_setup(state: ReplState, arg: str) -> str:
-    """Re-run the onboarding wizard and save the user config file.
+    """Open the config screen; on a dumb terminal run the line wizard.
 
-    The saved file is read at the next start; the running session keeps
-    its current services, model, and browser mode untouched. Ctrl-C or a
-    closed stdin cancels without writing, and a shadowing ``./config.ini``
-    is called out so the save is never silently ineffective.
+    A real terminal gets the arrow-key screen, which saves into the
+    active file and applies live settings at once. Piped or dumb
+    terminals get the classic wizard, whose file is read at the next
+    start. Ctrl-C or a closed stdin cancels without writing, and a
+    shadowing ``./config.ini`` is called out so the save is never
+    silently ineffective.
     """
+    from threetoks.keys import is_interactive
+    if is_interactive():
+        from threetoks.config_ui import config_command
+        return config_command(state)
     from threetoks.config import find_config_path
     from threetoks.onboard import run_onboarding
     try:
@@ -803,7 +755,7 @@ def _cmd_quit(state: ReplState, arg: str) -> str:
 _COMMANDS = {"/help": _cmd_help, "/agents": _cmd_agents, "/deep": _cmd_deep,
              "/browser": _cmd_browser, "/model": _cmd_model,
              "/voice": _cmd_voice, "/debug": _cmd_debug,
-             "/setup": _cmd_setup, "/quit": _cmd_quit}
+             "/setup": _cmd_setup, "/config": _cmd_setup, "/quit": _cmd_quit}
 
 
 def handle_command(state: ReplState, line: str) -> str:
@@ -1143,7 +1095,7 @@ def _make_provider(config, sink):
     except ImportError:
         sink(dim("  web extras missing — web agent disabled "
                  "(install: uv tool install '3toks[web]')",
-                 _color_enabled()))
+                 color_enabled()))
         return None
     search_mod.MIN_SEARCH_INTERVAL_S = config.search.min_interval_s
     return auto_provider()
@@ -1165,7 +1117,7 @@ def _searxng_gate(mode: str, sink) -> None:
     if not search_mod._searxng_answers(base_url):
         sink(fg(AMBER, f"  browser mode '{mode}' needs a local SearXNG, "
                 f"but none answers at {base_url} — run "
-                "./start_search_engine.sh first", _color_enabled()))
+                "./start_search_engine.sh first", color_enabled()))
         raise SystemExit(1)
 
 
@@ -1189,7 +1141,7 @@ def _initial_fetcher(config, services, sink=print):
     except Exception as error:  # noqa: BLE001 - optional module; use HTTP
         services.fetch_page = fetch_page
         sink(fg(AMBER, f"  browser {mode} unavailable: {error} — "
-                "falling back to http fetch", _color_enabled()))
+                "falling back to http fetch", color_enabled()))
         return None
     services.fetch_page = fetcher.fetch_page
     return fetcher
@@ -1236,7 +1188,7 @@ def _warn_bad_config(sink) -> None:
     from threetoks.config import config_problem
     problem = config_problem()
     if problem:
-        sink(fg(AMBER, problem, _color_enabled()))
+        sink(fg(AMBER, problem, color_enabled()))
 
 
 def _make_relay(config, sink):
@@ -1248,7 +1200,7 @@ def _make_relay(config, sink):
     try:
         return Relay(pin=config.relay.pin)
     except Exception as error:  # noqa: BLE001 - hardware; degrade, don't die
-        sink(fg(AMBER, f"  relay unavailable: {error}", _color_enabled()))
+        sink(fg(AMBER, f"  relay unavailable: {error}", color_enabled()))
         return None
 
 
@@ -1304,7 +1256,7 @@ def build_state(model: str = None, sink=print):
     memory = MemoryStore.load(config.memory.path) if config.memory.enabled \
         else None
     state = ReplState(services, specs, policy, chosen_model, factory,
-                     enabled=_color_enabled(), fetcher=fetcher,
+                     enabled=color_enabled(), fetcher=fetcher,
                      memory=memory, memory_path=config.memory.path,
                      browser_visible=config.browser.visible,
                      voice_config=config.voice,
@@ -1321,27 +1273,20 @@ def build_state(model: str = None, sink=print):
 def main(model: str = None) -> None:
     """Onboard on a configless first run, print the banner, run the REPL."""
     from threetoks.config import find_config_path
-    if find_config_path() is None:
-        from threetoks.onboard import run_onboarding
-        try:
-            run_onboarding()
-        except EOFError:  # piped/closed stdin: run on defaults, save nothing
-            print(dim("setup skipped (no interactive input) — using "
-                      "built-in defaults", _color_enabled()))
-        except KeyboardInterrupt:
-            print()
-            print(dim("setup cancelled — nothing saved", _color_enabled()))
-            return
+    from threetoks.config_ui import first_start
+    from threetoks.line_input import terminal_reader
+    if find_config_path() is None and not first_start():
+        return
     try:
         state = build_state(model)
     except RuntimeError as error:  # e.g. a provider without its API key
-        print(render_error(error, _color_enabled()))
+        print(render_error(error, color_enabled()))
         return
     print(build_banner(state.model, len(state.specs), state.enabled))
     if state.voice_config is not None and state.voice_config.enabled:
         print(handle_command(state, "/voice on"))
     try:
-        repl(state)
+        repl(state, read_input=terminal_reader(_COMMANDS))
     finally:
         _close_voice(state)
         _close_active_fetcher(state)
@@ -1369,7 +1314,7 @@ _DEMO_EVENTS = (
 
 def _demo() -> None:
     """Non-interactive render of every TUI piece for eyeballing."""
-    enabled = _color_enabled()
+    enabled = color_enabled()
     print(build_banner("qwen3.5:2b", 2, enabled))
     print()
     for event in _DEMO_EVENTS:

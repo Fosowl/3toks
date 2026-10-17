@@ -1,5 +1,7 @@
-"""Package entry point: ``python3 -m threetoks`` starts the TUI REPL."""
-from threetoks.tui import main
+"""Package entry point: ``python3 -m threetoks`` runs the CLI."""
+import sys
+
+from threetoks.launch import main
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

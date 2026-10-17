@@ -58,9 +58,55 @@ uv pip install -e ".[web,voice,relay]"      # Raspberry Pi setup
 Configuration resolves as `$THREETOKS_CONFIG` > `./config.ini` (dev runs
 from the repo) > the per-user file — `~/.config/threetoks/config.ini` on
 Linux/macOS (`$XDG_CONFIG_HOME` honoured), `%APPDATA%\threetoks\config.ini`
-on Windows. The first `threetoks` start without any config walks you
-through a short setup wizard and writes the per-user file; re-run it any
-time with `/setup` inside the TUI, or just edit the file.
+on Windows. The first `threetoks` start without any config opens the
+config screen and writes the per-user file; reopen it any time with
+`/config` inside the TUI, `threetoks config` outside it, or just edit
+the file.
+
+### Config screen
+
+`/config` (or `threetoks config`) opens a harbor-control panel on the
+terminal's alternate screen, so your chat scrollback comes back intact.
+Ten sections (HELM, NETS, SONAR, DEPTH, DOCK, LOGBOOK, FORGE, COMMS,
+SCOPE, BEACON) cover every setting in the file.
+
+| Key | Action |
+|---|---|
+| `↑` `↓` / `j` `k` | move between settings |
+| `←` `→` / `h` `l` / Space | change a choice, switch, number, or step through pulled Ollama models |
+| Enter | flip a switch, or open the text box for a text or path setting |
+| Tab / Shift-Tab, `1`-`9`, `0` | next or previous section, or jump to one |
+| `r` | put the setting back to its default |
+| `s` | save |
+| Esc | leave (press twice to drop unsaved changes) |
+
+Each row says when a change takes effect: `live` (applied to the
+running session when you leave), `/voice on`, or `restart`. A glyph at the
+end of a row is a live check: Ollama answers, the model is pulled, the
+API key is in the environment, SearXNG answers, a path exists. Saving
+changes only the lines you edited; your own comments and key order stay.
+Without a terminal (a pipe, `TERM=dumb`), `/setup` falls back to the
+line-by-line wizard.
+
+### Command line
+
+```sh
+threetoks                         # chat
+threetoks -m qwen3.6:27b          # chat with another model, this run only
+threetoks -c ./other.ini          # use another config file
+threetoks --no-color              # plain text (NO_COLOR also works)
+threetoks config                  # config screen (prints the config without a terminal)
+threetoks config show             # every setting; pink = not the default
+threetoks config get llm.model
+threetoks config set browser.mode plain
+threetoks config path
+threetoks doctor                  # check Ollama, model, keys, SearXNG, paths, extras
+threetoks --version
+```
+
+`config set` checks the value like the screen does (exit code 2 on a bad
+key or value) and keeps the rest of the file as it was. `doctor` exits 1
+when a check fails, so it works in scripts.
 
 ## Quickstart
 
@@ -129,7 +175,11 @@ of typing; `debug` traces what the microphone hears and why each gate
 dropped it), `/debug [on|off|full]` (show the raw model answer and finish
 reason under each decision; `full` also prints the complete prompt of
 every model call — the request, menu options, and prefill the decision
-actually saw), `/setup` (re-run the config wizard), `/quit`.
+actually saw), `/config` (open the config screen; `/setup` is an alias),
+`/quit`. On a real terminal the prompt keeps history between sessions
+(`~/.config/threetoks/history`), supports arrow-key line editing, and
+Tab-completes commands and their arguments (`/de<Tab>` → `/deep`,
+`/debug f<Tab>` → `full`).
 
 Adding an agent is one new module plus one line in the registry — see
 [docs/AGENTS.md](docs/AGENTS.md) for the contract and a minimal example.

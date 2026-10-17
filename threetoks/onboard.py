@@ -164,14 +164,14 @@ def _show_model_pages(ask, sink, open_url) -> None:
     sink(f"piper TTS voices: {PIPER_VOICES_URL}")
 
 
-def _vosk_folder_problem(stt_path: str) -> str | None:
+def vosk_folder_problem(stt_path: str) -> str | None:
     """Warning when the vosk model folder is absent, else None."""
     if os.path.exists(stt_path):
         return None
     return f"warning: vosk model folder not found: {stt_path}"
 
 
-def _piper_voice_problem(tts_path: str) -> str | None:
+def piper_voice_problem(tts_path: str) -> str | None:
     """Warning when the piper ``.onnx`` or its sidecar is absent, else None.
 
     Inputs: the configured ``.onnx`` path. Output: one warning string, or
@@ -256,10 +256,10 @@ def _ask_voice(base: ThreetoksConfig, ask, sink, open_url) -> VoiceConfig:
     _show_model_pages(ask, sink, open_url)
     stt = _ask_verified_path(ask, sink, f"Vosk model folder (Enter = "
                              f"auto-download for '{lang}')",
-                             base.voice.stt_model_path, _vosk_folder_problem)
+                             base.voice.stt_model_path, vosk_folder_problem)
     tts = _ask_verified_path(ask, sink, "Piper voice .onnx file (Enter = "
                              "spoken answers stay off)",
-                             base.voice.tts_model_path, _piper_voice_problem)
+                             base.voice.tts_model_path, piper_voice_problem)
     voice = replace(base.voice, enabled=True, lang=lang,
                     stt_model_path=stt, tts_model_path=tts)
     _verify_voice(voice, sink)

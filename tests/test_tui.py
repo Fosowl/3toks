@@ -13,6 +13,18 @@ from unittest import mock
 from threetoks import tui
 
 
+_NO_TTY = mock.patch("threetoks.keys.is_interactive", return_value=False)
+
+
+def setUpModule():
+    """Run every test as if piped, so none opens the real config screen."""
+    _NO_TTY.start()
+
+
+def tearDownModule():
+    _NO_TTY.stop()
+
+
 @dataclass
 class FakeSpec:
     """Stand-in AgentSpec: only name/description matter for the TUI."""
@@ -370,7 +382,7 @@ class NoColorTest(unittest.TestCase):
         import os
         os.environ["NO_COLOR"] = "1"
         try:
-            self.assertFalse(tui._color_enabled())
+            self.assertFalse(tui.color_enabled())
         finally:
             del os.environ["NO_COLOR"]
 
@@ -997,6 +1009,60 @@ class ConfirmEditTest(unittest.TestCase):
         tui.repl(state, read_input=lambda prompt: next(replies),
                  sink=[].append)
         self.assertTrue(state.services.confirm_edit("m.py", self.DIFF))
+
+
+class ConfigScreenWiringTest(unittest.TestCase):
+    """/setup and the first start open the screen only on a real terminal."""
+
+    def test_setup_opens_the_screen_on_a_terminal(self):
+        state = make_state(enabled=False)
+        with mock.patch("threetoks.keys.is_interactive", return_value=True), \
+                mock.patch("threetoks.config_ui.config_command",
+                           return_value="screen reply") as screen, \
+                mock.patch("threetoks.onboard.run_onboarding") as wizard:
+            self.assertEqual(tui.handle_command(state, "/config"),
+                             "screen reply")
+        screen.assert_called_once_with(state)
+        wizard.assert_not_called()
+
+    def test_first_start_on_a_terminal_opens_the_screen_not_the_wizard(self):
+        with mock.patch("threetoks.config_ui.is_interactive",
+                        return_value=True), \
+                mock.patch("threetoks.config_ui.first_run") as screen, \
+                mock.patch("threetoks.onboard.run_onboarding") as wizard:
+            from threetoks import config_ui
+            self.assertTrue(config_ui.first_start())
+        screen.assert_called_once()
+        wizard.assert_not_called()
+
+    def test_reader_is_plain_input_without_a_terminal(self):
+        from threetoks import line_input
+        with mock.patch("threetoks.keys.is_interactive", return_value=False):
+            self.assertIs(line_input.terminal_reader(tui._COMMANDS), input)
+
+    def test_saved_live_settings_are_applied_to_the_session(self):
+        from threetoks import config_ui
+        from threetoks.config import ThreetoksConfig
+        from threetoks.fields import find_field, set_value
+        base = ThreetoksConfig()
+        saved = set_value(base, find_field("llm.model"), "tiny")
+        state = make_state(enabled=False)
+        with mock.patch.object(config_ui, "run_screen",
+                               return_value=(base, saved)), \
+                mock.patch.object(tui, "handle_command",
+                                  return_value="applied") as apply:
+            reply = config_ui.config_command(state)
+        apply.assert_called_once_with(state, "/model tiny")
+        self.assertIn("applied", reply)
+
+    def test_closing_without_a_save_changes_nothing(self):
+        from threetoks import config_ui
+        from threetoks.config import ThreetoksConfig
+        state = make_state(enabled=False)
+        with mock.patch.object(config_ui, "run_screen",
+                               return_value=(ThreetoksConfig(), None)):
+            self.assertIn("nothing changed",
+                          config_ui.config_command(state))
 
 
 if __name__ == "__main__":
