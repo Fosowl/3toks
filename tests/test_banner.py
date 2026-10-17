@@ -14,9 +14,9 @@ class ArtShapeTest(unittest.TestCase):
     def test_shadow_mirrors_the_fish_row_for_row(self):
         shadow = banner.reflect(banner.FISH, banner.FISH_SHADES)
         self.assertEqual(len(shadow), len(banner.FISH))
-        # The waterline rows: the lower jaw sinks first, the tail last.
-        self.assertIn("◥", shadow[0])
-        self.assertIn("◤", shadow[-1])
+        # The waterline rows: the tail sinks first, the eye last.
+        self.assertIn("◣", shadow[0])
+        self.assertIn("○", shadow[-2])
         for sky, sea in zip(reversed(banner.FISH), shadow):
             self.assertEqual(len(sky), len(sea))
             self.assertEqual([i for i, c in enumerate(sky) if c != " "],

@@ -1,12 +1,14 @@
 """Startup banner: a flying fish and its sea shadow drawn as a "3".
 
-The fish leaps in a reversed arc: forked tail at the top left, back along
-the top, snout diving at the waist with its mouth open. That arc is the
-upper bowl of the 3. Under the horizon its shadow is the same shape
-mirrored and shaded, so the two halves read as one glyph. A veined
-pectoral fin, drawn in light shades so the water shows through, sweeps
-back under the body. The TOKS wordmark stands on the horizon and casts a
-shorter reflection that fades with depth.
+The fish leaps head first: forked tail at the waist, where it left the
+water, back arcing up the right side and over the top, head at the top
+left tip with its mouth open and its eye on the upper side. That arc is
+the upper bowl of the 3. Under the horizon its shadow is the same shape
+mirrored and shaded, so the two halves read as one glyph. The veined
+pectoral wing, drawn in light shades so the water shows through, sweeps
+back under the body; a small pelvic fin sits near the tail. The TOKS
+wordmark stands on the horizon and casts a shorter reflection that fades
+with depth.
 
 Every row is pure text; :func:`build_banner` adds the color.
 """
@@ -14,20 +16,21 @@ import random
 
 from threetoks.theme import GRAY_LIGHT, ZAP, dim, fg, gradient, hairline
 
-# Upper bowl of the 3. Tail ◣◥◤, body █, see-through fin ░▒▓ with ribs,
-# eye ▞◉▚, open mouth: thin upper jaw ▀, longer lower jaw ◢▄ on the water.
+# Upper bowl of the 3. Open mouth: thin upper jaw ▀, longer lower jaw ◢▄;
+# eye ▞◉▚; body █; see-through wing and pelvic fin ░▒▓ with ribs; forked
+# tail ◢◤ on the water.
 FISH = (
-    "   ◣      ▄▄▄▟███████▙▄      ",
-    "   ◥▙▄▄▄▄▟█████████████▙▄    ",
-    "    ◥███████████████████▙    ",
-    "     ◤▀▀▀▘ ░▒░▒▓▒▓▓▓ ▜████▙  ",
-    "          ░▒░▒▓▒▓▓    ▜███▌  ",
-    "         ░▒░▒▓▒       ▐███▌  ",
-    "        ░▒░▒          ▟███▛  ",
-    "       ░▒             ▟███▛  ",
-    "          ▄▄▄▄▄▄▄▄▄▟████▛    ",
-    "      ▀▀▀█▞◉▚███████████▀    ",
-    "    ◢▄▄▄▄█████████▀▀▀▀▀      ",
+    "         ▄▄▄▄▟███████▙▄      ",
+    "     ▀▀▀█▞◉▚███████████▙▄    ",
+    "   ◢▄▄▄▄███████████████▙     ",
+    "         ▓▓▓▒▓▒░▒░   ▜████▙  ",
+    "           ▓▓▒▓▒░▒░   ▜███▌  ",
+    "             ▓▒▓▒░▒░  ▐███▌  ",
+    "         ░▒    ▒▓▒░▒  ▟███▛  ",
+    "          ░▒▓▓   ▒░  ▟███▛   ",
+    "    ◢███████████████████▛    ",
+    "   ◢▛▀▀▀▀▜█████████████▛▀    ",
+    "   ◤      ▀▀▀▜███████▛▀      ",
 )
 # Wordmark; :func:`banner_rows` stands it on the horizon beside the fish.
 WORDMARK = (
@@ -53,7 +56,7 @@ FISH_SHADES = "▓▓▒"            # shadow shade per depth row; stays visible
 WORDMARK_SHADES = "▒░░ "       # reflection fades to nothing by row four
 WATER_DEPTH = 4                # ramp colors the water keeps (dark end)
 SPLASH = "˚∘·"
-SPLASH_ROWS = (8, 9, 10)       # fish rows whose blank lead gets a droplet
+SPLASH_ROWS = (6, 7, 9, 10)    # fish rows whose blank lead gets a droplet
 TAGLINE = "3 tokens per action or bust — local · frugal · fast"
 
 # Launch ramps: build_banner draws one per call; all run dark to neon so
@@ -102,7 +105,7 @@ def reflect(rows, shades: str) -> list:
 
 def _splashed(rows, rng) -> list:
     """Copy of ``rows`` with one droplet in the blank lead of each
-    ``SPLASH_ROWS`` row, where the snout breaks the water."""
+    ``SPLASH_ROWS`` row, where the tail left the water."""
     out = list(rows)
     for index in SPLASH_ROWS:
         row = out[index]
