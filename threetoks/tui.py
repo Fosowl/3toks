@@ -8,9 +8,9 @@ its speed — the frugality of the mesh made visible.
 
 One visual identity holds it together: a cyan → lavender → hot-pink
 gradient ramp on hairline rules and the vertical spine of result panels,
-while the startup wordmark draws a random dark-neon ramp per launch. All
-structural chrome sits in dim gray so only the model's decisions and
-answers carry color.
+while the startup banner (:mod:`threetoks.banner`) draws a blue ramp per
+launch. All structural chrome sits in dim gray so only the model's
+decisions and answers carry color.
 
 Rendering is stdlib-only raw ANSI; every escape sequence hides behind a
 small helper (:func:`fg`, :func:`dim`, :func:`gradient`) so there is no

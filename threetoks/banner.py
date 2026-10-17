@@ -59,14 +59,12 @@ SPLASH = "˚∘·"
 SPLASH_ROWS = (6, 7, 9, 10)    # fish rows whose blank lead gets a droplet
 TAGLINE = "3 tokens per action or bust — local · frugal · fast"
 
-# Launch ramps: build_banner draws one per call; all run dark to neon so
-# the art brightens rightward and the water keeps the dark end.
+# Launch ramps: build_banner draws one per call. All are blue, dark to
+# light, so the art brightens rightward and the water keeps the dark end.
 BANNER_RAMPS = (
-    (54, 55, 56, 92, 93, 129),     # midnight: deep purple → electric violet
-    (19, 25, 26, 32, 38, 44),      # blade rain: navy → azure → turquoise
-    (23, 29, 30, 36, 37, 43),      # deep sea: dark teal → aqua
-    (53, 89, 125, 161, 162, 197),  # noir crimson: wine → neon crimson
-    (22, 28, 29, 35, 41, 42),      # ghost circuit: dark green → sea green
+    (24, 25, 26, 27, 33, 39),      # offshore: ocean blue → sky
+    (25, 26, 27, 33, 75, 117),     # noon: blue → pale sky
+    (26, 27, 32, 33, 38, 39),      # lagoon: blue → light azure
 )
 
 
