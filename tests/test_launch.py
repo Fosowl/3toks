@@ -30,9 +30,8 @@ class CliCase(unittest.TestCase):
 
 class ConfigCommandTest(CliCase):
     def test_set_then_get_round_trips_and_writes_the_file(self):
-        code, out, _ = self.run_cli("config", "set", "llm.model", "mine")
+        code, _, _ = self.run_cli("config", "set", "llm.model", "mine")
         self.assertEqual(code, 0)
-        self.assertIn("(live)", out)
         self.assertEqual(self.run_cli("config", "get", "llm.model")[1],
                          "mine\n")
         self.assertEqual(load_config(self.path).llm.model, "mine")
@@ -66,6 +65,41 @@ class ConfigCommandTest(CliCase):
         for title in ("HELM", "SONAR", "BEACON"):
             self.assertIn(title, out)
         self.assertIn("llm.model", out)
+
+    def write(self, text):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+
+    def test_set_refuses_to_write_into_a_file_that_does_not_parse(self):
+        self.write("oops no delimiter\n[llm]\nmodel = x\n")
+        code, _, err = self.run_cli("config", "set", "llm.model", "y")
+        self.assertEqual(code, launch.EXIT_BROKEN)
+        self.assertIn("fix it first", err)
+        with open(self.path, encoding="utf-8") as handle:
+            self.assertIn("model = x", handle.read())
+
+    def test_set_repairs_a_value_the_loader_ignored(self):
+        self.write("[llm]\nvote_k = abc\n")
+        code, _, _ = self.run_cli("config", "set", "llm.vote_k", "1")
+        self.assertEqual(code, 0)
+        with open(self.path, encoding="utf-8") as handle:
+            self.assertIn("vote_k = 1", handle.read())
+
+    def test_set_without_a_value_changes_nothing(self):
+        self.write("[llm]\napi_base = http://keep\n")
+        code, _, err = self.run_cli("config", "set", "llm.api_base")
+        self.assertEqual(code, launch.EXIT_BAD_INPUT)
+        self.assertIn("usage", err)
+        self.assertEqual(load_config(self.path).llm.api_base, "http://keep")
+
+    def test_show_and_doctor_name_an_ignored_value(self):
+        self.write("[research]\nmax_rounds = 0\n")
+        _, _, err = self.run_cli("config", "show")
+        self.assertIn("research.max_rounds = '0' is ignored (at least 1)", err)
+        with mock.patch.object(launch, "_doctor_rows", return_value=[]):
+            code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, launch.EXIT_BROKEN)
+        self.assertIn("research.max_rounds", out)
 
 
 class FlagTest(CliCase):

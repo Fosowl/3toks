@@ -5,10 +5,11 @@ command dispatch with injected specs and a scripted input function, and
 result-panel rendering with missing optional keys.
 """
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from unittest import mock
 
-from threetoks import tui
+from threetoks import session, tui
+from threetoks.config import BrowserConfig, LlmConfig
 
 
 _NO_TTY = mock.patch("threetoks.keys.is_interactive", return_value=False)
@@ -630,7 +631,7 @@ class SlashCommandTest(unittest.TestCase):
     def test_browser_plain_swaps_to_fetcher_and_tracks_it(self):
         state = make_state(enabled=False)
         fake = _RecordingFetcher()
-        with mock.patch.object(tui, "_make_browser_fetcher",
+        with mock.patch.object(session, "make_browser_fetcher",
                                return_value=fake) as maker:
             reply = tui.handle_command(state, "/browser plain")
         maker.assert_called_once_with(False)
@@ -641,7 +642,7 @@ class SlashCommandTest(unittest.TestCase):
     def test_browser_on_screen_passes_visible(self):
         state = make_state(enabled=False)
         fake = _RecordingFetcher()
-        with mock.patch.object(tui, "_make_browser_fetcher",
+        with mock.patch.object(session, "make_browser_fetcher",
                                return_value=fake) as maker:
             tui.handle_command(state, "/browser plain on-screen")
         maker.assert_called_once_with(True)
@@ -649,7 +650,7 @@ class SlashCommandTest(unittest.TestCase):
     def test_browser_switch_gives_blocked_sites_a_fresh_chance(self):
         state = make_state(enabled=False)
         state.services.blocked_hosts.add("walled.example")
-        with mock.patch.object(tui, "_make_browser_fetcher",
+        with mock.patch.object(session, "make_browser_fetcher",
                                return_value=_RecordingFetcher()):
             tui.handle_command(state, "/browser plain on-screen")
         self.assertEqual(state.services.blocked_hosts, set())
@@ -658,18 +659,20 @@ class SlashCommandTest(unittest.TestCase):
         # [browser] visible = true must show the window without the user
         # having to repeat "on-screen" on every /browser switch.
         state = make_state(enabled=False)
-        state.browser_visible = True
+        state.config = replace(state.config, browser=BrowserConfig(
+            visible=True))
         fake = _RecordingFetcher()
-        with mock.patch.object(tui, "_make_browser_fetcher",
+        with mock.patch.object(session, "make_browser_fetcher",
                                return_value=fake) as maker:
             tui.handle_command(state, "/browser plain")
         maker.assert_called_once_with(True)
 
     def test_browser_headless_overrides_a_visible_config(self):
         state = make_state(enabled=False)
-        state.browser_visible = True
+        state.config = replace(state.config, browser=BrowserConfig(
+            visible=True))
         fake = _RecordingFetcher()
-        with mock.patch.object(tui, "_make_browser_fetcher",
+        with mock.patch.object(session, "make_browser_fetcher",
                                return_value=fake) as maker:
             tui.handle_command(state, "/browser plain headless")
         maker.assert_called_once_with(False)
@@ -677,7 +680,7 @@ class SlashCommandTest(unittest.TestCase):
     def test_browser_switch_closes_previous_fetcher(self):
         state = make_state(enabled=False)
         first, second = _RecordingFetcher(), _RecordingFetcher()
-        with mock.patch.object(tui, "_make_browser_fetcher",
+        with mock.patch.object(session, "make_browser_fetcher",
                                side_effect=[first, second]):
             tui.handle_command(state, "/browser plain")
             tui.handle_command(state, "/browser plain headless")
@@ -686,7 +689,7 @@ class SlashCommandTest(unittest.TestCase):
 
     def test_browser_failure_reports_styled_message(self):
         state = make_state(enabled=False)
-        with mock.patch.object(tui, "_make_browser_fetcher",
+        with mock.patch.object(session, "make_browser_fetcher",
                                side_effect=RuntimeError("no chrome")):
             reply = tui.handle_command(state, "/browser plain")
         self.assertIn("unavailable", reply)
@@ -703,8 +706,6 @@ class SlashCommandTest(unittest.TestCase):
         wizard.assert_called_once_with()
         self.assertIn("saved", reply)
         self.assertIn(saved, reply)
-        # /voice on re-reads the file, so it applies without a restart.
-        self.assertIn("/voice on", reply)
 
     def test_setup_warns_when_a_cwd_config_shadows_the_saved_file(self):
         state = make_state(enabled=False)
@@ -735,10 +736,11 @@ class InitialFetcherFallbackTest(unittest.TestCase):
     def test_failed_browser_start_reports_instead_of_silently_degrading(self):
         services = FakeServices()
         lines = []
-        with mock.patch.object(tui, "_make_browser_fetcher",
-                               side_effect=RuntimeError("no chromedriver")):
-            fetcher = tui._initial_fetcher(self._config("plain"), services,
-                                           lines.append)
+        with mock.patch.object(session, "_searxng_gate"), \
+                mock.patch.object(session, "make_browser_fetcher",
+                                  side_effect=RuntimeError("no chromedriver")):
+            fetcher = session.initial_fetcher(self._config("plain"), services,
+                                              lines.append)
         self.assertIsNone(fetcher)
         self.assertIsNotNone(services.fetch_page)   # degraded to http
         [notice] = lines
@@ -748,8 +750,8 @@ class InitialFetcherFallbackTest(unittest.TestCase):
     def test_http_mode_stays_quiet(self):
         services = FakeServices()
         lines = []
-        fetcher = tui._initial_fetcher(self._config("http"), services,
-                                       lines.append)
+        fetcher = session.initial_fetcher(self._config("http"), services,
+                                          lines.append)
         self.assertIsNone(fetcher)
         self.assertEqual(lines, [])
 
@@ -876,16 +878,16 @@ class BadConfigWarningTest(unittest.TestCase):
 
     def test_parse_failure_is_printed_at_startup(self):
         shown = []
-        with mock.patch("threetoks.config.config_problem",
-                        return_value="⚠ /cfg.ini was ignored — fell back"):
-            tui._warn_bad_config(shown.append)
+        with mock.patch("threetoks.fields.config_warnings",
+                        return_value=["⚠ /cfg.ini was ignored — fell back"]):
+            session.warn_bad_config(shown.append)
         self.assertEqual(len(shown), 1)
         self.assertIn("was ignored", shown[0])
 
     def test_healthy_config_prints_nothing(self):
         shown = []
-        with mock.patch("threetoks.config.config_problem", return_value=None):
-            tui._warn_bad_config(shown.append)
+        with mock.patch("threetoks.fields.config_warnings", return_value=[]):
+            session.warn_bad_config(shown.append)
         self.assertEqual(shown, [])
 
 
@@ -928,7 +930,8 @@ class ModelSwapOptionalAgentsTest(unittest.TestCase):
         self.assertIn("unknown template family",
                       tui.handle_command(raw, "/model gpt-4o-mini"))
         chat = make_state()
-        chat.llm_provider = "openrouter"
+        chat.config = replace(chat.config, llm=LlmConfig(
+            provider="openrouter"))
         self.assertNotIn("unknown template family",
                          tui.handle_command(chat, "/model gpt-4o-mini"))
 
@@ -1011,27 +1014,11 @@ class ConfigScreenWiringTest(unittest.TestCase):
         with mock.patch("threetoks.keys.is_interactive", return_value=False):
             self.assertIs(line_input.terminal_reader(tui._COMMANDS), input)
 
-    def test_saved_live_settings_are_applied_to_the_session(self):
-        from threetoks import config_ui
-        from threetoks.config import ThreetoksConfig
-        from threetoks.fields import find_field, set_value
-        base = ThreetoksConfig()
-        saved = set_value(base, find_field("llm.model"), "tiny")
-        state = make_state(enabled=False)
-        with mock.patch.object(config_ui, "run_screen",
-                               return_value=(base, saved)), \
-                mock.patch.object(tui, "handle_command",
-                                  return_value="applied") as apply:
-            reply = config_ui.config_command(state)
-        apply.assert_called_once_with(state, "/model tiny")
-        self.assertIn("applied", reply)
-
     def test_closing_without_a_save_changes_nothing(self):
         from threetoks import config_ui
-        from threetoks.config import ThreetoksConfig
         state = make_state(enabled=False)
         with mock.patch.object(config_ui, "run_screen",
-                               return_value=(ThreetoksConfig(), None)):
+                               return_value=None):
             self.assertIn("nothing changed",
                           config_ui.config_command(state))
 

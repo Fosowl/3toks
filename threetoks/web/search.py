@@ -416,13 +416,34 @@ class FallbackProvider:
         self._last_search = time.monotonic()
 
 
-def auto_provider() -> SearchProvider:
+def searxng_base(configured: str) -> str:
+    """Pick the SearXNG base URL: the env override, else the config value.
+
+    The TUI and CLI call it before they probe or query SearXNG.
+
+    Args:
+        configured (str): ``[search] searxng_url`` from the config.
+
+    Returns:
+        str: ``$THREETOKS_SEARXNG_URL`` when set, else ``configured``.
+    """
+    return os.getenv(SEARXNG_URL_ENV) or configured
+
+
+def auto_provider(configured_url: str = DEFAULT_SEARXNG_URL) -> SearchProvider:
     """Prefer a reachable local searxng, then Bing, then DDG.
 
-    The chain is one flat FallbackProvider exposing ``.providers`` so
+    The TUI and CLI call it at start and when ``[search]`` changes. The
+    chain is one flat FallbackProvider exposing ``.providers`` so
     callers (and tests) can see which hops are live.
+
+    Args:
+        configured_url (str): ``[search] searxng_url`` from the config.
+
+    Returns:
+        SearchProvider: the fallback chain.
     """
-    base_url = os.getenv(SEARXNG_URL_ENV, DEFAULT_SEARXNG_URL)
+    base_url = searxng_base(configured_url)
     if _searxng_answers(base_url):
         return FallbackProvider(SearxngProvider(base_url),
                                 BingHtmlProvider(), DdgHtmlProvider())

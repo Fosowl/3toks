@@ -16,6 +16,20 @@ class CoverageTest(unittest.TestCase):
         for section in fields.SECTIONS:
             self.assertTrue(fields.fields_of(section.name), section.name)
 
+    def test_every_minimum_names_a_real_setting(self):
+        # A typo in MINIMUMS would silently drop the bound.
+        from threetoks.config import MINIMUMS
+        names = {(item.section, item.key) for item in fields.FIELDS}
+        self.assertLessEqual(set(MINIMUMS), names)
+
+
+class WarningTest(unittest.TestCase):
+    def test_misspelled_sections_and_keys_are_named(self):
+        import configparser
+        parser = configparser.ConfigParser()
+        parser.read_string("[LLM]\nvote_k = 3\n[llm]\nvotek = 4\nmodel = m\n")
+        self.assertEqual(fields.unknown_names(parser), ["[LLM]", "llm.votek"])
+
 
 class ParseTest(unittest.TestCase):
     def test_choice_is_case_insensitive_and_closed(self):
@@ -32,6 +46,8 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(parse_value(speaker, "-1"), (-1, None))
         self.assertEqual(parse_value(find_field("search.min_interval_s"),
                                      "2.5"), (2.5, None))
+        self.assertEqual(parse_value(find_field("search.min_interval_s"),
+                                     "nan")[1], "not a finite number")
 
     def test_bool_words(self):
         flag = find_field("llm.send_seed")
@@ -60,6 +76,8 @@ class StepTest(unittest.TestCase):
         gap = find_field("search.min_interval_s")
         self.assertEqual(cycle_value(gap, 0.0, -1), 0.0)
         self.assertEqual(cycle_value(gap, 5.0, 1), 5.5)
+        delay = find_field("voice.post_speak_delay")
+        self.assertEqual(cycle_value(delay, 0.8, -1), 0.3)  # no float noise
 
     def test_text_does_not_move(self):
         self.assertEqual(cycle_value(find_field("llm.model"), "m", 1), "m")

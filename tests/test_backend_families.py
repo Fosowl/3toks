@@ -18,7 +18,7 @@ from threetoks.backend.base import (FAMILY_CHATML, FAMILY_GEMMA,
 from threetoks.nodes import MenuNode, ShortTextNode
 from threetoks.policy import Policy, PolicyConfig
 from threetoks.render import Episode
-from threetoks.tui import unknown_family_notice
+from threetoks.session import unknown_family_notice
 
 
 class TemplateRenderingTest(unittest.TestCase):

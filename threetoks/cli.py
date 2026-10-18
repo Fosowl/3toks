@@ -4,7 +4,6 @@
         --trace trace.jsonl
 """
 import argparse
-import os
 import sys
 import time
 
@@ -23,7 +22,6 @@ from threetoks.web.vertical import WebResearchVertical
 # that touches them imports lazily so the core runs on a bare install.
 
 DEFAULT_MODEL = "qwen3.5:2b"
-DEFAULT_MAX_STEPS = 25
 
 # E1 winner ("menu_picker") extended to cover all three reply shapes.
 SYSTEM_CHATML = (
@@ -40,16 +38,24 @@ def model_spec(name: str, disable_think: bool) -> ModelSpec:
     return ModelSpec(name, family, disable_think)
 
 
-def make_policy_config(name: str, disable_think: bool) -> PolicyConfig:
+def make_policy_config(name: str, llm) -> PolicyConfig:
     """Policy config with the family-appropriate system prompt.
 
-    Every family gets the E1-winning system text except R1, whose
+    The TUI and this CLI call it each time they build a policy for a
+    model. Every family gets the E1-winning system text except R1, whose
     think-suppression flow deliberately runs without one.
-    ``disable_think`` comes from ``[llm] disable_think`` (see ModelSpec).
+
+    Args:
+        name (str): model tag, from ``/model``, ``--model`` or the config.
+        llm (LlmConfig): the ``[llm]`` section; ``disable_think`` goes to
+            the ModelSpec and ``vote_k`` to the PolicyConfig.
+
+    Returns:
+        PolicyConfig: the settings one Policy runs with.
     """
-    spec = model_spec(name, disable_think)
+    spec = model_spec(name, llm.disable_think)
     system = "" if spec.family == FAMILY_R1 else SYSTEM_CHATML
-    return PolicyConfig(spec, system=system)
+    return PolicyConfig(spec, system=system, vote_k=llm.vote_k)
 
 
 def fetch_page(url: str):
@@ -87,8 +93,7 @@ def make_fetch_page(config):
     if mode != "plain":
         return fetch_page, None
     from threetoks.web import search as search_mod  # lazy: web extras
-    base_url = os.getenv(search_mod.SEARXNG_URL_ENV,
-                         search_mod.DEFAULT_SEARXNG_URL)
+    base_url = search_mod.searxng_base(config.search.searxng_url)
     if not search_mod._searxng_answers(base_url):
         raise SystemExit(
             f"browser mode '{mode}' needs a local SearXNG, but none "
@@ -106,11 +111,13 @@ def main() -> None:
     search_mod.MIN_SEARCH_INTERVAL_S = config.search.min_interval_s
     args = build_parser(config).parse_args()
     policy = Policy(make_backend(config.llm),
-                    make_policy_config(args.model, config.llm.disable_think),
+                    make_policy_config(args.model, config.llm),
                     Tracer(args.trace))
     page_fetch, fetcher = make_fetch_page(config)
-    services = Services(provider=auto_provider(), fetch_page=page_fetch,
-                        max_research_rounds=args.rounds)
+    services = Services(provider=auto_provider(config.search.searxng_url),
+                        fetch_page=page_fetch,
+                        max_research_rounds=args.rounds,
+                        max_research_steps=args.max_steps)
     start = time.time()
     try:
         outcome = deep_research(args.task, services, policy)

@@ -46,8 +46,8 @@ class DefaultsTest(unittest.TestCase):
 
     def test_empty_env_and_no_cwd_file_are_safe(self):
         with mock.patch.dict(os.environ, {}, clear=True), \
-                mock.patch.object(config.configparser.ConfigParser, "read",
-                                  return_value=[]):
+                mock.patch.object(config.os.path, "isfile",
+                                  return_value=False):
             cfg = load_config()
         self.assertEqual(cfg.browser.mode, "http")
 
@@ -149,6 +149,63 @@ class ParsingTest(unittest.TestCase):
             os.unlink(path)
         self.assertEqual(cfg.browser.mode, "plain")
         self.assertEqual(cfg.llm.model, config.DEFAULT_MODEL)
+
+    def test_out_of_range_numbers_fall_back_like_bad_ones(self):
+        path = _write_ini("[llm]\nvote_k = 0\n[research]\nmax_steps = -5\n"
+                          "[search]\nmin_interval_s = inf\n")
+        try:
+            cfg = load_config(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(cfg.llm.vote_k, config.DEFAULT_VOTE_K)
+        self.assertEqual(cfg.research.max_steps, config.DEFAULT_MAX_STEPS)
+        self.assertEqual(cfg.search.min_interval_s,
+                         config.DEFAULT_MIN_INTERVAL_S)
+
+    def test_a_huge_integer_loads_instead_of_raising(self):
+        path = _write_ini("[llm]\nvote_k = " + "9" * 400 + "\n")
+        try:
+            cfg = load_config(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(cfg.llm.vote_k, int("9" * 400))  # big but valid
+
+    def test_inline_comments_are_not_part_of_the_value(self):
+        path = _write_ini("[llm]\nvote_k = 3  # three votes\n"
+                          "[memory]\nenabled = false ; off for now\n"
+                          "[search]\nsearxng_url = http://s/#frag\n")
+        try:
+            cfg = load_config(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(cfg.llm.vote_k, 3)
+        self.assertFalse(cfg.memory.enabled)
+        self.assertEqual(cfg.search.searxng_url, "http://s/#frag")
+
+    def test_non_utf8_file_is_reported_not_raised(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "c.ini")
+            with open(path, "wb") as handle:
+                handle.write(b"[files]\nroot = /Users/Jos\xe9\n")
+            cfg = load_config(path)
+            problem = config_problem(path)
+        self.assertEqual(cfg.files.root, config.DEFAULT_FILES_ROOT)
+        self.assertIn("utf-8", problem)
+
+    def test_byte_order_mark_is_accepted(self):
+        path = _write_ini("\ufeff# notepad\n[llm]\nmodel = bom-model\n")
+        try:
+            self.assertEqual(load_config(path).llm.model, "bom-model")
+        finally:
+            os.unlink(path)
+
+    def test_tilde_in_a_path_setting_is_expanded(self):
+        path = _write_ini("[files]\nroot = ~/work\n")
+        try:
+            cfg = load_config(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(cfg.files.root, os.path.expanduser("~/work"))
 
 
 class EnvOverrideTest(unittest.TestCase):

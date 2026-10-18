@@ -11,13 +11,15 @@ import importlib.util
 import os
 import sys
 
-from threetoks.config import (CONFIG_ENV_VAR, ThreetoksConfig, config_problem,
-                              load_config, resolve_path)
+from threetoks.config import (CONFIG_ENV_VAR, ThreetoksConfig, load_config,
+                              resolve_path)
 from threetoks.hints import LEVEL_BAD
-from threetoks.fields import (FIELDS, SECTIONS, default_value, fields_of,
-                              find_field, format_value, get_value,
-                              parse_value, serialize_value, set_value)
+from threetoks.fields import (FIELDS, SECTIONS, config_warnings,
+                              default_value, fields_of, find_field,
+                              format_value, get_value, parse_value,
+                              serialize_value, set_value)
 
+EXIT_BROKEN = 1        # the file cannot be used, or a check failed
 EXIT_BAD_INPUT = 2
 CONFIG_ACTIONS = ("path", "show", "get", "set", "edit")
 # (module to import, pip extra)
@@ -99,8 +101,19 @@ def _show_section(section, config: ThreetoksConfig) -> None:
               + fg(color, format_value(item, value), on))
 
 
+def _warn_on_stderr() -> None:
+    """Print what in the config file is not used, on stderr.
+
+    ``config show`` and ``config get`` call this before their output, so
+    a value that silently fell back to its default is visible.
+    """
+    for line in config_warnings():
+        print(line, file=sys.stderr)
+
+
 def _config_show(args) -> int:
     """Print every setting, grouped by harbor section; pink = not default."""
+    _warn_on_stderr()
     config = load_config()
     for section in SECTIONS:
         _show_section(section, config)
@@ -121,23 +134,47 @@ def _config_get(args) -> int:
     item = _lookup(args.key)
     if item is None:
         return EXIT_BAD_INPUT
+    _warn_on_stderr()
     print(serialize_value(item, get_value(load_config(), item)))
     return 0
 
 
-def _config_set(args) -> int:
-    """Check and save one value, then say when it applies."""
+def _checked_value(args) -> tuple:
+    """Parse the ``config set`` value; print why when it is bad.
+
+    Returns: (Field, value), or (None, None) after an error message.
+    """
     item = _lookup(args.key)
     if item is None:
-        return EXIT_BAD_INPUT
-    value, problem = parse_value(item, args.value or "")
+        return None, None
+    if args.value is None:
+        print("usage: threetoks config set section.key VALUE",
+              file=sys.stderr)
+        return None, None
+    value, problem = parse_value(item, args.value)
     if problem:
         print(f"{item.dotted}: {problem}", file=sys.stderr)
+        return None, None
+    return item, value
+
+
+def _config_set(args) -> int:
+    """Check and save one value; a running chat applies it at once.
+
+    A value the loader ignored is named on stderr first: the save
+    writes its default in its place.
+    """
+    item, value = _checked_value(args)
+    if item is None:
         return EXIT_BAD_INPUT
+    _warn_on_stderr()
     from threetoks.ini_edit import save_changes
-    path = save_changes(set_value(load_config(), item, value))
-    print(f"{item.dotted} = {serialize_value(item, value)}  "
-          f"({item.apply}) -> {path}")
+    try:
+        path = save_changes(set_value(load_config(), item, value))
+    except (OSError, ValueError) as error:  # unwritable, or a broken file
+        print(f"cannot save: {error}", file=sys.stderr)
+        return EXIT_BROKEN
+    print(f"{item.dotted} = {serialize_value(item, value)} -> {path}")
     return 0
 
 
@@ -193,15 +230,16 @@ def _config_doctor(args) -> int:
     config = load_config()
     print(wave_line(RULE_WIDTH, 0, on))
     print(dim(f" config: {resolve_path()}", on))
-    problem = config_problem()
-    print(problem or "", end="\n" if problem else "")
+    warnings = config_warnings()
+    for line in warnings:
+        print(line)
     rows = _doctor_rows(config)
     for item, hint in rows:
         _print_doctor_row(item, hint, config)
     print(dim(" " + _extras_line(), on))
     print(wave_line(RULE_WIDTH, 1, on))
     broken = any(hint.level == LEVEL_BAD for _, hint in rows)
-    return int(broken or bool(problem))
+    return EXIT_BROKEN if broken or warnings else 0
 
 
 def main(argv=None) -> int:

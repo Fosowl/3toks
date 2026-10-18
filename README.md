@@ -223,15 +223,14 @@ Ten sections, named like parts of a harbor, hold every setting:
 | `s` | Save |
 | Esc | Leave. Press it twice to drop changes you did not save |
 
-Each row says when a change starts to work:
-
-- `live` — it works right away, when you leave the screen.
-- `/voice on` — it works the next time you turn voice on.
-- `restart` — it works the next time you start ThreeToks.
+Every change works in the running chat, with no restart. The chat reads the config file again before it handles your next line, so a save from the screen, from `threetoks config set`, or from your editor all apply the same way. The chat prints the settings it applied. If the file has an error, the chat keeps its current settings and tells you the error. If one part cannot start (for example Chrome or a voice model), the chat says so, keeps the old value for that part, and tries again at the next save.
 
 A small symbol at the end of a row is a live check. It tells you that Ollama answers, that the model is downloaded, that the API key is set, that SearXNG answers, or that a path exists.
 
-When you save, ThreeToks changes only the lines you edited. Your own comments and the order of your keys stay as they are.
+A value that ThreeToks cannot use (for example `vote_k = 0` or `min_interval_s = soon`) falls back to its default. An unknown name (for example `[LLM]` or `votek`) is ignored. The chat, the screen, `config show`, `config set`, and `doctor` name each of these. The next save writes the default in place of a value that cannot be used.
+A comment can follow a value after a space: `vote_k = 3  # three votes`. `~` in a path setting means your home folder.
+
+When you save, ThreeToks changes only the lines you edited (and the values it named as unusable). Your own comments and the order of your keys stay as they are.
 Without a real terminal (for example in a pipe, or with `TERM=dumb`), `/setup` asks the same questions one line at a time.
 
 **Where ThreeToks looks for the config file**, in this order:
@@ -257,8 +256,8 @@ threetoks --version
 ```
 
 Put the flags `-m`, `-c`, and `--no-color` *before* the subcommand.
-`config set` checks your value like the screen does. It exits with code 2 for a bad key or value. It keeps the rest of the file as it was.
-`doctor` exits with code 1 when a check fails, so you can use it in scripts.
+`config set` checks your value like the screen does. It exits with code 2 for a bad key, a bad value, or a missing value. It exits with code 1 when the file has an error or cannot be written; it does not change a file that has an error.
+`doctor` exits with code 1 when a check fails or a value is ignored, so you can use it in scripts.
 
 ![](docs/assets/wave.svg)
 
@@ -433,7 +432,7 @@ It does **not** download voice models for you. Get a `.onnx` file and its `.onnx
 - The add-on `voice` installs both sides. Each side also works alone: voice in with text out, or text in with voice out.
 - Set `[voice] enabled = true` to start the chat already listening.
 - `/setup` has an optional voice step. It explains that you need *both* the `.onnx` file and its `.onnx.json` file, offers to open the Vosk and Piper pages, and asks again until a path works (or you keep your own).
-- `/voice on` reads the saved config when it starts. So you do not need to restart. If voice is already on, run `/voice off` first.
+- A saved `[voice]` change restarts a live voice session with the new settings. Switching `enabled` on or off starts or stops voice at once.
 
 </details>
 

@@ -189,6 +189,20 @@ class RunOnboardingTest(unittest.TestCase):
         self.assertEqual(opened, [onboard.VOSK_MODELS_URL,
                                   onboard.PIPER_VOICES_URL])
 
+    def test_rerun_keeps_the_comments_of_an_existing_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "config.ini")
+            with open(target, "w", encoding="utf-8") as handle:
+                handle.write("# my precious note\n[llm]\nmodel = keepme\n")
+            ask, _ = _scripted([""] * 9)
+            with mock.patch.dict(os.environ, {CONFIG_ENV_VAR: target}):
+                run_onboarding(ask=ask, sink=_quiet, open_url=_no_browser)
+                cfg = load_config()
+            with open(target, encoding="utf-8") as handle:
+                text = handle.read()
+        self.assertIn("# my precious note", text)
+        self.assertEqual(cfg.llm.model, "keepme")
+
 
 class UnaskedSectionsSurviveTest(unittest.TestCase):
     """Regression: /setup must never wipe sections it does not ask about."""

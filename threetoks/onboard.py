@@ -19,8 +19,9 @@ from threetoks.config import (BROWSER_MODES, DEFAULT_MEMORY_PATH,
                              _FALSE_WORDS, _TRUE_WORDS, BrowserConfig,
                              FilesConfig, LlmConfig, MemoryConfig,
                              ResearchConfig, SearchConfig, ThreetoksConfig,
-                             VoiceConfig, load_config, save_config,
-                             user_config_dir)
+                             VoiceConfig, load_config, onboarding_target,
+                             parse_error, save_config, user_config_dir)
+from threetoks.ini_edit import save_changes
 
 _YES_WORDS = ("y",) + _TRUE_WORDS
 _NO_WORDS = ("n",) + _FALSE_WORDS
@@ -297,9 +298,13 @@ def run_onboarding(ask=input, sink=print,
 
     Returns the path written: ``$THREETOKS_CONFIG`` when set, otherwise the
     per-user config file. ``open_url`` is passed through to the voice step.
+    An existing file keeps its comments and key order; a file that does
+    not parse is written again from the template.
     """
     config = run_wizard(load_config(), ask, sink, open_url)
-    path = save_config(config)
+    target = onboarding_target()
+    path = save_config(config, target) if parse_error(target) \
+        else save_changes(config, target)
     sink(f"config saved — {path}")
     return path
 

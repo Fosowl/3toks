@@ -11,9 +11,10 @@ import os
 import shutil
 import tempfile
 
-from threetoks.config import (ThreetoksConfig, load_config, resolve_path,
-                              save_config)
-from threetoks.fields import changed_fields, get_value, serialize_value
+from threetoks.config import (ThreetoksConfig, load_config, parse_error,
+                              read_parser, resolve_path, save_config)
+from threetoks.fields import (FIELDS, changed_fields, get_value,
+                              invalid_fields, serialize_value)
 
 _DELIMITERS = "=:"
 _COMMENT_MARKS = ("#", ";")
@@ -112,6 +113,7 @@ class _Scan:
         """Handle one raw line."""
         if self._is_continuation(line):
             if not self.dropping:
+                self.last[self.section] = len(self.out)  # insert below it
                 self.out.append(line)
             return
         name, key = _section_name(line), _key_name(line)
@@ -129,11 +131,13 @@ def _insert_missing(scan: _Scan) -> list:
     Args: scan (_Scan): the finished scan. Returns: the new lines.
     """
     out = scan.out
-    known = [(s, k, v) for (s, k), v in scan.pending.items()
-             if s in scan.last]
-    known.sort(key=lambda row: -scan.last[row[0]])   # bottom-up, stable
-    for section, key, value in known:
-        out.insert(scan.last[section] + 1, f"{key} = {value}")
+    grouped = {}
+    for (section, key), value in scan.pending.items():
+        if section in scan.last:
+            grouped.setdefault(section, []).append(f"{key} = {value}")
+    for section in sorted(grouped, key=lambda name: -scan.last[name]):
+        spot = scan.last[section] + 1  # bottom-up keeps earlier spots valid
+        out[spot:spot] = grouped[section]
     opened = set()
     for (section, key), value in scan.pending.items():
         if section in scan.last:
@@ -176,14 +180,19 @@ def _atomic_write(path: str, text: str) -> None:
     os.replace(temp, real)
 
 
-def _changes_against(old: ThreetoksConfig, new: ThreetoksConfig) -> dict:
-    """Map each changed field to its INI text.
+def _changes_against(path: str, new: ThreetoksConfig) -> dict:
+    """Map each field to rewrite to its INI text.
 
-    Args: old, new (ThreetoksConfig). Returns: dict (section, key) -> str.
+    A field is rewritten when its value changes, or when the file holds
+    text the loader ignores, so a save also repairs a bad value.
+    Args: path (str): the existing file; new (ThreetoksConfig): the
+    wanted config. Returns: dict (section, key) -> str.
     """
+    ignored = {item for item, _, _ in invalid_fields(read_parser(path)[0])}
+    wanted = set(changed_fields(load_config(path), new)) | ignored
     return {(item.section, item.key): serialize_value(item,
                                                       get_value(new, item))
-            for item in changed_fields(old, new)}
+            for item in FIELDS if item in wanted}
 
 
 def save_changes(new: ThreetoksConfig, path: str = None) -> str:
@@ -192,15 +201,20 @@ def save_changes(new: ThreetoksConfig, path: str = None) -> str:
     Used by the config screen and ``threetoks config set``. A missing
     file is created from the commented template. Args: new
     (ThreetoksConfig): the wanted config; path (str): the file, default
-    the file the loader reads. Returns: the path written.
+    the file the loader reads. Returns: the path written. Raises:
+    ValueError when the file cannot be read or parsed (a save would hide
+    the error), OSError when it cannot be written.
     """
     target = path or resolve_path()
     if not os.path.isfile(target):
         return save_config(new, target)
-    changes = _changes_against(load_config(target), new)
+    error = parse_error(target)
+    if error:
+        raise ValueError(f"{target} cannot be used — fix it first: {error}")
+    changes = _changes_against(target, new)
     if not changes:
         return target
-    with open(target, encoding="utf-8", newline="") as stream:
+    with open(target, encoding="utf-8-sig", newline="") as stream:
         text = stream.read()
     _atomic_write(target, update_ini(text, changes))
     return target

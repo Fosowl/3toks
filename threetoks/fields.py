@@ -1,14 +1,16 @@
 """Field registry: one table that describes every config knob.
 
 The config screen, the ``threetoks config`` command, and the doctor read
-this table. It lists each knob once: its section, kind, label, help text,
-and when a change takes effect. A test checks that the table covers every
-field of every config dataclass, so a new knob cannot be forgotten.
+this table. It lists each knob once: its section, kind, label, and help
+text. A test checks that the table covers every field of every config
+dataclass, so a new knob cannot be forgotten. A running chat applies
+every knob as soon as the file is saved (see :mod:`threetoks.live_config`).
 """
 from dataclasses import dataclass, fields as dataclass_fields, replace
 
-from threetoks.config import (BROWSER_MODES, PROVIDER_CHOICES,
-                              ThreetoksConfig)
+from threetoks.config import (BROWSER_MODES, MINIMUMS, PROVIDER_CHOICES,
+                              ThreetoksConfig, config_problem, in_range,
+                              read_parser)
 
 KIND_CHOICE = "choice"
 KIND_BOOL = "bool"
@@ -16,12 +18,9 @@ KIND_INT = "int"
 KIND_FLOAT = "float"
 KIND_TEXT = "text"
 
-APPLY_LIVE = "live"          # a running session takes the change now
-APPLY_RESTART = "restart"    # read once at start
-APPLY_VOICE = "/voice on"    # read when voice mode starts
-
 _FLOAT_STEP = 0.5
 _ON, _OFF = "on", "off"
+_FLOAT_DIGITS = 6     # rounding after a step drops binary noise
 _EMPTY_SHOWN = "(empty)"
 
 
@@ -36,7 +35,7 @@ class Section:
 
 @dataclass(frozen=True)
 class Field:
-    """One config knob: where it lives, how to edit it, when it applies."""
+    """One config knob: where it lives and how to edit it."""
 
     section: str
     key: str
@@ -44,8 +43,11 @@ class Field:
     label: str
     help: str
     choices: tuple = ()
-    apply: str = APPLY_RESTART
-    minimum: float | None = None
+
+    @property
+    def minimum(self) -> float | None:
+        """The least accepted number, from ``config.MINIMUMS``, or None."""
+        return MINIMUMS.get((self.section, self.key))
 
     @property
     def dotted(self) -> str:
@@ -71,31 +73,30 @@ FIELDS = (
           "ollama = local raw mode (measured). The rest are chat APIs.",
           choices=PROVIDER_CHOICES),
     Field("llm", "model", KIND_TEXT, "model",
-          "Model that makes every decision node.", apply=APPLY_LIVE),
+          "Model that makes every decision node."),
     Field("llm", "host", KIND_TEXT, "ollama host",
           "Where Ollama listens (ollama provider only)."),
     Field("llm", "api_base", KIND_TEXT, "api base",
           "Overrides the provider URL. Required for custom."),
     Field("llm", "vote_k", KIND_INT, "vote k",
-          "Samples per decision. 1 is the measured default.", minimum=1),
+          "Votes per menu decision. 1 is the measured default."),
     Field("llm", "send_seed", KIND_BOOL, "send seed",
           "Off for servers that reject the sampling seed."),
     Field("llm", "disable_think", KIND_BOOL, "disable think",
           "Pre-close the think block. Thinking Qwen needs it on."),
     Field("browser", "mode", KIND_CHOICE, "fetch mode",
           "http = fast, no JavaScript. plain = real Chrome.",
-          choices=BROWSER_MODES, apply=APPLY_LIVE),
+          choices=BROWSER_MODES),
     Field("browser", "visible", KIND_BOOL, "show window",
-          "Show the Chrome window (plain mode only).", apply=APPLY_LIVE),
+          "Show the Chrome window (plain mode only)."),
     Field("search", "searxng_url", KIND_TEXT, "searxng url",
           "Base URL of the local SearXNG."),
     Field("search", "min_interval_s", KIND_FLOAT, "min interval s",
-          "Least seconds between two outbound searches.", minimum=0),
+          "Least seconds between two outbound searches."),
     Field("research", "max_rounds", KIND_INT, "max rounds",
-          "Judged research rounds per question.", apply=APPLY_LIVE,
-          minimum=1),
+          "Judged research rounds per question."),
     Field("research", "max_steps", KIND_INT, "max steps",
-          "Decision steps allowed per episode.", minimum=1),
+          "Decision steps per research round."),
     Field("files", "root", KIND_TEXT, "root",
           "Directory the file and code agents work in."),
     Field("memory", "enabled", KIND_BOOL, "enabled",
@@ -106,24 +107,21 @@ FIELDS = (
     Field("code", "snippet_cache", KIND_TEXT, "snippet cache",
           "File that caches retrieved snippets."),
     Field("voice", "enabled", KIND_BOOL, "enabled",
-          "Start already listening and speaking.", apply=APPLY_VOICE),
+          "Listen and speak (at start, and now when saved)."),
     Field("voice", "lang", KIND_TEXT, "language",
-          "Vosk language code, for example en-us.", apply=APPLY_VOICE),
+          "Vosk language code, for example en-us."),
     Field("voice", "stt_model_path", KIND_TEXT, "stt model path",
-          "Vosk model folder. Empty = auto-download.", apply=APPLY_VOICE),
+          "Vosk model folder. Empty = auto-download."),
     Field("voice", "tts_model_path", KIND_TEXT, "tts model path",
-          "Piper .onnx voice. Needs its .onnx.json beside it.",
-          apply=APPLY_VOICE),
+          "Piper .onnx voice. Needs its .onnx.json beside it."),
     Field("voice", "tts_speaker", KIND_INT, "tts speaker",
-          "Speaker id. -1 = the voice default.", apply=APPLY_VOICE,
-          minimum=-1),
+          "Speaker id. -1 = the voice default."),
     Field("voice", "post_speak_delay", KIND_FLOAT, "post speak delay",
-          "Seconds before the microphone unmutes.", apply=APPLY_VOICE,
-          minimum=0),
+          "Seconds before the microphone unmutes."),
     Field("camera", "index", KIND_INT, "device index",
-          "Camera device the look agent captures from.", minimum=0),
+          "Camera device the look agent captures from."),
     Field("relay", "pin", KIND_INT, "gpio pin",
-          "BCM pin of the active-low relay board.", minimum=0),
+          "BCM pin of the active-low relay board."),
 )
 
 
@@ -240,14 +238,16 @@ def _parse_bool(text: str) -> tuple:
 
 
 def _parse_bounded(field: Field, text: str) -> tuple:
-    """Parse a number and check the field's minimum."""
+    """Parse a number and check it is finite and not below the minimum."""
     try:
         value = _parse_number(field, text)
     except ValueError:
         return None, f"not a {field.kind}"
+    if in_range(field.section, field.key, value):
+        return value, None
     if field.minimum is not None and value < field.minimum:
         return None, f"at least {field.minimum:g}"
-    return value, None
+    return None, "not a finite number"
 
 
 def cycle_value(field: Field, value, step: int):
@@ -271,7 +271,7 @@ def cycle_value(field: Field, value, step: int):
 def _step_number(field: Field, value, step: int):
     """Add one step to a number and clamp to the minimum."""
     size = 1 if field.kind == KIND_INT else _FLOAT_STEP
-    moved = value + step * size
+    moved = round(value + step * size, _FLOAT_DIGITS)
     if field.minimum is not None:
         moved = max(field.minimum, moved)
     return int(moved) if field.kind == KIND_INT else float(moved)
@@ -285,6 +285,74 @@ def changed_fields(old: ThreetoksConfig, new: ThreetoksConfig) -> tuple:
     """
     return tuple(item for item in FIELDS
                  if get_value(old, item) != get_value(new, item))
+
+
+def invalid_fields(parser) -> list:
+    """List the keys whose text the loader ignores for its default.
+
+    The warnings below and the INI saver call this, so a bad value is
+    both reported and repaired by the next save.
+
+    Args:
+        parser (ConfigParser): the file as read by ``config.read_parser``.
+
+    Returns:
+        list of (Field, str, str): the field, its raw text, and why the
+        text is not used.
+    """
+    found = []
+    for item in FIELDS:
+        raw = parser.get(item.section, item.key, fallback=None)
+        problem = None if raw is None else parse_value(item, raw)[1]
+        if problem:
+            found.append((item, raw.strip(), problem))
+    return found
+
+
+def unknown_names(parser) -> list:
+    """List the sections and keys in the file that no setting reads.
+
+    :func:`config_warnings` calls this, so a typo such as ``[LLM]`` or
+    ``votek`` is named instead of silently ignored.
+
+    Args:
+        parser (ConfigParser): the file as read by ``config.read_parser``.
+
+    Returns:
+        list of str: ``[name]`` for a section, ``section.key`` for a key.
+    """
+    known = covered_names()
+    sections = {section.name for section in SECTIONS}
+    found = [f"[{name}]" for name in parser.sections() if name not in sections]
+    for name in parser.sections():
+        if name in sections:
+            found += [f"{name}.{key}" for key in parser[name]
+                      if f"{name}.{key}" not in known]
+    return found
+
+
+def config_warnings(path: str = None) -> list:
+    """Say what in the config file is not used, one line per problem.
+
+    The TUI start, the live reload, ``config show/get/set``, ``doctor``
+    and the config screen show these lines.
+
+    Args:
+        path (str or None): file to check; default the resolved file.
+
+    Returns:
+        list of str: the whole-file problem alone, or one line per
+        ignored value or unknown name; empty when everything is used.
+    """
+    problem = config_problem(path)
+    if problem:
+        return [problem]
+    parser = read_parser(path)[0]
+    ignored = [f"⚠ {item.dotted} = {raw!r} is ignored ({why}); using "
+               f"{format_value(item, default_value(item))}"
+               for item, raw, why in invalid_fields(parser)]
+    return ignored + [f"⚠ {name} is not a setting; it is ignored"
+                      for name in unknown_names(parser)]
 
 
 def covered_names() -> set:
@@ -311,6 +379,8 @@ if __name__ == "__main__":
     port = find_field("browser.mode")
     assert parse_value(port, "PLAIN") == ("plain", None)
     assert parse_value(find_field("llm.vote_k"), "0")[0] is None
+    assert parse_value(find_field("search.min_interval_s"), "nan")[0] is None
+    assert cycle_value(find_field("voice.post_speak_delay"), 0.8, -1) == 0.3
     assert cycle_value(port, "http", 1) == "plain"
     cfg = set_value(ThreetoksConfig(), find_field("llm.model"), "x")
     assert changed_fields(ThreetoksConfig(), cfg) == (find_field("llm.model"),)

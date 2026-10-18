@@ -19,14 +19,14 @@ text. Pure formatting/dispatch functions (:func:`build_ticker_line`,
 :func:`render_result`, :func:`handle_command`) are kept free of the input
 loop so they can be unit-tested offline without an LLM or a network.
 """
-import os
-import random
 import textwrap
-import sys
 import time
-from dataclasses import dataclass, field
 
 from threetoks.banner import build_banner
+from threetoks.live_config import sync_config
+from threetoks.session import (ReplState, build_state, close_fetcher,
+                               start_voice, stop_voice, swap_model,
+                               switch_fetcher)
 from threetoks.theme import (CYAN, VIOLET, PINK, GREEN, AMBER, GRAY, GRAY_LIGHT, WHITE, RAMP, PANEL_WIDTH, SPINE, NODE, ZAP, CHEVRON, NOTE_BULLET, CROSS, color_enabled, dim, fg, gradient, hairline, ramp_at)
 
 TOKEN_BARS = "▁▂▃▄▅▆▇█"     # ticker token-cost bar, 1..8+ tokens
@@ -367,33 +367,7 @@ def prompt_text(enabled: bool = True) -> str:
             + dim("╰╴", enabled) + fg(CYAN, CHEVRON + " ", enabled))
 
 
-# --- REPL state + slash-command dispatch --------------------------------
-@dataclass
-class ReplState:
-    """Mutable REPL state passed to command handlers.
-
-    ``policy_factory`` rebuilds the decision policy from a model name so
-    ``/model`` can swap models without importing a backend at test time.
-    """
-    services: object
-    specs: list
-    policy: object
-    model: str
-    policy_factory: object
-    enabled: bool = True
-    running: bool = True
-    lines: list = field(default_factory=list)
-    fetcher: object = None  # live browser fetcher to close on mode switch
-    memory: object = None   # MemoryStore for this session, or None if disabled
-    memory_path: str = ""   # where memory is dumped when the session ends
-    browser_visible: bool = False  # config default for /browser visibility
-    voice: object = None    # live VoiceSession, or None for keyboard input
-    voice_config: object = None  # [voice] config section for /voice on
-    llm_provider: str = "ollama"  # LLM transport name (NOT services.provider,
-    # which is the web SearchProvider); families are raw-mode only
-    debug: bool = False     # /debug: show each decision's raw model answer
-    # (NOT voice.debug, which traces microphone transcripts)
-    debug_full: bool = False  # /debug full: dump whole prompts per call
+# --- slash-command dispatch ----------------------------------------------
 
 
 def _cmd_help(state: ReplState, arg: str) -> str:
@@ -433,18 +407,6 @@ def _cmd_deep(state: ReplState, arg: str) -> str:
     return dim(f"deep research rounds = {arg.strip()}", state.enabled)
 
 
-def _refresh_optional_agents(state: ReplState, model: str) -> None:
-    """Re-derive the capability agents for ``model`` (look needs vision).
-
-    The planner is rebuilt last, so its plans only use agents that exist.
-    """
-    from threetoks.agents import (OPTIONAL_AGENT_NAMES, PLANNER_NAME,
-                                  optional_agents, with_planner)
-    derived = OPTIONAL_AGENT_NAMES + (PLANNER_NAME,)
-    kept = [spec for spec in state.specs if spec.name not in derived]
-    state.specs = with_planner(kept + optional_agents(state.services, model))
-
-
 def _cmd_model(state: ReplState, arg: str) -> str:
     """Rebuild the policy for a new model name via the policy factory.
 
@@ -454,33 +416,17 @@ def _cmd_model(state: ReplState, arg: str) -> str:
     name = arg.strip()
     if not name:
         return fg(AMBER, "usage: /model NAME", state.enabled)
-    state.model = name
-    state.policy = state.policy_factory(name)
-    _refresh_optional_agents(state, name)
-    notice = unknown_family_notice(name) if state.llm_provider == "ollama" \
-        else None
+    try:
+        notice = swap_model(state, name)
+    except RuntimeError as error:  # e.g. a provider without its API key
+        return fg(AMBER, f"model not changed: {error}", state.enabled)
     if notice:
         return fg(AMBER, notice, state.enabled)
     return dim(f"model = {name}", state.enabled)
 
 
 _BROWSER_MODES = ("http", "plain")
-
-
-def _close_active_fetcher(state: ReplState) -> None:
-    """Quit any browser fetcher from a previous ``/browser`` selection."""
-    if state.fetcher is not None:
-        try:
-            state.fetcher.close()
-        except Exception:  # noqa: BLE001 - teardown must never crash the REPL
-            pass
-        state.fetcher = None
-
-
-def _make_browser_fetcher(visible: bool):
-    """Lazily build the Chrome fetcher for ``plain`` (imports deferred)."""
-    from threetoks.web.browser import make_fetcher
-    return make_fetcher(visible=visible)
+_WINDOW_WORDS = {"on-screen": True, "headless": False}
 
 
 def _cmd_browser(state: ReplState, arg: str) -> str:
@@ -489,51 +435,38 @@ def _cmd_browser(state: ReplState, arg: str) -> str:
     ``/browser http`` restores the plain-HTTP fetch. ``plain`` drives a
     real Chrome; visibility defaults to the config's ``[browser]
     visible`` and an explicit ``on-screen`` / ``headless`` argument
-    overrides it. A new fetcher gets a fresh chance at every site, so
-    hosts blocked earlier in the session are forgotten (a visible window
-    lets the user solve the check). The browser module is optional, so
-    imports are lazy and every failure surfaces as a styled message, not
-    a traceback.
+    overrides it. A visible window lets the user solve a bot check. The
+    browser module is optional, so every failure surfaces as a styled
+    message, not a traceback.
     """
-    parts = arg.split()
-    mode = parts[0].lower() if parts else ""
+    parts = arg.lower().split()
+    mode = parts[0] if parts else ""
     if mode not in _BROWSER_MODES:
         return fg(AMBER,
                   "usage: /browser http|plain [on-screen|headless]",
                   state.enabled)
-    visible = state.browser_visible
-    if len(parts) > 1 and parts[1].lower() == "on-screen":
-        visible = True
-    elif len(parts) > 1 and parts[1].lower() == "headless":
-        visible = False
-    _close_active_fetcher(state)
-    state.services.blocked_hosts.clear()
-    if mode == "http":
-        from threetoks.cli import fetch_page
-        state.services.fetch_page = fetch_page
-        return dim("browser http — plain HTTP fetch", state.enabled)
+    window = parts[1] if len(parts) > 1 else ""
+    visible = _WINDOW_WORDS.get(window, state.config.browser.visible)
     try:
-        fetcher = _make_browser_fetcher(visible)
+        switch_fetcher(state, mode, visible)
     except Exception as error:  # noqa: BLE001 - optional module, any failure
-        from threetoks.cli import fetch_page
-        state.services.fetch_page = fetch_page  # never leave a dead driver bound
         return fg(AMBER, f"browser unavailable: {error} — reverted to http",
                   state.enabled)
-    state.fetcher = fetcher
-    state.services.fetch_page = fetcher.fetch_page
-    window = "on-screen" if visible else "headless"
-    return dim(f"browser {mode} — Chrome ({window})", state.enabled)
+    if mode == "http":
+        return dim("browser http — plain HTTP fetch", state.enabled)
+    shown = "on-screen" if visible else "headless"
+    return dim(f"browser {mode} — Chrome ({shown})", state.enabled)
 
 
 def _cmd_setup(state: ReplState, arg: str) -> str:
     """Open the config screen; on a dumb terminal run the line wizard.
 
     A real terminal gets the arrow-key screen, which saves into the
-    active file and applies live settings at once. Piped or dumb
-    terminals get the classic wizard, whose file is read at the next
-    start. Ctrl-C or a closed stdin cancels without writing, and a
-    shadowing ``./config.ini`` is called out so the save is never
-    silently ineffective.
+    active file. Piped or dumb terminals get the classic wizard. Either
+    way the saved file is applied to this session at once. Ctrl-C or a
+    closed stdin cancels without writing, and a shadowing
+    ``./config.ini`` is called out so the save is never silently
+    ineffective.
     """
     from threetoks.keys import is_interactive
     if is_interactive():
@@ -548,35 +481,12 @@ def _cmd_setup(state: ReplState, arg: str) -> str:
     if find_config_path() != path:
         return fg(AMBER, f"saved — {path}, but {find_config_path()} takes "
                   "precedence here and will be read instead", state.enabled)
-    return dim(f"saved — {path} (applies next start; /model, /browser and "
-               "/voice on pick up changes this session)", state.enabled)
+    applied = sync_config(state)
+    saved = dim(f"saved — {path}", state.enabled)
+    return saved + ("\n" + applied if applied else "")
 
 
 _VOICE_ARGS = ("", "on", "off", "debug")  # accepted /voice arguments
-
-
-def _close_voice(state: ReplState) -> None:
-    """Stop any live voice session and return to keyboard input."""
-    if state.voice is not None:
-        state.voice.close()
-        state.voice = None
-
-
-def _reload_voice_config(state: ReplState) -> None:
-    """Re-read the saved ``[voice]`` section so a fresh /setup applies now.
-
-    Without this the session would keep the config captured at startup and
-    ``/voice on`` would ignore paths the user just saved. ``load_config``
-    is total — a missing or malformed file degrades to the built-in
-    defaults rather than raising, exactly as the next start would — so the
-    guard here only covers genuinely unexpected errors, and keeps the
-    startup section when one happens.
-    """
-    try:
-        from threetoks.config import load_config
-        state.voice_config = load_config().voice
-    except Exception:  # noqa: BLE001 - a bad config must not block voice
-        return
 
 
 def _toggle_voice_debug(state: ReplState) -> str:
@@ -589,19 +499,15 @@ def _toggle_voice_debug(state: ReplState) -> str:
 
 
 def _voice_on(state: ReplState) -> str:
-    """Build a session from the freshly reloaded config; report the notes.
+    """Build a session from the current ``[voice]`` config; report notes.
 
-    The config is only re-read on the off-to-on edge, so a live session
-    is told how to pick up a change rather than being left to imply it
-    already did.
+    The REPL applies a saved config before it runs each line, so
+    ``state.config.voice`` already holds the last saved section here.
     """
     if state.voice is not None:
-        return dim("voice is already on — /voice off then on to re-read "
-                   "the config", state.enabled)
-    _reload_voice_config(state)
-    from threetoks.voice.session import make_voice_session
+        return dim("voice is already on", state.enabled)
     try:
-        state.voice, notes = make_voice_session(state.voice_config)
+        notes = start_voice(state, state.config.voice)
     except Exception as error:  # noqa: BLE001 - optional extras, any failure
         return fg(AMBER, f"voice unavailable: {error}", state.enabled)
     rows = [dim("voice on — speak; Ctrl-C returns to the keyboard",
@@ -613,8 +519,8 @@ def _voice_on(state: ReplState) -> str:
 def _cmd_voice(state: ReplState, arg: str) -> str:
     """Toggle voice mode: microphone in and/or spoken answers out.
 
-    ``/voice on`` re-reads the saved ``[voice]`` config, then builds a
-    session from whichever voice extras are installed (stt and tts degrade
+    ``/voice on`` builds a session from the current ``[voice]`` config and
+    whichever voice extras are installed (stt and tts degrade
     independently); ``/voice off`` returns to the keyboard; ``/voice
     debug`` traces raw transcripts and gate drops; bare ``/voice`` reports
     the current state. Failures surface as a styled message.
@@ -626,7 +532,7 @@ def _cmd_voice(state: ReplState, arg: str) -> str:
         status = "on" if state.voice is not None else "off"
         return dim(f"voice is {status}", state.enabled)
     if want == "off":
-        _close_voice(state)
+        stop_voice(state)
         return dim("voice off — keyboard input", state.enabled)
     if want == "debug":
         return _toggle_voice_debug(state)
@@ -902,12 +808,12 @@ def _listen_line(state: ReplState, read_input, prompt: str, sink):
         try:
             gated = state.voice.listen(state.policy, debug_sink)
         except KeyboardInterrupt:
-            _close_voice(state)
+            stop_voice(state)
             sink(dim("voice off — keyboard input", state.enabled))
             return _read_line(read_input, prompt)
         except Exception as error:  # noqa: BLE001 - never unwind the REPL
             sink(render_error(error, state.enabled))
-            _close_voice(state)
+            stop_voice(state)
             sink(dim("voice off — keyboard input", state.enabled))
             return _read_line(read_input, prompt)
         if gated is None:
@@ -1001,196 +907,10 @@ def repl(state: ReplState, read_input=input, sink=print) -> None:
             sink("\n" + gradient(SIGN_OFF, state.enabled))
             return
         if line.strip():
+            applied = sync_config(state)  # a save from anywhere applies now
+            if applied:
+                sink(applied)
             _dispatch(state, line.strip(), sink)
-
-
-def _make_provider(config, sink):
-    """Search provider, or None (with a notice) on a bare core install.
-
-    The web extras (curl_cffi, bs4, markdownify) are optional; a missing
-    import must degrade to a working TUI without the web agent, never a
-    startup crash.
-    """
-    try:
-        import threetoks.web.search as search_mod  # lazy: web extras
-        from threetoks.web.search import auto_provider
-    except ImportError:
-        sink(dim("  web extras missing — web agent disabled "
-                 "(install: uv tool install '3toks[web]')",
-                 color_enabled()))
-        return None
-    search_mod.MIN_SEARCH_INTERVAL_S = config.search.min_interval_s
-    return auto_provider()
-
-
-def _searxng_gate(mode: str, sink) -> None:
-    """Browser modes pair with the local SearXNG: exit clearly without it.
-
-    ``plain`` exists for JS-heavy pages found through search;
-    starting Chrome when no search engine answers can only produce a
-    session that opens nothing, so refuse early and say how to fix it.
-    """
-    try:
-        from threetoks.web import search as search_mod  # lazy: web extras
-    except ImportError:
-        return  # no web extras: the provider is already disabled anyway
-    base_url = os.getenv(search_mod.SEARXNG_URL_ENV,
-                         search_mod.DEFAULT_SEARXNG_URL)
-    if not search_mod._searxng_answers(base_url):
-        sink(fg(AMBER, f"  browser mode '{mode}' needs a local SearXNG, "
-                f"but none answers at {base_url} — run "
-                "./start_search_engine.sh first", color_enabled()))
-        raise SystemExit(1)
-
-
-def _initial_fetcher(config, services, sink=print):
-    """Set ``services.fetch_page`` from ``config.browser.mode`` at startup.
-
-    Returns the live browser fetcher (to close at shutdown) for the Chrome
-    modes, or ``None`` for plain HTTP. A failed browser start degrades to
-    HTTP rather than aborting the session — but says so: a silent
-    fallback reads as "the config is ignored" to the user watching for a
-    window that never comes.
-    """
-    from threetoks.cli import fetch_page
-    mode = config.browser.mode
-    if mode == "http":
-        services.fetch_page = fetch_page
-        return None
-    _searxng_gate(mode, sink)
-    try:
-        fetcher = _make_browser_fetcher(config.browser.visible)
-    except Exception as error:  # noqa: BLE001 - optional module; use HTTP
-        services.fetch_page = fetch_page
-        sink(fg(AMBER, f"  browser {mode} unavailable: {error} — "
-                "falling back to http fetch", color_enabled()))
-        return None
-    services.fetch_page = fetcher.fetch_page
-    return fetcher
-
-
-def unknown_family_notice(model: str) -> str | None:
-    """A warning when the model's template family had to be guessed.
-
-    A wrong raw-mode template fails silently — menus keep answering (one
-    digit survives junk tokens) while every multi-line generation derails
-    — so the guess must be surfaced, never assumed.
-    """
-    from threetoks.backend.base import detect_family
-
-    _, known = detect_family(model)
-    if known:
-        return None
-    return (f"⚠ unknown template family for '{model}' — driving it as "
-            "ChatML, which may silently degrade generations. Known "
-            "families: qwen/smollm (chatml), gemma, llama3, "
-            "mistral/mixtral/llama2, phi3, deepseek-r1. The measured "
-            "policy model is qwen3.5:2b.")
-
-
-def _make_retriever(config, provider):
-    """The opt-in code retrieval hook, or None (the default).
-
-    Requires both the ``[code] retrieval`` config flag AND a working
-    search provider (a bare install has neither and gets None).
-    """
-    if provider is None or not config.code.retrieval:
-        return None
-    from threetoks.code.retrieve import Retriever
-    return Retriever(provider, cache_path=config.code.snippet_cache)
-
-
-def _warn_bad_config(sink) -> None:
-    """Say so when the config file was ignored and defaults took over.
-
-    A file that fails to parse degrades to the built-in defaults rather
-    than raising, which is otherwise invisible: the session simply runs
-    on a config the user did not write (see config.config_problem).
-    """
-    from threetoks.config import config_problem
-    problem = config_problem()
-    if problem:
-        sink(fg(AMBER, problem, color_enabled()))
-
-
-def _make_relay(config, sink):
-    """A live Relay on a Raspberry Pi with the extra installed, else None."""
-    from threetoks.relay import relay_available
-    if not relay_available():
-        return None
-    from threetoks.relay import Relay
-    try:
-        return Relay(pin=config.relay.pin)
-    except Exception as error:  # noqa: BLE001 - hardware; degrade, don't die
-        sink(fg(AMBER, f"  relay unavailable: {error}", color_enabled()))
-        return None
-
-
-def _make_capture(config):
-    """A camera-frame callable when opencv is installed, else None."""
-    from threetoks.camera import camera_available, capture_jpeg_b64
-    if not camera_available():
-        return None
-    return lambda: capture_jpeg_b64(config.camera.index)
-
-
-def build_state(model: str = None, sink=print):
-    """Assemble live Services/specs/policy from the resolved config file.
-
-    Imports of the backend and the agent registry stay inside this function
-    so the module (and its tests) load without ollama or the registry. The
-    ``model`` argument, when given, overrides the configured model.
-    """
-    from pathlib import Path
-
-    from threetoks.agents import default_agents, optional_agents, with_planner
-    from threetoks.backend.providers import make_backend
-    from threetoks.cli import make_policy_config
-    from threetoks.config import load_config
-    from threetoks.memory import MemoryStore
-    from threetoks.policy import Policy
-    from threetoks.services import Services
-    from threetoks.trace import Tracer
-
-    config = load_config()
-    _warn_bad_config(sink)
-    provider = _make_provider(config, sink)
-    services = Services(provider=provider,
-                        files_root=Path(config.files.root),
-                        max_research_rounds=config.research.max_rounds,
-                        retriever=_make_retriever(config, provider),
-                        relay=_make_relay(config, sink),
-                        capture_frame=_make_capture(config))
-    fetcher = _initial_fetcher(config, services, sink)
-    chosen_model = model or config.llm.model
-    specs = default_agents(services) + optional_agents(services, chosen_model)
-    if provider is None:  # bare install: never route to the web agent
-        specs = [spec for spec in specs if spec.name != "web"]
-    specs = with_planner(specs)
-    no_think = config.llm.disable_think
-    factory = lambda name: Policy(make_backend(config.llm),
-                                  make_policy_config(name, no_think),
-                                  Tracer(None), debug=False)
-    if config.llm.provider == "ollama":  # families only exist in raw mode
-        notice = unknown_family_notice(chosen_model)
-        if notice:
-            sink(notice)
-    policy = factory(chosen_model)
-    memory = MemoryStore.load(config.memory.path) if config.memory.enabled \
-        else None
-    state = ReplState(services, specs, policy, chosen_model, factory,
-                     enabled=color_enabled(), fetcher=fetcher,
-                     memory=memory, memory_path=config.memory.path,
-                     browser_visible=config.browser.visible,
-                     voice_config=config.voice,
-                     llm_provider=config.llm.provider)
-    # Re-bind the factory so future model swaps inherit the current debug flag
-    state.policy_factory = lambda name: Policy(make_backend(config.llm),
-                                                make_policy_config(name,
-                                                                   no_think),
-                                                Tracer(None),
-                                                debug=state.debug)
-    return state
 
 
 def main(model: str = None) -> None:
@@ -1206,15 +926,15 @@ def main(model: str = None) -> None:
         print(render_error(error, color_enabled()))
         return
     print(build_banner(state.model, len(state.specs), state.enabled))
-    if state.voice_config is not None and state.voice_config.enabled:
+    if state.config.voice.enabled:
         print(handle_command(state, "/voice on"))
     try:
         repl(state, read_input=terminal_reader(_COMMANDS))
     finally:
-        _close_voice(state)
-        _close_active_fetcher(state)
+        stop_voice(state)
+        close_fetcher(state)
         if state.memory is not None:
-            state.memory.dump(state.memory_path)
+            state.memory.dump(state.config.memory.path)
 
 
 # Demo ticker events; the last one is a decision truncated by the node's

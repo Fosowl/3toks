@@ -6,13 +6,12 @@ never touches the terminal, so tests can call it and read the lines.
 Theme: tide lines of waves that run from deep teal to neon pink, and
 harbor names for the sections (HELM, NETS, SONAR, ...).
 """
-from threetoks.fields import (APPLY_LIVE, APPLY_RESTART, APPLY_VOICE,
-                              KIND_BOOL, KIND_TEXT, SECTIONS, Field, fields_of,
+from threetoks.fields import (KIND_BOOL, KIND_TEXT, SECTIONS, Field, fields_of,
                               format_value, get_value)
 from threetoks.hints import (LEVEL_BAD, LEVEL_OK, LEVEL_WARN, Hint,
                              hint_for)
 from threetoks.screen_state import (Screen, current_field, unsaved)
-from threetoks.theme import (AMBER, CROSS, CYAN, GRAY, GRAY_LIGHT, GREEN, NODE,
+from threetoks.theme import (AMBER, CROSS, CYAN, GRAY_LIGHT, GREEN, NODE,
                              PINK, SPINE, VIOLET, WHITE, ZAP, dim, fg,
                              gradient)
 
@@ -24,11 +23,10 @@ MAX_WIDTH = 78
 MIN_WIDTH = 64
 PATH_MIN_ROOM = 8     # least columns kept for the file path
 TAB_MARGIN = 4        # columns the full tab bar needs beside its tabs
-LABEL_W, VALUE_W, TAG_W = 18, 30, 10
+LABEL_W, VALUE_W = 18, 40
 MAX_ROWS = max(len(fields_of(section.name)) for section in SECTIONS)
 LEVEL_STYLE = {LEVEL_OK: (GREEN, "●"), LEVEL_WARN: (AMBER, "▲"),
                 LEVEL_BAD: (PINK, CROSS)}
-_APPLY_STYLE = {APPLY_LIVE: GREEN, APPLY_RESTART: GRAY, APPLY_VOICE: VIOLET}
 _BROWSE_KEYS = (("↑↓", "move"), ("←→", "change"), ("⏎", "edit"),
                 ("⇥", "section"), ("r", "reset"), ("s", "save"),
                 ("esc", "leave"))
@@ -135,7 +133,7 @@ def _glyph(hint: Hint | None, enabled: bool) -> str:
 
 
 def row_line(screen: Screen, field: Field, enabled: bool) -> str:
-    """One setting row: marker, label, value, apply tag, health glyph.
+    """One setting row: marker, label, value, health glyph.
 
     Args: screen (Screen); field (Field); enabled (bool). Returns: str.
     """
@@ -143,10 +141,9 @@ def row_line(screen: Screen, field: Field, enabled: bool) -> str:
     marker = fg(CYAN, "▸", enabled) if selected else " "
     label = _cell(field.label, (WHITE if selected else GRAY_LIGHT, LABEL_W),
                   enabled)
-    tag = _cell(field.apply, (_APPLY_STYLE[field.apply], TAG_W), enabled)
     hint = hint_for(field, screen.config, screen.probes)
     value = _value_cell(screen, field, enabled)
-    return f" {marker} {label}{value}{tag}{_glyph(hint, enabled)}"
+    return f" {marker} {label}{value}{_glyph(hint, enabled)}"
 
 
 def section_title(screen: Screen, enabled: bool) -> str:

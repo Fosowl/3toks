@@ -230,9 +230,10 @@ into the mesh. The recipe, with `threetoks/relay.py` +
    options, escape last. Answers are one spoken-length sentence — voice
    mode reads them aloud.
 3. **Services field**: add `yourtool: object = None` to
-   `threetoks/services.py`; construct it in `tui.build_state` behind the
-   availability gate, degrading to `None` with a notice on failure (see
-   `_make_relay`).
+   `threetoks/services.py`; construct it in `session.build_state` behind
+   the availability gate, degrading to `None` with a notice on failure
+   (see `session.make_relay`). If a config section drives it, add an
+   applier to `live_config._APPLIERS` so a saved change applies live.
 4. **Registration**: extend `optional_agents()` (lazy import) and add
    the agent's name to `OPTIONAL_AGENT_NAMES`.
 5. **Packaging**: a new extra in `pyproject.toml`; if the dependency is

@@ -193,7 +193,7 @@ class CmdVoiceTest(unittest.TestCase):
         with mock.patch("threetoks.voice.session.make_voice_session",
                         return_value=(session, ["note"])) as factory:
             reply = _cmd_voice(state, "on")
-        factory.assert_called_once_with(state.voice_config)
+        factory.assert_called_once_with(state.config.voice)
         self.assertIs(state.voice, session)
         self.assertIn("note", reply)
         _cmd_voice(state, "off")
@@ -215,30 +215,6 @@ class CmdVoiceTest(unittest.TestCase):
         state = make_state()
         self.assertIn("voice is off", _cmd_voice(state, "debug"))
         self.assertIsNone(state.voice)
-
-    def test_on_reloads_the_freshly_saved_voice_config(self):
-        # The /setup bug: a config saved this session must be picked up.
-        state = make_state(voice_config="stale")
-        fresh = SimpleNamespace(voice="fresh")
-        session = VoiceSession(FakeListener(), None)
-        with mock.patch("threetoks.config.load_config",
-                        return_value=fresh), \
-                mock.patch("threetoks.voice.session.make_voice_session",
-                           return_value=(session, [])) as factory:
-            _cmd_voice(state, "on")
-        factory.assert_called_once_with("fresh")
-        self.assertEqual(state.voice_config, "fresh")
-
-    def test_on_keeps_the_startup_config_when_the_reload_fails(self):
-        state = make_state(voice_config="startup")
-        session = VoiceSession(FakeListener(), None)
-        with mock.patch("threetoks.config.load_config",
-                        side_effect=OSError("unreadable config")), \
-                mock.patch("threetoks.voice.session.make_voice_session",
-                           return_value=(session, [])) as factory:
-            _cmd_voice(state, "on")
-        factory.assert_called_once_with("startup")
-        self.assertEqual(state.voice_config, "startup")
 
     def test_on_failure_surfaces_a_styled_message(self):
         state = make_state()

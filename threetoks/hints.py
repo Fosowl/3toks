@@ -87,7 +87,7 @@ def _searxng(config: ThreetoksConfig, probes: Probes) -> Hint | None:
 
 def _files_root(config: ThreetoksConfig, probes: Probes) -> Hint | None:
     """Say whether the file root is a real directory."""
-    if os.path.isdir(config.files.root):
+    if os.path.isdir(os.path.expanduser(config.files.root)):
         return Hint(LEVEL_OK, "directory found")
     return Hint(LEVEL_BAD, "not a directory")
 
@@ -96,7 +96,7 @@ def _voice_path(problem_of, path: str) -> Hint | None:
     """Turn an onboard path check into a hint; an empty path says nothing."""
     if not path:
         return None
-    problem = problem_of(path)
+    problem = problem_of(os.path.expanduser(path))
     if problem is None:
         return Hint(LEVEL_OK, "found")
     return Hint(LEVEL_BAD, problem.removeprefix(_WARNING_PREFIX))

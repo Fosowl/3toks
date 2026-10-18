@@ -48,7 +48,6 @@ ANGLE_HINTS = (
     "ask about criticism, problems, or controversy",
     "use completely different words than before",
 )
-MAX_STEPS_PER_ROUND = 25
 JUDGE_TASK_CLIP = 48
 
 # Search breaker: this many consecutive provider failures with zero notes
@@ -315,7 +314,8 @@ def deep_research(task: str, services: Services, policy: Policy) -> dict:
                                        tried_queries=executed,
                                        blocked_hosts=services.blocked_hosts)
         vertical.tracer = getattr(policy, "tracer", None)  # fetch failures
-        result = run_episode(vertical, policy, max_steps=MAX_STEPS_PER_ROUND)
+        result = run_episode(vertical, policy,
+                             max_steps=max(1, services.max_research_steps))
         notes = vertical.notes  # adopt curation pruning across rounds
         result["rounds"] = round_number
         result["queries"] = list(tried)

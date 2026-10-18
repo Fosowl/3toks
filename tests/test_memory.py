@@ -232,7 +232,7 @@ class DispatchWiringTest(unittest.TestCase):
     def _state(self, store, policy):
         answered = AgentSpec("web", "research", lambda t, s, p: {"answer": "42"})
         return ReplState(Services(), [answered], policy, "m", None,
-                         enabled=False, memory=store, memory_path=""), answered
+                         enabled=False, memory=store), answered
 
     def test_run_task_recalls_then_remembers(self):
         store = filled_store()
@@ -266,7 +266,7 @@ class DispatchWiringTest(unittest.TestCase):
             store = filled_store()
             spec = AgentSpec("web", "research", lambda t, s, p, o=outcome: o)
             state = ReplState(Services(), [spec], make_policy([]), "m", None,
-                              enabled=False, memory=store, memory_path="")
+                              enabled=False, memory=store)
             _run_task(state, "zz", lambda t, s, p: spec, sink=[].append)
             self.assertEqual(store.count(), 2, outcome)  # nothing added
 

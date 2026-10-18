@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_RESEARCH_ROUNDS = 3
+DEFAULT_RESEARCH_STEPS = 25  # decision steps per research round
 
 
 @dataclass
@@ -17,6 +18,7 @@ class Services:
     files_root: Path = field(default_factory=Path.cwd)
     blocked_hosts: set = field(default_factory=set)  # bot-walled this session
     max_research_rounds: int = DEFAULT_RESEARCH_ROUNDS
+    max_research_steps: int = DEFAULT_RESEARCH_STEPS
     recalled: list = field(default_factory=list)  # memories the selector chose
     retriever: object = None           # code retrieval-as-repair (opt-in)
     relay: object = None               # GPIO light Relay (Pi relay extra)
@@ -31,5 +33,6 @@ if __name__ == "__main__":
     services = Services()
     assert services.files_root.exists()
     assert services.max_research_rounds == DEFAULT_RESEARCH_ROUNDS
+    assert services.max_research_steps == DEFAULT_RESEARCH_STEPS
     assert services.confirm_edit is None   # edits never applied by default
     print("smoke OK")

@@ -1,9 +1,10 @@
-"""The interactive config screen: terminal loop, save, and live apply.
+"""The interactive config screen: terminal loop and save.
 
 ``/config`` in the TUI and the first start call into this module. The
 screen is drawn on the terminal's alternate buffer, so the chat scrollback
 comes back untouched when it closes. Keys, saving, and the probe sweep are
-injected, so tests drive the whole loop with scripted keys.
+injected, so tests drive the whole loop with scripted keys. What the
+screen saves is applied to the chat by :mod:`threetoks.live_config`.
 """
 import functools
 import shutil
@@ -11,8 +12,8 @@ import sys
 from dataclasses import dataclass
 
 from threetoks.config import ThreetoksConfig, load_config, resolve_path
-from threetoks.fields import APPLY_LIVE, changed_fields
-from threetoks.hints import LEVEL_BAD, LEVEL_OK
+from threetoks.fields import config_warnings
+from threetoks.hints import LEVEL_BAD, LEVEL_OK, LEVEL_WARN
 from threetoks.ini_edit import save_changes
 from threetoks.keys import Keyboard, is_interactive
 from threetoks.probes import sweep
@@ -61,7 +62,7 @@ class Session:
         count = len(unsaved(screen))
         try:
             path = self.save(screen.config)
-        except OSError as error:
+        except (OSError, ValueError) as error:  # unwritable or broken file
             screen.level, screen.message = LEVEL_BAD, f"cannot save: {error}"
             return
         screen.saved, screen.path = screen.config, path
@@ -105,95 +106,45 @@ class Session:
         return self.saved_config
 
 
-def live_commands(changes: tuple, config: ThreetoksConfig) -> list:
-    """Turn saved changes into the slash commands that apply them now.
-
-    Used after the screen closes. Args: changes (tuple of Field): what
-    was saved; config (ThreetoksConfig): the saved values. Returns: list
-    of command lines such as ``/model qwen3.5:2b``.
-    """
-    names = {item.dotted for item in changes}
-    commands = []
-    if "llm.model" in names:
-        commands.append(f"/model {config.llm.model}")
-    if names & {"browser.mode", "browser.visible"}:
-        commands.append(_browser_command(config))
-    if "research.max_rounds" in names:
-        commands.append(f"/deep {config.research.max_rounds}")
-    return commands
-
-
-def _browser_command(config: ThreetoksConfig) -> str:
-    """The ``/browser`` line that matches the saved browser section."""
-    if config.browser.mode == "http":
-        return "/browser http"
-    window = "on-screen" if config.browser.visible else "headless"
-    return f"/browser {config.browser.mode} {window}"
-
-
-def restart_notice(changes: tuple) -> str:
-    """Name the saved settings that a running session cannot take yet.
-
-    Args: changes (tuple of Field). Returns: a one-line text, or "" when
-    every change is already live.
-    """
-    waiting = [item.dotted for item in changes if item.apply != APPLY_LIVE]
-    if not waiting:
-        return ""
-    return "next start / next /voice on: " + ", ".join(waiting)
-
-
-def run_screen(enabled: bool, path: str = None) -> tuple:
+def run_screen(enabled: bool, path: str = None) -> ThreetoksConfig | None:
     """Open the screen on the real terminal for the active config file.
 
     Used by ``/config``, the first start, and ``threetoks config``.
     Args: enabled (bool): colors on; path (str): file to edit and save,
-    default the file the loader reads (or would create). Returns: (old
-    config, saved config or None).
+    default the file the loader reads (or would create). Returns: the
+    saved config, or None when nothing was saved.
     """
     target = path or resolve_path()
     base = load_config(target)
     print(_SWEEP_NOTICE, end="\r", flush=True)
     screen = Screen(base, base, sweep(base), target)
+    warnings = config_warnings(target)
+    if warnings:  # a value the loader ignored must not look saved
+        more = f" (+{len(warnings) - 1} more)" if len(warnings) > 1 else ""
+        screen.level, screen.message = LEVEL_WARN, warnings[0] + more
     save = functools.partial(save_changes, path=target)
     with Keyboard() as keyboard:
-        session = Session(screen, keyboard, sys.stdout, save, enabled=enabled)
-        return base, session.run()
-
-
-def _apply_saved(state, base: ThreetoksConfig, saved) -> str:
-    """Apply what the screen saved to the live session; report it.
-
-    Args: state (ReplState): the live TUI state; base (ThreetoksConfig):
-    config before; saved (ThreetoksConfig or None): config after.
-    Returns: styled text for the REPL to print.
-    """
-    from threetoks.tui import handle_command
-    if saved is None or saved == base:
-        return dim("config closed — nothing changed", state.enabled)
-    changes = changed_fields(base, saved)
-    lines = [dim(f"config saved ({len(changes)} change(s))", state.enabled)]
-    for command in live_commands(changes, saved):
-        lines.append(handle_command(state, command))
-    notice = restart_notice(changes)
-    return "\n".join(lines + ([dim(notice, state.enabled)] if notice else []))
+        return Session(screen, keyboard, sys.stdout, save,
+                       enabled=enabled).run()
 
 
 def config_command(state) -> str:
-    """The ``/config`` command: run the screen, then apply live changes.
+    """The ``/config`` command: run the screen, then apply what it saved.
 
     Nothing the screen does may end the chat session: Ctrl-C while the
     probes run, or any failure, comes back as a one-line message.
     Args: state (ReplState): the live TUI state. Returns: styled text for
     the REPL to print.
     """
+    from threetoks.live_config import sync_config
     try:
-        base, saved = run_screen(state.enabled)
+        run_screen(state.enabled)
     except KeyboardInterrupt:
-        return dim("config closed — nothing changed", state.enabled)
+        pass
     except Exception as error:  # noqa: BLE001 - never unwind the REPL
         return fg(AMBER, f"config screen failed: {error}", state.enabled)
-    return _apply_saved(state, base, saved)
+    applied = sync_config(state)
+    return applied or dim("config closed — nothing changed", state.enabled)
 
 
 def first_run(enabled: bool) -> None:
@@ -203,7 +154,7 @@ def first_run(enabled: bool) -> None:
     and writes nothing. Args: enabled (bool): colors on. Returns: None.
     """
     try:
-        _, saved = run_screen(enabled)
+        saved = run_screen(enabled)
     except KeyboardInterrupt:
         saved = None
     if saved is None:
@@ -259,6 +210,5 @@ if __name__ == "__main__":
     session = Session(demo, keys, io.StringIO(), enabled=False,
                       save=lambda cfg: stored.setdefault("cfg", cfg) and "x")
     assert session.run().browser.mode == "plain"
-    assert live_commands(changed_fields(ThreetoksConfig(), stored["cfg"]),
-                         stored["cfg"]) == ["/browser plain headless"]
+    assert stored["cfg"].browser.mode == "plain"
     print("smoke OK")

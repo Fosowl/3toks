@@ -53,6 +53,12 @@ class UpdateIniTest(unittest.TestCase):
         out = update_ini(text, {("llm", "model"): "new"})
         self.assertEqual(out, "[llm]\nmodel = new\nhost = h\n")
 
+    def test_missing_keys_go_below_a_continued_value_in_order(self):
+        text = "[llm]\nmodel = a\n  b\n\n[browser]\nmode = http\n"
+        out = update_ini(text, {("llm", "vote_k"): "2", ("llm", "host"): "H"})
+        self.assertEqual(parsed(out)["llm"]["model"], "a\nb")
+        self.assertIn("  b\nvote_k = 2\nhost = H\n", out)
+
 
 def parsed(text):
     """Parse like the loader does; raises when the file would be ignored."""
@@ -138,6 +144,15 @@ class SaveChangesTest(unittest.TestCase):
         new = set_value(ThreetoksConfig(), find_field("relay.pin"), 22)
         save_changes(new, path)
         self.assertEqual(load_config(path).relay.pin, 22)
+
+    def test_a_value_the_loader_ignored_is_repaired_by_a_save(self):
+        path = os.path.join(self._tmp(), "c.ini")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("[llm]\nvote_k = abc\nmodel = x\n")
+        save_changes(set_value(load_config(path), find_field("llm.model"),
+                               "y"), path)
+        with open(path, encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "[llm]\nvote_k = 1\nmodel = y\n")
 
 
 if __name__ == "__main__":

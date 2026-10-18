@@ -15,6 +15,7 @@ unparseable value never raises; each field independently falls back to its
 default. This keeps a hand-edited config from ever crashing the agent.
 """
 import configparser
+import math
 import os
 from dataclasses import dataclass
 
@@ -61,6 +62,13 @@ DEFAULT_SNIPPET_CACHE = "threetoks_snippets.json"
 BROWSER_MODES = ("http", "plain")
 _TRUE_WORDS = ("1", "true", "yes", "on")
 _FALSE_WORDS = ("0", "false", "no", "off")
+_COMMENT_MARKS = ("#", ";")
+# Least accepted value per number key; a lower value falls back to the
+# default. The config screen and ``config set`` use the same table.
+MINIMUMS = {("llm", "vote_k"): 1, ("search", "min_interval_s"): 0,
+            ("research", "max_rounds"): 1, ("research", "max_steps"): 1,
+            ("voice", "tts_speaker"): -1, ("voice", "post_speak_delay"): 0,
+            ("camera", "index"): 0, ("relay", "pin"): 0}
 
 
 @dataclass(frozen=True)
@@ -183,27 +191,63 @@ class ThreetoksConfig:
 
 def _get_str(parser: configparser.ConfigParser, section: str,
              key: str, default: str) -> str:
-    """Read a string, falling back to ``default`` when absent or blank."""
-    value = parser.get(section, key, fallback=default)
-    return value.strip() or default
+    """Read a one-line string; blank or multi-line text gives ``default``."""
+    value = parser.get(section, key, fallback=default).strip()
+    return value if value and "\n" not in value else default
+
+
+def _get_path(parser: configparser.ConfigParser, section: str,
+              key: str, default: str) -> str:
+    """Read a path like :func:`_get_str`, with ``~`` expanded."""
+    return os.path.expanduser(_get_str(parser, section, key, default))
+
+
+def in_range(section: str, key: str, value) -> bool:
+    """Say whether a number is finite and not below its key's minimum.
+
+    The loader and the field registry call this for every number.
+
+    Args:
+        section (str), key (str): the INI place of the number.
+        value (int or float): the parsed number.
+
+    Returns:
+        bool: True when the value can be used.
+    """
+    minimum = MINIMUMS.get((section, key))
+    finite = isinstance(value, int) or math.isfinite(value)  # big ints too
+    return finite and (minimum is None or value >= minimum)
+
+
+def _new_parser() -> configparser.ConfigParser:
+    """An empty parser: no interpolation, ``#``/``;`` inline comments.
+
+    Interpolation is off, so a literal ``%`` in a value (URL escapes,
+    ``%APPDATA%`` paths) is data. An inline comment needs a space before
+    it, so ``vote_k = 3  # votes`` reads 3 and ``http://h/#a`` stays whole.
+    """
+    return configparser.ConfigParser(interpolation=None,
+                                     inline_comment_prefixes=_COMMENT_MARKS)
 
 
 def _get_int(parser: configparser.ConfigParser, section: str,
              key: str, default: int) -> int:
     """Read an int, falling back to ``default`` on absence or bad value."""
     try:
-        return parser.getint(section, key, fallback=default)
+        value = parser.getint(section, key, fallback=default)
     except ValueError:
         return default
+    return value if in_range(section, key, value) else default
 
 
 def _get_float(parser: configparser.ConfigParser, section: str,
                key: str, default: float) -> float:
     """Read a float, falling back to ``default`` on absence or bad value."""
     try:
-        return parser.getfloat(section, key, fallback=default)
+        value = parser.getfloat(section, key, fallback=default)
     except ValueError:
         return default
+    return value if in_range(section, key, value) else default
 
 
 def _get_bool(parser: configparser.ConfigParser, section: str,
@@ -258,24 +302,24 @@ def _build_config(parser: configparser.ConfigParser) -> ThreetoksConfig:
             max_steps=_get_int(parser, "research", "max_steps",
                                DEFAULT_MAX_STEPS)),
         files=FilesConfig(
-            root=_get_str(parser, "files", "root", DEFAULT_FILES_ROOT)),
+            root=_get_path(parser, "files", "root", DEFAULT_FILES_ROOT)),
         memory=MemoryConfig(
-            path=_get_str(parser, "memory", "path", DEFAULT_MEMORY_PATH),
+            path=_get_path(parser, "memory", "path", DEFAULT_MEMORY_PATH),
             enabled=_get_bool(parser, "memory", "enabled",
                               DEFAULT_MEMORY_ENABLED)),
         code=CodeConfig(
             retrieval=_get_bool(parser, "code", "retrieval",
                                 DEFAULT_CODE_RETRIEVAL),
-            snippet_cache=_get_str(parser, "code", "snippet_cache",
-                                   DEFAULT_SNIPPET_CACHE)),
+            snippet_cache=_get_path(parser, "code", "snippet_cache",
+                                    DEFAULT_SNIPPET_CACHE)),
         voice=VoiceConfig(
             enabled=_get_bool(parser, "voice", "enabled",
                               DEFAULT_VOICE_ENABLED),
             lang=_get_str(parser, "voice", "lang", DEFAULT_VOICE_LANG),
-            stt_model_path=_get_str(parser, "voice", "stt_model_path",
-                                    DEFAULT_STT_MODEL_PATH),
-            tts_model_path=_get_str(parser, "voice", "tts_model_path",
-                                    DEFAULT_TTS_MODEL_PATH),
+            stt_model_path=_get_path(parser, "voice", "stt_model_path",
+                                     DEFAULT_STT_MODEL_PATH),
+            tts_model_path=_get_path(parser, "voice", "tts_model_path",
+                                     DEFAULT_TTS_MODEL_PATH),
             tts_speaker=_get_int(parser, "voice", "tts_speaker",
                                  DEFAULT_TTS_SPEAKER),
             post_speak_delay=_get_float(parser, "voice", "post_speak_delay",
@@ -325,6 +369,25 @@ def find_config_path() -> str:
     return None
 
 
+def config_stamp() -> tuple:
+    """Name the version of the config file the loader reads now.
+
+    The TUI start and its live reload compare stamps to see a new save.
+    The inode changes on every atomic save, so a same-size save inside
+    one coarse mtime tick is still seen.
+
+    Returns:
+        tuple: (path, inode, mtime in ns, size) of the file, or () when
+        no config file exists.
+    """
+    path = find_config_path()
+    try:
+        info = os.stat(path) if path else None
+    except OSError:
+        return ()
+    return (path, info.st_ino, info.st_mtime_ns, info.st_size) if info else ()
+
+
 def onboarding_target() -> str:
     """Where a wizard-produced config is saved: ``$THREETOKS_CONFIG`` or user file."""
     return os.environ.get(CONFIG_ENV_VAR) or user_config_path()
@@ -341,7 +404,8 @@ def resolve_path(path: str = None) -> str:
 _INI_TEMPLATE = """\
 # ThreeToks configuration — written by the onboarding wizard, safe to edit.
 # Load order: $THREETOKS_CONFIG > ./config.ini > this file > built-in defaults.
-# Bad or missing values silently fall back to the built-in defaults.
+# Bad or missing values fall back to the built-in defaults (with a warning).
+# A running chat applies a saved change before its next line.
 
 [llm]
 # Model used for every decision node, and the transport that serves it.
@@ -374,7 +438,7 @@ searxng_url = {searxng_url}
 min_interval_s = {min_interval_s}
 
 [research]
-# Judged research rounds per question / decision steps per episode.
+# Judged research rounds per question / decision steps per research round.
 max_rounds = {max_rounds}
 max_steps = {max_steps}
 
@@ -462,6 +526,47 @@ def save_config(config: ThreetoksConfig, path: str = None) -> str:
     return target
 
 
+def read_parser(path: str = None) -> tuple:
+    """Read the resolved config file into a parser, never raising.
+
+    The loader, :func:`parse_error` and the field checks call this.
+    A UTF-8 byte-order mark is accepted.
+
+    Args:
+        path (str or None): file to read; default the resolved file.
+
+    Returns:
+        tuple: (ConfigParser, error). The parser is empty and error is
+        the reason on one line (str) when the file cannot be read,
+        decoded or parsed; error is None otherwise, also for no file.
+    """
+    parser = _new_parser()
+    resolved = resolve_path(path)
+    if not os.path.isfile(resolved):
+        return parser, None
+    try:
+        with open(resolved, encoding="utf-8-sig") as handle:
+            parser.read_file(handle)
+    except (OSError, UnicodeDecodeError, configparser.Error) as error:
+        return _new_parser(), " ".join(str(error).split())
+    return parser, None
+
+
+def parse_error(path: str = None) -> str | None:
+    """Why the resolved config file cannot be used, else None.
+
+    :func:`config_problem` and the live reload of the TUI call this.
+
+    Args:
+        path (str or None): file to check; default the resolved file.
+
+    Returns:
+        str or None: the read, decode or parse error on one line, or
+        None when the file is good or does not exist.
+    """
+    return read_parser(path)[1]
+
+
 def config_problem(path: str = None) -> str | None:
     """Why the resolved config file was ignored wholesale, else None.
 
@@ -472,17 +577,11 @@ def config_problem(path: str = None) -> str | None:
     so a broken edit is visible instead of mysterious. Returns None when
     the file parses or does not exist.
     """
-    resolved = resolve_path(path)
-    if not os.path.isfile(resolved):
+    detail = parse_error(path)
+    if detail is None:
         return None
-    parser = configparser.ConfigParser(interpolation=None)
-    try:
-        parser.read(resolved, encoding="utf-8")
-    except (OSError, configparser.Error) as error:
-        detail = " ".join(str(error).split())
-        return (f"⚠ {resolved} was ignored — every setting fell back to "
-                f"its default. {detail}")
-    return None
+    return (f"⚠ {resolve_path(path)} was ignored — every setting fell back "
+            f"to its default. {detail}")
 
 
 def load_config(path: str = None) -> ThreetoksConfig:
@@ -491,19 +590,11 @@ def load_config(path: str = None) -> ThreetoksConfig:
     A missing file is not an error: it yields the built-in defaults. An
     unreadable or malformed file also degrades to defaults rather than
     raising, so a broken edit never takes the agent down — but it is not
-    silent: callers surface :func:`config_problem` at startup, because a
-    wholesale fallback is otherwise indistinguishable from a config that
-    simply says the defaults. Interpolation is off: a literal ``%`` in a
-    value (URL escapes, ``%APPDATA%`` paths) is data, not a template —
-    with it on, ``.get()`` would raise at build time, outside this guard.
+    silent: callers surface :func:`config_problem`, because a wholesale
+    fallback is otherwise indistinguishable from a config that simply
+    says the defaults.
     """
-    parser = configparser.ConfigParser(interpolation=None)
-    resolved = resolve_path(path)
-    try:
-        parser.read(resolved, encoding="utf-8")
-    except (OSError, configparser.Error):
-        parser = configparser.ConfigParser(interpolation=None)
-    return _build_config(parser)
+    return _build_config(read_parser(path)[0])
 
 
 if __name__ == "__main__":

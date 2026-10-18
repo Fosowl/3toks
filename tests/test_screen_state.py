@@ -1,10 +1,9 @@
-"""Tests for the config screen: key handling, rendering, session, apply."""
+"""Tests for the config screen: key handling, rendering, session."""
 import io
 import unittest
 
 from threetoks.config import ThreetoksConfig
-from threetoks.config_ui import Session, live_commands, restart_notice
-from threetoks.fields import changed_fields, find_field, set_value
+from threetoks.config_ui import Session
 from threetoks.probes import Probes
 from threetoks.screen_state import (ACTION_PROBE, ACTION_QUIT, ACTION_SAVE,
                                     Screen, current_field, handle_key,
@@ -219,6 +218,7 @@ class ConfigCommandGuardTest(unittest.TestCase):
 
         class State:
             enabled = False
+            config_stamp = None  # a hand-built state: no live reload
         with mock.patch.object(config_ui, "run_screen", side_effect=effect):
             return config_ui.config_command(State())
 
@@ -228,46 +228,6 @@ class ConfigCommandGuardTest(unittest.TestCase):
     def test_any_failure_becomes_a_one_line_message(self):
         reply = self.run_with(RuntimeError("boom"))
         self.assertIn("config screen failed: boom", reply)
-
-
-class ApplyTest(unittest.TestCase):
-    def changes(self, **edits):
-        old = ThreetoksConfig()
-        new = old
-        for dotted, value in edits.items():
-            new = set_value(new, find_field(dotted.replace("__", ".")), value)
-        return changed_fields(old, new), new
-
-    def test_live_settings_become_commands(self):
-        changes, new = self.changes(llm__model="m", research__max_rounds=6,
-                                    browser__mode="plain")
-        self.assertEqual(live_commands(changes, new),
-                         ["/model m", "/browser plain headless", "/deep 6"])
-
-    def test_browser_http_has_no_window_word(self):
-        changes, new = self.changes(browser__visible=True)
-        self.assertEqual(live_commands(changes, new), ["/browser http"])
-
-    def test_every_live_field_has_a_command(self):
-        # A field marked live without a command would be saved, then
-        # neither applied nor announced.
-        samples = {"llm.model": "m", "browser.mode": "plain",
-                   "browser.visible": True, "research.max_rounds": 9}
-        from threetoks.fields import APPLY_LIVE, FIELDS
-        live = {item.dotted for item in FIELDS if item.apply == APPLY_LIVE}
-        self.assertEqual(live, set(samples))
-        for dotted, value in samples.items():
-            item = find_field(dotted)
-            new = set_value(ThreetoksConfig(), item, value)
-            changes = changed_fields(ThreetoksConfig(), new)
-            self.assertTrue(live_commands(changes, new), dotted)
-
-    def test_restart_notice_lists_only_what_waits(self):
-        changes, _ = self.changes(llm__model="m", llm__vote_k=3)
-        self.assertEqual(restart_notice(changes),
-                         "next start / next /voice on: llm.vote_k")
-        only_live, _ = self.changes(llm__model="m")
-        self.assertEqual(restart_notice(only_live), "")
 
 
 if __name__ == "__main__":

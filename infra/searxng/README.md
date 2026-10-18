@@ -33,8 +33,10 @@ curl -s -X POST http://localhost:8080/search \
   -d 'q=hello&categories=general&format=' >/dev/null && echo "searxng up"
 ```
 
-`auto_provider()` then detects it automatically. Override the base URL with
-`THREETOKS_SEARXNG_URL` (defaults to `http://localhost:8080`).
+`auto_provider()` then detects it automatically. The base URL is
+`[search] searxng_url` in the ThreeToks config (default
+`http://localhost:8080`); the `THREETOKS_SEARXNG_URL` environment variable
+overrides it.
 
 ## Stop
 
