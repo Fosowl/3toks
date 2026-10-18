@@ -264,7 +264,9 @@ Put the flags `-m`, `-c`, and `--no-color` *before* the subcommand.
 ## Agents
 
 Every request goes through a **router**. The router shows the model a menu of agent names. Each name has a one-line description. The model picks one digit.
-If the answer is not valid, ThreeToks uses the first agent in the list, `casual`.
+A small model can pick a different agent when only the order of the menu changes. So the router asks twice, with two different orders. If both answers agree, that agent runs. If not, it asks again (5 times at most) and takes the majority.
+If no answer is valid, ThreeToks uses the first agent in the list, `casual`.
+Questions about the code in the current project ("what does this repo do?", "where is the config loaded?") go to `code`. General questions about a language or tool ("how do decorators work?") go to `web`.
 
 A request with **several steps** goes to the `planner`. Example: "find the population of Japan, then write a script that prints it".
 

@@ -230,7 +230,8 @@ around a judged multi-round research loop, and added an interactive TUI.
   (`tests/test_tui.py`).
 - **Pluggable agents** (`threetoks/agents/`): an `AgentSpec` contract
   (`name`, `description`, `run(task, services, policy) -> dict`), a
-  one-token router (`route()`), and three built-ins — `casual` (canned
+  one-token router (`route()`, an early-stop vote over option orders:
+  two agreeing answers settle it, else majority of up to five), and three built-ins — `casual` (canned
   replies ranked by keyword overlap, zero-model-call exact-hint shortcut,
   bounded free-text fallback), `files` (read-only sandboxed file explorer,
   same menu/notes/answer shape as the web vertical), `web` (thin wrapper

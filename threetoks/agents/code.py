@@ -28,7 +28,8 @@ from threetoks.render import Episode
 from threetoks.services import Services
 
 AGENT_NAME = "code"
-AGENT_DESCRIPTION = "write or debug Python code: a function, script, or program"
+AGENT_DESCRIPTION = ("write or fix Python code, or explain the code in "
+                     "this project")
 MAX_STEPS = 40
 MAX_ANSWER_LINES = 40         # navigate answers are clipped here
 NAVIGATE_KINDS = ("function", "method", "class")

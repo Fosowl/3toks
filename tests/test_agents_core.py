@@ -40,12 +40,27 @@ SPECS = [AgentSpec("casual", "small talk", lambda t, s, p: {"answer": "hey"}),
 
 
 class RouterTest(unittest.TestCase):
-    def test_valid_choice_routes_to_an_agent(self):
-        chosen = route("hello!", SPECS, make_policy([" 1"]))
-        self.assertIn(chosen.name, {"casual", "web"})
+    OPTIONS = {spec.name: f"{spec.name} — {spec.description}"
+               for spec in SPECS}
+
+    def votes(self, *names):
+        """Replies picking ``names`` in turn, one per routing vote."""
+        options = list(self.OPTIONS.values())
+        return [menu_reply(self.OPTIONS[name], options, step=step)
+                for step, name in enumerate(names)]
+
+    def test_two_agreeing_votes_settle_the_route(self):
+        backend = ScriptedBackend(self.votes("web", "web"))
+        policy = Policy(backend, PolicyConfig(ModelSpec("m", FAMILY_CHATML)))
+        self.assertEqual(route("hello!", SPECS, policy).name, "web")
+        self.assertEqual(backend.texts, [])  # no third call
+
+    def test_a_split_vote_goes_to_the_majority(self):
+        policy = make_policy(self.votes("casual", "web", "web", "web"))
+        self.assertEqual(route("hello!", SPECS, policy).name, "web")
 
     def test_garbage_choice_falls_back_to_first_spec(self):
-        chosen = route("hello!", SPECS, make_policy(["x", "x", "x"]))
+        chosen = route("hello!", SPECS, make_policy(["x"] * 15))
         self.assertEqual(chosen.name, "casual")
 
     def test_single_spec_skips_the_model(self):
@@ -60,7 +75,9 @@ class RouterPrefixTest(unittest.TestCase):
                 "FooBar project": "web", "reverses a string": "code",
                 "notes folder": "files", "housing market": "web",
                 "economy projections": "web", "Marianas trench": "web",
-                "population of Japan": "planner", "first 10 primes": "code"}
+                "population of Japan": "planner", "first 10 primes": "code",
+                "retry logic in this repo": "code",
+                "this program is for": "code", "python decorators": "web"}
 
     def test_every_example_answer_points_at_the_right_agent(self):
         import re
