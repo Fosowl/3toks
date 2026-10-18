@@ -1,4 +1,4 @@
-"""Offline tests for the code agent's four modes, end to end."""
+"""Offline tests for the code agent's five modes, end to end."""
 import tempfile
 import unittest
 from pathlib import Path
@@ -64,10 +64,10 @@ def _corpus(test, tree):
 
 
 class AuthorModeTest(unittest.TestCase):
-    def test_write_request_costs_one_menu_and_returns_the_module(self):
+    def test_write_request_runs_the_script_and_shows_its_output(self):
         backend = KeywordBackend(["author —"],
                                  ["square(n): multiply n by itself",
-                                  "return n * n"])
+                                  "return n * n", "print(square(4))"])
         outcome = code_agent.run("write a function that squares a number",
                                  Services(files_root=_corpus(self, {})),
                                  _policy(backend))
@@ -75,6 +75,31 @@ class AuthorModeTest(unittest.TestCase):
                          ("author", "menu"))
         self.assertIn("return n * n", outcome["answer"])
         self.assertNotIn("INCOMPLETE", outcome["answer"])
+        self.assertTrue(outcome["execution"].ok)
+        report = outcome["answer"].split(outcome["script"])[1]
+        self.assertIn("exit 0", report)
+        self.assertIn("16", report)
+        self.assertNotIn("judged_good", outcome)
+
+    def test_the_script_runs_once_in_the_project_folder(self):
+        root = _corpus(self, {})
+        backend = KeywordBackend(["author —"], [
+            "main(): append one line to log.txt",
+            "open('log.txt', 'a').write('x')"])
+        code_agent.run("write a script that appends a line to log.txt",
+                       Services(files_root=root), _policy(backend))
+        self.assertEqual((root / "log.txt").read_text(), "x")
+
+    def test_a_crashing_script_shows_the_error_and_is_not_trusted(self):
+        backend = KeywordBackend(["author —"],
+                                 ["main(): divide by zero",
+                                  "print(1 / 0)"])
+        outcome = code_agent.run("write a script that divides by zero",
+                                 Services(files_root=_corpus(self, {})),
+                                 _policy(backend))
+        self.assertIn("exit 1", outcome["answer"])
+        self.assertIn("ZeroDivisionError", outcome["answer"])
+        self.assertIs(outcome["judged_good"], False)
 
     def test_unwritten_function_is_named_in_a_note_before_the_code(self):
         backend = KeywordBackend(["author —"],
@@ -85,8 +110,43 @@ class AuthorModeTest(unittest.TestCase):
                                  _policy(backend))
         first_line = outcome["answer"].splitlines()[0]
         self.assertEqual(first_line, code_agent.INCOMPLETE_NOTE.format(
-            count=1, total=1, names="square"))
-        self.assertEqual(outcome["stubbed"], ["square"])
+            count=2, total=2, names="square, main"))
+        self.assertEqual(outcome["stubbed"], ["square", "main"])
+        self.assertIsNone(outcome["execution"])
+        self.assertTrue(outcome["answer"].endswith(code_agent.NO_ENTRY_NOTE))
+
+
+class ShellModeTest(unittest.TestCase):
+    def _run(self, command, root, confirm=None):
+        backend = KeywordBackend(["shell —"], [command])
+        return code_agent.run("do this in the terminal for me",
+                              Services(files_root=root,
+                                       confirm_command=confirm),
+                              _policy(backend))
+
+    def test_the_command_runs_in_the_project_folder_after_a_yes(self):
+        root = _corpus(self, {"data.csv": "a\n"})
+        asked = []
+        outcome = self._run("`ls`", root, lambda cmd: asked.append(cmd) or 1)
+        self.assertEqual(outcome["mode"], "shell")
+        self.assertEqual(asked, ["ls"])
+        self.assertTrue(outcome["ran"])
+        self.assertIn("data.csv", outcome["answer"])
+        self.assertIn("exit 0", outcome["answer"])
+
+    def test_nothing_runs_without_a_yes(self):
+        root = _corpus(self, {})
+        for confirm in (None, lambda cmd: False):
+            outcome = self._run("touch made.txt", root, confirm)
+            self.assertFalse(outcome["ran"])
+            self.assertIn("(not run:", outcome["answer"])
+            self.assertIn("$ touch made.txt", outcome["answer"])
+        self.assertFalse((root / "made.txt").exists())
+
+    def test_a_failing_command_reports_its_exit_code(self):
+        outcome = self._run("exit 3", _corpus(self, {}), lambda cmd: True)
+        self.assertIn("exit 3", outcome["answer"])
+        self.assertIs(outcome["judged_good"], False)
 
 
 class ComputeModeTest(unittest.TestCase):

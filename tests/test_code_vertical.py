@@ -16,10 +16,13 @@ import unittest
 from pathlib import Path
 
 from threetoks.backend.base import FAMILY_CHATML, GenResult, ModelSpec
-from threetoks.code.nodes import (IMPLEMENT_MAX_TOKENS,
-                                 IMPLEMENT_MAX_TOKENS_CEILING, ImplementNode)
+from threetoks.code.nodes import (
+    IMPLEMENT_MAX_TOKENS,
+    IMPLEMENT_MAX_TOKENS_CEILING,
+    ImplementNode,
+)
 from threetoks.code.store import RetryState
-from threetoks.code.vertical import MAX_METHOD_ATTEMPTS, CodeVertical
+from threetoks.code.vertical import MAX_METHOD_ATTEMPTS, CodeVertical, RunSetup
 from threetoks.engine import run_episode
 from threetoks.policy import Policy, PolicyConfig
 
@@ -390,7 +393,7 @@ class RunnerRepairLoopTest(unittest.TestCase):
         self.assertEqual(outcome["run"]["checks"], 1)
         self.assertEqual(_row(outcome, "wipe")["repairs"], 0)
 
-    def test_runner_checks_run_in_run_cwd(self):
+    def test_runner_checks_run_in_the_run_folder(self):
         policy, _ = make_policy([
             "main(): prints the notes file",
             "print(open('notes.txt').read())",
@@ -398,13 +401,13 @@ class RunnerRepairLoopTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             Path(folder, "notes.txt").write_text("hello notes")
             vertical = CodeVertical("show the notes", gen_tests=False,
-                                    run_cwd=Path(folder))
+                                    run=RunSetup(cwd=Path(folder)))
             outcome = run_episode(vertical, policy, MAX_STEPS)
         self.assertTrue(outcome["run"]["ok"])
         self.assertEqual(outcome["output"], "hello notes\n")
 
     @unittest.skipUnless(os.name == "posix", "shell wrapper is POSIX")
-    def test_run_cwd_checks_use_the_project_venv_python(self):
+    def test_project_checks_use_the_project_venv_python(self):
         policy, _ = make_policy(["main(): says hi", "print('hi')"])
         with tempfile.TemporaryDirectory() as folder:
             venv_python = Path(folder, ".venv", "bin", "python")
@@ -413,7 +416,7 @@ class RunnerRepairLoopTest(unittest.TestCase):
                                    f'exec "{sys.executable}" "$@"\n')
             venv_python.chmod(0o755)
             vertical = CodeVertical("say hi", gen_tests=False,
-                                    run_cwd=Path(folder))
+                                    run=RunSetup(project=Path(folder)))
             outcome = run_episode(vertical, policy, MAX_STEPS)
         self.assertEqual(outcome["output"], "VENV_PYTHON\nhi\n")
 

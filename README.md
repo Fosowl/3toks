@@ -275,19 +275,20 @@ A request with **several steps** goes to the `planner`. Example: "find the popul
 | `casual` | Small talk and quick replies | It ranks ready-made replies by shared keywords. An exact match needs **no** model call. If nothing fits, it writes a short free reply. |
 | `web` | Answers questions with an internet search | It runs the [deep research](#deep-research) loop: search, read pages, follow links, take notes. |
 | `files` | Answers questions about your files and folders | It stays inside `services.files_root`. It can run one short shell command, but only after a fixed block-list and a fresh safety judge both allow it. |
-| `code` | "Where is X?", "Fix the bug in Y", "Work out Z from data.csv", "Write a script that…" | Four modes. See the list below. |
+| `code` | "Where is X?", "Fix the bug in Y", "Work out Z from data.csv", "Write a script that…", "Install numpy" | Five modes. See the list below. |
 | `light` | "Turn on the light" | Needs a Raspberry Pi and the `relay` add-on. Clear phrases are matched by simple rules, with no model call. Other phrases cost one menu decision. |
 | `look` | "What am I holding?" | Needs the `camera` add-on and a vision model (llava, qwen-vl, gpt-4o, claude, gemini, …). It takes one frame and makes one short vision decision. |
 | `planner` | "Find X, then write code with it" | It writes a plan, called a **trajectory**: the agents in order, each with a very short task. See below. |
 
-The `code` agent has four modes:
+The `code` agent has five modes:
 
 - **Navigate** finds code. It is free when your request names the symbol. Otherwise it shows a ranked short list.
 - **Edit** changes one function. It shows a ranked list, then a menu with the function's source. The model writes **only the changed function**. Your repo's tests, or an import check, judge it. You then see a diff. **Nothing is written until you press `y`.**
 - **Compute** runs a script once in `[files] root` and gives you the result.
-- **Author** plans small functions and writes them one by one.
+- **Author** plans small functions and writes them one by one, plus a `main()` that does the task. Then it **runs the script once** in `[files] root` with your project's Python (`.venv` there, else `python3`). Under the code you see the exit code, the time, and what the script printed. Files the script saves land in that folder. A script that crashes is marked UNVERIFIED.
+- **Shell** writes one terminal command: install a package, run the tests or a file, use git, move or delete files. You see the command first. **It runs only after you press `y`**, in `[files] root`, with your shell. `PYTHON`, `python` and `pip` in the command become your project's Python.
 
-Code that the agent writes runs in a closed box: a temporary folder, and no API keys in its environment.
+The functions that the agent writes are checked in a temporary folder with no API keys in the environment. The final author run and shell commands are **not sandboxed**: they can change any file you can change.
 
 The `planner` works in three parts:
 

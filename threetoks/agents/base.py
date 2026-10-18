@@ -31,13 +31,17 @@ def outcome_status(outcome: dict) -> str:
     in the progress tree. They call it with the result dict of one run.
 
     Args:
-        outcome (dict): the agent result, with "answer" and an optional
-            "judged_good" (bool) from a judge.
+        outcome (dict): the agent result, with "answer", an optional
+            "judged_good" (bool) from a judge, and an optional "ran"
+            (bool) from the code agent's shell mode.
 
     Returns:
-        str: "unverified" when a judge rejected it, "no answer" when the
+        str: "not run" when a shell command did not run, "unverified"
+        when a judge or a failed run rejected it, "no answer" when the
         answer is empty, else "answered".
     """
+    if outcome.get("ran") is False:
+        return "not run"
     if outcome.get("judged_good") is False:
         return "unverified"
     answer = str(outcome.get("answer") or "").strip()
@@ -52,4 +56,6 @@ if __name__ == "__main__":
     assert outcome_status(result) == "answered"
     assert outcome_status({"answer": "x", "judged_good": False}) == "unverified"
     assert outcome_status({"answer": "(no answer)"}) == "no answer"
+    assert outcome_status({"answer": "x", "ran": False,
+                           "judged_good": False}) == "not run"
     print("smoke OK")

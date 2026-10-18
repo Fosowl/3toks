@@ -47,6 +47,7 @@ class RunResult:
     stdout: str       # capped, utf-8 decoded with errors="replace"
     stderr: str       # capped, same decoding
     timed_out: bool
+    exit_code: int | None = None  # None when it did not start
 
 
 def run_python(source: str, cwd: Path | None = None,
@@ -123,7 +124,8 @@ def _run_in(argv: list[str], source: str, cwd: Path,
             return started
         timed_out = _wait(started, timeout_s)
         ok = started.returncode == 0 and not timed_out
-        return RunResult(ok, _read_capped(out), _read_capped(err), timed_out)
+        return RunResult(ok, _read_capped(out), _read_capped(err), timed_out,
+                         started.returncode)
 
 
 def _spawn(argv: list[str], cwd: Path, timeout_s: float,

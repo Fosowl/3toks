@@ -25,6 +25,8 @@ class Services:
     capture_frame: object = None       # callable -> base64 JPEG (camera extra)
     # callable (rel_path: str, diff: str) -> bool; None: never apply
     confirm_edit: object = None
+    # callable (command: str) -> bool; None: never run a shell command
+    confirm_command: object = None
     # callable (line: str) -> None for planner progress; None: silent
     on_progress: object = None
 
@@ -35,4 +37,5 @@ if __name__ == "__main__":
     assert services.max_research_rounds == DEFAULT_RESEARCH_ROUNDS
     assert services.max_research_steps == DEFAULT_RESEARCH_STEPS
     assert services.confirm_edit is None   # edits never applied by default
+    assert services.confirm_command is None  # no shell command by default
     print("smoke OK")

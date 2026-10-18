@@ -269,17 +269,20 @@ into the mesh. The recipe, with `threetoks/relay.py` +
    in `tests/test_lazy_extras.py`, and an `if __name__ == "__main__":`
    smoke block that passes with no hardware library installed.
 
-An agent may itself route further: the `code` agent front-doors four modes
-(navigate / edit / compute / author) through `threetoks/code/route.py` —
-a free pre-check only for read-only navigate questions, one one-token menu
-for everything else (docs/DESIGN-coding-agent.md §10). It also reads
-`services.retriever` (the opt-in retrieval-as-repair hook, None unless
-`[code] retrieval` is enabled and a search provider exists),
-`services.files_root` (the corpus the navigate/edit/compute modes operate
-on), and `services.confirm_edit` (`(rel_path, diff) -> bool`; the edit mode
-writes a file only when it returns True — None means never write). Code
-the agent runs goes through `threetoks/code/sandbox.py`, never a bare
-`subprocess` call.
+An agent may itself route further: the `code` agent front-doors five modes
+(navigate / edit / compute / author / shell) through
+`threetoks/code/route.py` — a free pre-check only for read-only navigate
+questions, one one-token menu for everything else (docs/DESIGN-coding-agent.md
+§10, §12). It also reads `services.retriever` (the opt-in
+retrieval-as-repair hook, None unless `[code] retrieval` is enabled and a
+search provider exists), `services.files_root` (the folder every mode
+works in), `services.confirm_edit` (`(rel_path, diff) -> bool`; the edit
+mode writes a file only when it returns True — None means never write),
+and `services.confirm_command` (`(command) -> bool`; the shell mode runs a
+command only when it returns True — None means never run). Generated
+Python runs through `threetoks/code/sandbox.py`; the delivered author
+script and shell commands run for real in `files_root` through
+`threetoks/code/execute.py`.
 
 ## Design rules an agent must follow
 

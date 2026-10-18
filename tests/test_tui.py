@@ -702,6 +702,37 @@ class ConfirmEditTest(unittest.TestCase):
         self.assertTrue(state.services.confirm_edit("m.py", self.DIFF))
 
 
+class ConfirmCommandTest(unittest.TestCase):
+    """The shell-mode confirm: the command is shown, only a yes runs it."""
+
+    def _confirm(self, reply):
+        printed, prompts = [], []
+        state = make_state(enabled=False)
+        state.services.files_root = "/proj"
+        confirm = tui.make_confirm_command(
+            state, lambda prompt: prompts.append(prompt) or reply,
+            printed.append)
+        return confirm("rm -rf build"), printed, prompts
+
+    def test_yes_runs_and_the_command_is_shown_first(self):
+        answer, printed, prompts = self._confirm("y")
+        self.assertTrue(answer)
+        self.assertIn("$ rm -rf build", printed[0])
+        self.assertIn("in /proj? [y/N]", prompts[0])
+
+    def test_anything_else_declines(self):
+        for reply in ("", "n", "sure", None):
+            self.assertFalse(self._confirm(reply)[0], reply)
+
+    def test_repl_installs_the_command_confirm(self):
+        state = make_state(enabled=False)
+        state.services.files_root = "/proj"
+        replies = iter(["/quit", "yes"])
+        tui.repl(state, read_input=lambda prompt: next(replies),
+                 sink=[].append)
+        self.assertTrue(state.services.confirm_command("ls"))
+
+
 class ConfigScreenWiringTest(unittest.TestCase):
     """/setup and the first start open the screen only on a real terminal."""
 

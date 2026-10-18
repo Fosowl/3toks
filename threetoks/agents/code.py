@@ -1,4 +1,4 @@
-"""Code agent: route a coding request to one of four modes and run it.
+"""Code agent: route a coding request to one of five modes and run it.
 
 The front door is the E7-measured mode router (threetoks/code/route.py):
 a free pre-check for read-only questions, else one one-token menu. The
@@ -8,28 +8,32 @@ modes map to machinery that already exists —
               unique name, one menu when several symbols fit
     edit      the edit vertical proposes a checked candidate; the user
               confirms the diff before the file is written
-    compute   the greenfield vertical writes a script, the sandboxed
-              runner executes its entry, and the echoed result IS the
-              answer
-    author    the greenfield vertical, module delivered as the answer
+    compute   the greenfield vertical writes a script, the runner
+              executes its entry, and the echoed result IS the answer
+    author    the greenfield vertical writes a script with a ``main``
+              entry; the script then runs once in the project folder and
+              its output is shown under the code
+    shell     the model writes one shell command; it runs in the project
+              folder after the user says yes (threetoks/code/shell.py)
 """
 import difflib
 from pathlib import Path
 
 from threetoks.agents.base import AgentSpec
-from threetoks.code import route
+from threetoks.code import execute, route, shell
 from threetoks.code.edit import SymbolIndex, nav, rank
 from threetoks.code.edit.encoding import decode_source, encode_like
 from threetoks.code.edit.vertical import EditVertical
-from threetoks.code.vertical import CodeVertical
+from threetoks.code.vertical import CodeVertical, RunSetup
 from threetoks.engine import run_episode
 from threetoks.nodes import ESCAPE, MENU_MAX_OPTIONS, MenuNode
 from threetoks.render import Episode
 from threetoks.services import Services
+from threetoks.trace import span
 
 AGENT_NAME = "code"
-AGENT_DESCRIPTION = ("write or fix Python code, or explain the code in "
-                     "this project")
+AGENT_DESCRIPTION = ("write, run or fix Python code, run shell commands, "
+                     "or explain the code in this project")
 MAX_STEPS = 40
 MAX_ANSWER_LINES = 40         # navigate answers are clipped here
 NAVIGATE_KINDS = ("function", "method", "class")
@@ -51,6 +55,8 @@ CHANGED_REASON = "the file changed since it was read"
 UNDECODABLE_REASON = ("the file on disk can no longer be decoded as "
                       "Python source")
 NO_OUTPUT_REASON = "the script printed nothing"
+NO_ENTRY_NOTE = ("(not run: the script has no entry function that the "
+                 "__main__ guard can call)")
 UNWRITTEN_REASON = "these functions could not be written: {names}"
 INCOMPLETE_NOTE = ("(INCOMPLETE: {count} of {total} functions could not be "
                    "written and still raise NotImplementedError: {names})")
@@ -75,7 +81,8 @@ def run(task: str, services: Services, policy) -> dict:
     """
     mode, how = route.route_mode(task, policy)
     handler = {route.NAVIGATE: _navigate, route.EDIT: _edit,
-               route.COMPUTE: _compute, route.AUTHOR: _author}[mode]
+               route.COMPUTE: _compute, route.AUTHOR: _author,
+               route.SHELL: shell.run_shell}[mode]
     result = handler(task, services, policy)
     if how == "menu-fallback":
         answer = result.get("answer") or ""
@@ -85,34 +92,86 @@ def run(task: str, services: Services, policy) -> dict:
 
 
 def _author(task: str, services: Services, policy) -> dict:
-    """Write a new module for the task; the module is the answer.
+    """Write a new script for the task, run it once, and show both.
 
     The author mode uses this when the user wants new code delivered.
     run calls it with the task, the services and the policy.
     It runs the greenfield vertical without self-tests: E6 showed that
     model-written asserts do not improve whole-module correctness on a
-    1.5b model; the deterministic gates carry the quality. Stubbed
-    functions are named in a note at the top of the answer, so unfinished
-    code is never delivered without a warning.
+    1.5b model; the deterministic gates carry the quality. The checks run
+    in a temp folder under the project's python, and the plan always gets
+    a ``main`` entry. Then the delivered script runs once in the project
+    folder, so its files land there, and the run report follows the code.
+    Stubbed functions are named in a note at the top of the answer, so
+    unfinished code is never delivered without a warning.
 
     Args:
         task (str): the user's coding request, from run.
-        services (Services): shared services (retriever), from run.
+        services (Services): shared services (retriever, files root),
+            from run.
         policy (Policy): the live decision policy, from run.
 
     Returns:
-        dict: the CodeVertical result; "answer" is the rendered script.
+        dict: the CodeVertical result; "answer" is the script plus the
+        run report, "script" the script, "execution" the run or None.
+        A failed run sets "judged_good" to False.
     """
+    root = Path(services.files_root)
     vertical = CodeVertical(task, gen_tests=False,
-                            retriever=services.retriever)
+                            retriever=services.retriever,
+                            run=RunSetup(project=root, add_main=True))
     result = run_episode(vertical, policy, max_steps=MAX_STEPS)
+    result["script"] = result["answer"]
+    result["execution"] = _run_delivered(result, root, policy)
+    result["answer"] = _author_answer(result)
+    result["output"] = ""  # temp-folder check output; the report replaces it
+    if result["execution"] is not None and not result["execution"].ok:
+        result["judged_good"] = False
+    return result
+
+
+def _run_delivered(result: dict, root: Path, policy):
+    """Run the delivered script once, inside a "run the script" span.
+
+    _author calls this after the vertical. A script without an entry has
+    no ``__main__`` guard, so running it would do nothing: it is skipped.
+
+    Args:
+        result (dict): the CodeVertical result with "script" and "entry".
+        root (Path): the project folder, from services.files_root.
+        policy (Policy): the live policy; its tracer gets the span.
+
+    Returns:
+        execute.Execution | None: the run, or None when skipped.
+    """
+    if result.get("entry") is None:
+        return None
+    with span(getattr(policy, "tracer", None), "run the script") as ran:
+        execution = execute.run_script(result["script"], root)
+        ran["result"] = execute.status(execution)
+    return execution
+
+
+def _author_answer(result: dict) -> str:
+    """Join the stub note, the script and the run report into the answer.
+
+    Args:
+        result (dict): the author result with "script", "stubbed",
+            "methods" and "execution", from _author.
+
+    Returns:
+        str: the answer text for the panel.
+    """
+    parts = [result["script"]]
     stubbed = result.get("stubbed") or []
     if stubbed:
-        note = INCOMPLETE_NOTE.format(count=len(stubbed),
-                                      total=len(result["methods"]),
-                                      names=", ".join(stubbed))
-        result["answer"] = f"{note}\n{result['answer']}"
-    return result
+        parts.insert(0, INCOMPLETE_NOTE.format(
+            count=len(stubbed), total=len(result["methods"]),
+            names=", ".join(stubbed)))
+    execution = result["execution"]
+    parts.append(NO_ENTRY_NOTE if execution is None
+                 else execute.report(execution))
+    return "\n".join(parts)
 
 
 def _compute(task: str, services: Services, policy) -> dict:
@@ -133,9 +192,11 @@ def _compute(task: str, services: Services, policy) -> dict:
         dict: the CodeVertical result; "answer" is the output, "script"
         the delivered script.
     """
+    root = Path(services.files_root)
     vertical = CodeVertical(task, gen_tests=False,
                             retriever=services.retriever,
-                            run_cwd=services.files_root, echo_result=True)
+                            run=RunSetup(cwd=root, project=root,
+                                         echo_result=True))
     result = run_episode(vertical, policy, max_steps=MAX_STEPS)
     result["script"] = result.get("answer") or ""
     output = (result.get("output") or "").strip()

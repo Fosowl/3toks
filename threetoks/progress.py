@@ -146,6 +146,9 @@ def _compress_value(event: dict) -> str:
         return "—"  # em dash for no/invalid decision
     if kind in ("pick_many", "sequence"):
         return ",".join(str(index) for index in value) or "—"
+    if kind == "plan":  # code plan: ParsedMethod rows, show their names
+        return _clip(", ".join(getattr(item, "name", str(item))
+                               for item in value), VALUE_CLIP)
     return _clip(value, VALUE_CLIP)
 
 

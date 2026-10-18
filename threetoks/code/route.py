@@ -1,17 +1,19 @@
-"""Code-mode routing: which of four modes does a coding request need?
+"""Code-mode routing: which of five modes does a coding request need?
 
     navigate  answer a question about existing code (nothing changes)
     edit      modify existing code (fix, rename, delete, add-to)
     compute   the user wants the ANSWER a computation produces
     author    the user wants a NEW code artifact delivered
+    shell     the user wants a terminal command run (install, test, git)
 
 Spike E7 measured a two-stage design live: deterministic pre-checks, then
 a one-token menu (~3 output tokens per model-routed request). The free
 pre-check is now limited to the one mode whose mistakes cost nothing:
-navigate is read-only. Edit, compute and author change files or run code,
-so they always cost one menu call. E7's confusion table showed every menu
-error funnels into compute/author, so the few-shot prefix carries explicit
-navigate/edit-vs-compute contrast examples.
+navigate is read-only. Edit, compute, author and shell change files or
+run code, so they always cost one menu call. E7's confusion table showed
+every menu error funnels into compute/author, so the few-shot prefix
+carries explicit navigate/edit-vs-compute contrast examples, and the
+shell examples contrast "run what exists" with compute and navigate.
 """
 from threetoks.code.edit import rank
 from threetoks.nodes import MenuNode
@@ -19,7 +21,8 @@ from threetoks.policy import Policy
 from threetoks.render import Episode
 
 NAVIGATE, EDIT, COMPUTE, AUTHOR = "navigate", "edit", "compute", "author"
-MODES = (NAVIGATE, EDIT, COMPUTE, AUTHOR)
+SHELL = "shell"
+MODES = (NAVIGATE, EDIT, COMPUTE, AUTHOR, SHELL)
 FALLBACK_MODE = NAVIGATE      # a wrong navigate is read-only, cheapest miss
 
 EDIT_VERBS = ("fix", "rename", "refactor", "debug", "patch", "remove",
@@ -34,7 +37,9 @@ COMPUTE_VERBS = ("parse", "sum", "count", "compute", "calculate", "extract",
                  "average", "how many", "total", "most common", "median",
                  "filter", "group by")
 AUTHOR_VERBS = ("write", "create", "build", "generate", "make me", "author")
-BLOCKING_CUES = EDIT_VERBS + COMPUTE_VERBS + AUTHOR_VERBS
+SHELL_VERBS = ("install", "pip", "git", "run", "execute", "terminal",
+               "shell", "commit", "command")
+BLOCKING_CUES = EDIT_VERBS + COMPUTE_VERBS + AUTHOR_VERBS + SHELL_VERBS
 
 NAVIGATE_ENTITY_WORDS = ("function", "method", "class", "variable", "module",
                          "file", "defined", "definition", "declared",
@@ -49,10 +54,9 @@ def pre_route(request: str) -> tuple[str | None, str]:
     """Give the free route for a coding request, or ask for the menu.
 
     The code agent uses this check to save one model call on safe requests.
-    route_mode calls it with the raw user request text.
     It returns NAVIGATE only for a read-only question that names code: a
     navigate cue, a code-entity word or a path-like token, and no edit,
-    compute or author cue. Every other request goes to the menu.
+    compute, author or shell cue. Every other request goes to the menu.
 
     Args:
         request (str): the user's coding request, from route_mode.
@@ -62,7 +66,7 @@ def pre_route(request: str) -> tuple[str | None, str]:
     """
     padded = _padded_words(request)
     if _contains_any(padded, BLOCKING_CUES):
-        return None, "edit, compute or author cue: ask the menu"
+        return None, "edit, compute, author or shell cue: ask the menu"
     if not _contains_any(padded, NAVIGATE_VERBS):
         return None, "no navigate cue: ask the menu"
     if _contains_any(padded, NAVIGATE_ENTITY_WORDS):
@@ -135,9 +139,11 @@ OPTION_TEXT = {
     EDIT: "edit — fix, rename, or modify code that already exists",
     COMPUTE: "compute — run code to produce a fact or number the user wants",
     AUTHOR: "author — write a brand-new script, function, or program",
+    SHELL: "shell — run a terminal command: install a package, run tests "
+           "or a file, use git, move or delete files",
 }
 
-CODE_ROUTER_PREFIX = """You classify a coding request into one of four modes.
+CODE_ROUTER_PREFIX = """You classify a coding request into one of five modes.
 Rules:
 - navigate is a QUESTION about code that already exists: where something
   is defined, what a function does, how a piece of logic works, why it
@@ -152,14 +158,18 @@ Rules:
 - author is for when the user wants a NEW code artifact delivered: "write
   a script", "create a function", "build a tool". The deliverable is the
   code itself, even when the script's purpose is a computation.
+- shell is for when the user wants something DONE in a terminal: install
+  a package, run the tests or a file that already exists, use git,
+  create, move or delete files and folders. No new code is written.
 
 Example — locate code:
 Request: where is the login check implemented?
 ACTIONS:
 1 = edit — fix, rename, or modify code that already exists
 2 = navigate — find or explain code that already exists
-3 = author — write a brand-new script, function, or program
-4 = compute — run code to produce a fact or number the user wants
+3 = shell — run a terminal command: install a package, run tests or a file, use git, move or delete files
+4 = author — write a brand-new script, function, or program
+5 = compute — run code to produce a fact or number the user wants
 ANSWER: 2
 
 Example — fix a bug:
@@ -167,18 +177,20 @@ Request: there's an off-by-one error in the loop in parser.py, please fix it
 ACTIONS:
 1 = navigate — find or explain code that already exists
 2 = compute — run code to produce a fact or number the user wants
-3 = edit — fix, rename, or modify code that already exists
-4 = author — write a brand-new script, function, or program
-ANSWER: 3
+3 = shell — run a terminal command: install a package, run tests or a file, use git, move or delete files
+4 = edit — fix, rename, or modify code that already exists
+5 = author — write a brand-new script, function, or program
+ANSWER: 4
 
 Example — asking HOW code works is navigate even when it says "computed":
 Request: how is the discount computed in billing.py?
 ACTIONS:
 1 = compute — run code to produce a fact or number the user wants
-2 = navigate — find or explain code that already exists
-3 = edit — fix, rename, or modify code that already exists
-4 = author — write a brand-new script, function, or program
-ANSWER: 2
+2 = shell — run a terminal command: install a package, run tests or a file, use git, move or delete files
+3 = navigate — find or explain code that already exists
+4 = edit — fix, rename, or modify code that already exists
+5 = author — write a brand-new script, function, or program
+ANSWER: 3
 
 Example — "debug why it returns the wrong value" is edit, not compute:
 Request: debug why parse_row returns the wrong column sometimes
@@ -186,8 +198,9 @@ ACTIONS:
 1 = compute — run code to produce a fact or number the user wants
 2 = author — write a brand-new script, function, or program
 3 = navigate — find or explain code that already exists
-4 = edit — fix, rename, or modify code that already exists
-ANSWER: 4
+4 = shell — run a terminal command: install a package, run tests or a file, use git, move or delete files
+5 = edit — fix, rename, or modify code that already exists
+ANSWER: 5
 
 Example — wants an answer, not code:
 Request: how many times does the word "error" show up in app.log?
@@ -196,6 +209,7 @@ ACTIONS:
 2 = edit — fix, rename, or modify code that already exists
 3 = navigate — find or explain code that already exists
 4 = compute — run code to produce a fact or number the user wants
+5 = shell — run a terminal command: install a package, run tests or a file, use git, move or delete files
 ANSWER: 4
 
 Example — "tell me which ..." wants the fact, not a script:
@@ -203,18 +217,20 @@ Request: group the orders by country and tell me which country ordered most
 ACTIONS:
 1 = author — write a brand-new script, function, or program
 2 = compute — run code to produce a fact or number the user wants
-3 = edit — fix, rename, or modify code that already exists
-4 = navigate — find or explain code that already exists
+3 = shell — run a terminal command: install a package, run tests or a file, use git, move or delete files
+4 = edit — fix, rename, or modify code that already exists
+5 = navigate — find or explain code that already exists
 ANSWER: 2
 
 Example — wants a deliverable:
 Request: can you build me a tool that dedupes a list of email addresses
 ACTIONS:
-1 = compute — run code to produce a fact or number the user wants
-2 = navigate — find or explain code that already exists
-3 = author — write a brand-new script, function, or program
-4 = edit — fix, rename, or modify code that already exists
-ANSWER: 3
+1 = author — write a brand-new script, function, or program
+2 = shell — run a terminal command: install a package, run tests or a file, use git, move or delete files
+3 = compute — run code to produce a fact or number the user wants
+4 = navigate — find or explain code that already exists
+5 = edit — fix, rename, or modify code that already exists
+ANSWER: 1
 
 Example — a script whose purpose is a computation is still author:
 Request: write a script that reads a CSV and prints the average of column 3
@@ -222,8 +238,9 @@ ACTIONS:
 1 = edit — fix, rename, or modify code that already exists
 2 = compute — run code to produce a fact or number the user wants
 3 = navigate — find or explain code that already exists
-4 = author — write a brand-new script, function, or program
-ANSWER: 4
+4 = shell — run a terminal command: install a package, run tests or a file, use git, move or delete files
+5 = author — write a brand-new script, function, or program
+ANSWER: 5
 
 Example — renaming, not asking:
 Request: rename the helper() function to normalize() everywhere it's used
@@ -232,7 +249,38 @@ ACTIONS:
 2 = author — write a brand-new script, function, or program
 3 = compute — run code to produce a fact or number the user wants
 4 = edit — fix, rename, or modify code that already exists
-ANSWER: 4"""
+5 = shell — run a terminal command: install a package, run tests or a file, use git, move or delete files
+ANSWER: 4
+
+Example — installing a package is shell:
+Request: install the requests package
+ACTIONS:
+1 = edit — fix, rename, or modify code that already exists
+2 = shell — run a terminal command: install a package, run tests or a file, use git, move or delete files
+3 = author — write a brand-new script, function, or program
+4 = navigate — find or explain code that already exists
+5 = compute — run code to produce a fact or number the user wants
+ANSWER: 2
+
+Example — running the tests that exist is shell, not compute:
+Request: run the tests and tell me if they pass
+ACTIONS:
+1 = compute — run code to produce a fact or number the user wants
+2 = author — write a brand-new script, function, or program
+3 = navigate — find or explain code that already exists
+4 = edit — fix, rename, or modify code that already exists
+5 = shell — run a terminal command: install a package, run tests or a file, use git, move or delete files
+ANSWER: 5
+
+Example — git history is shell, not navigate:
+Request: show me the last 5 git commits
+ACTIONS:
+1 = navigate — find or explain code that already exists
+2 = compute — run code to produce a fact or number the user wants
+3 = shell — run a terminal command: install a package, run tests or a file, use git, move or delete files
+4 = author — write a brand-new script, function, or program
+5 = edit — fix, rename, or modify code that already exists
+ANSWER: 3"""
 
 
 def route_mode(request: str, policy: Policy) -> tuple[str, str]:
@@ -278,6 +326,7 @@ if __name__ == "__main__":
     assert pre_route("sum the revenue column in the csv")[0] is None
     assert pre_route("write a script that reverses a string")[0] is None
     assert pre_route("hello there")[0] is None
+    assert pre_route("show me the git log of parser.py")[0] is None
 
     class _PickFirst:
         def complete(self, model, raw_prompt, opts):

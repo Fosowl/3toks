@@ -565,6 +565,32 @@ def make_confirm_edit(state: ReplState, read_input, sink):
     return confirm_edit
 
 
+def make_confirm_command(state: ReplState, read_input, sink):
+    """Build the callback that asks the user to run one shell command.
+
+    The code agent's shell mode calls the callback before it runs a
+    command. repl calls this builder with its state, input reader and
+    output sink. The callback prints the command and the folder, asks a
+    y/N question and gives True only for "y" or "yes"; EOF and Ctrl-C
+    give False.
+
+    Args:
+        state (ReplState): the REPL state (color flag, files root), from
+            repl.
+        read_input (callable): prompt -> line reader, from repl.
+        sink (callable): line printer, from repl.
+
+    Returns:
+        callable: (command: str) -> bool.
+    """
+    def confirm_command(command: str) -> bool:
+        sink(fg(AMBER, f"  $ {command}", state.enabled))
+        reply = _read_line(read_input, f"  run this command in "
+                           f"{state.services.files_root}? [y/N] ")
+        return (reply or "").strip().lower() in CONFIRM_YES
+    return confirm_command
+
+
 def _diff_preview(diff: str, enabled: bool) -> str:
     """Color a unified diff and clip it for the confirm question.
 
@@ -729,6 +755,8 @@ def repl(state: ReplState, read_input=input, sink=print) -> None:
         None.
     """
     state.services.confirm_edit = make_confirm_edit(state, read_input, sink)
+    state.services.confirm_command = make_confirm_command(state, read_input,
+                                                          sink)
     prompt = prompt_text(state.enabled)
     while state.running:
         line = _next_line(state, read_input, prompt, sink)

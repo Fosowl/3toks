@@ -13,17 +13,21 @@ entry — and each failure's traceback is mapped to the method it happened
 in. That blamed method is unlocked and re-enters the same implement flow
 (blind resample at repair temperature — no error feedback, per E5b),
 bounded by ``MAX_REPAIR_ROUNDS`` overall and ``MAX_METHOD_REPAIRS`` per
-method. Runner checks run in ``run_cwd`` (a temp dir when None).
+method. Runner checks run where ``RunSetup`` says (a temp dir by default).
 """
 import builtins
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from threetoks.code import gates, runner, sandbox
-from threetoks.code.nodes import (MAX_CAP_DOUBLINGS, ImplementNode, PlanNode,
-                                 TestNode)
-from threetoks.code.store import (STATUS_PLANNED, STATUS_STUBBED,
-                                 STATUS_TESTED, MethodStore)
+from threetoks.code.nodes import MAX_CAP_DOUBLINGS, ImplementNode, PlanNode, TestNode
+from threetoks.code.store import (
+    STATUS_PLANNED,
+    STATUS_STUBBED,
+    STATUS_TESTED,
+    MethodStore,
+)
 from threetoks.render import Episode
 
 MAX_METHOD_ATTEMPTS = 3
@@ -35,12 +39,35 @@ MAX_METHOD_REPAIRS = 2      # times one method may be unlocked
 MIN_STEPS_TO_REPAIR = FORCE_STUB_AT_STEPS_LEFT + 2
 FALLBACK_METHOD = ("main", "", "solve the whole task in one function")
 # Compute mode needs a runnable entry whose return value is the answer.
-COMPUTE_ENTRY = ("main", "", "compute and return the final answer the task "
-                 "asks for, using the functions above")
+COMPUTE_ENTRY = ("main", "", ("compute and return the final answer the task "
+                              "asks for, using the functions above"))
+# Author mode runs the delivered script, so it needs an entry that DOES
+# the task; a lone helper such as make_data() does nothing visible.
+AUTHOR_ENTRY = ("main", "", ("do what the task asks when the script runs: "
+                             "call the functions above and print what the "
+                             "user should see"))
 # No space before "(": a real signature is name(args); prose like
 # "the data (fast)" has a space and must not be mistaken for one.
 _ENTRY = re.compile(r"([a-z_][a-z0-9_]*)\(([^)]*)\)")
 _PARAM_LIST = re.compile(r"^([a-z_][a-z0-9_]*(\s*,\s*[a-z_][a-z0-9_]*)*)?$")
+
+
+@dataclass(frozen=True)
+class RunSetup:
+    """Where the runner checks run, with which python, and the entry rule.
+
+    The code agent gives one per request. Compute runs its checks in the
+    project folder and prints the entry result. Author runs its checks in
+    a temp folder with the project's python and gets a ``main`` entry,
+    because the agent runs the delivered script afterwards.
+    """
+    cwd: Path | None = None       # check folder; None: a temp folder
+    project: Path | None = None   # use this project's python; None: harness
+    echo_result: bool = False     # print the entry's non-None return value
+    add_main: bool = False        # add AUTHOR_ENTRY when the plan has no main
+
+
+SCRATCH_RUN = RunSetup()  # checks in a temp folder, harness python, no entry
 
 
 class CodeVertical:
@@ -55,14 +82,13 @@ class CodeVertical:
     expressions (a single str per entry is accepted). Two anchors, normal
     plus boundary, close the single-anchor blind spot E9 measured.
 
-    With ``run_cwd`` set, the runner checks run in that folder under the
-    project interpreter (``sandbox.project_python``); else in a temp dir
-    under the harness interpreter.
+    ``run`` (a RunSetup) says where the runner checks run, under which
+    interpreter, and which entry the plan must have.
     """
 
     def __init__(self, goal: str, gen_tests: bool = True,
                  trusted_examples: dict | None = None, retriever=None,
-                 run_cwd: Path | None = None, echo_result: bool = False):
+                 run: RunSetup = SCRATCH_RUN):
         """Set up one episode.
 
         The code agent creates one vertical per author or compute request.
@@ -72,14 +98,12 @@ class CodeVertical:
             gen_tests: True asks the model for advisory asserts.
             trusted_examples: method name -> anchor expression(s).
             retriever: optional retrieval-as-repair hook, or None.
-            run_cwd: working directory of the runner checks; None = temp.
-            echo_result: True prints the entry's non-None return value
-                in the smoke call and in the ``__main__`` guard.
+            run: RunSetup; the default runs checks in a temp folder under
+                the harness interpreter and adds no entry.
         """
         self.goal = goal
         self.gen_tests = gen_tests
-        self.run_cwd = run_cwd
-        self.echo_result = echo_result
+        self.run = run
         self.retriever = retriever
         self.trusted = {name: value if isinstance(value, list) else [value]
                         for name, value in (trusted_examples or {}).items()}
@@ -137,10 +161,13 @@ class CodeVertical:
         exactly what the runner's smoke call already exercised.
 
         Returns:
-            dict: goal, answer, methods, output, run.
+            dict: goal, answer, entry (the function the guard calls, or
+            None), methods, stubbed, output, run.
         """
+        entry = self._script_entry()
         return {"goal": self.goal,
-                "answer": self._render_script(self._script_entry()),
+                "answer": self._render_script(entry),
+                "entry": entry,
                 "methods": [self._method_row(m) for m in self.store.methods],
                 "stubbed": self.store.stubbed_names(),
                 "output": self._entry_output(),
@@ -150,7 +177,7 @@ class CodeVertical:
         """The module plus a guard that runs the entry like the smoke call.
 
         result() calls this. The guard body comes from
-        ``runner.entry_call``, so ``echo_result`` behaves the same in the
+        ``runner.entry_call``, so ``run.echo_result`` behaves the same in the
         smoke call and in the delivered script.
 
         Args:
@@ -162,7 +189,8 @@ class CodeVertical:
         module = self.store.render_module()
         if entry is None:
             return module
-        call = runner.entry_call(entry, self.echo_result, gates.BODY_INDENT)
+        call = runner.entry_call(entry, self.run.echo_result,
+                                 gates.BODY_INDENT)
         return f'{module}\n\nif __name__ == "__main__":\n{call}\n'
 
     def _entry_output(self) -> str:
@@ -218,7 +246,7 @@ class CodeVertical:
         self._ensure_entry()
         if not self.store.methods:
             self.store.add(*FALLBACK_METHOD)
-        self._ensure_compute_entry()
+        self._ensure_run_entry()
         self.planned = True
 
     def _plannable(self, name: str, args: str) -> bool:
@@ -252,22 +280,28 @@ class CodeVertical:
         if name not in self.store.names():
             self.store.add(name, args, f"the {name} function the task asks for")
 
-    def _ensure_compute_entry(self) -> None:
-        """Add a zero-arg ``main`` when compute mode has no runnable entry.
+    def _ensure_run_entry(self) -> None:
+        """Add a zero-arg ``main`` when the run needs an entry the plan lacks.
 
-        Compute mode answers with the printed return value of the script
-        entry. ``_apply_plan`` calls this after the plan is stored. A live
-        plan gave only ``sum_primes(limit)``, so no entry could run and the
-        answer was empty. This adds ``main()`` last, so it is written after
-        the helpers it calls.
+        ``_apply_plan`` calls this after the plan is stored, so ``main`` is
+        written last, after the helpers it calls. Compute answers with the
+        printed return value of the entry: a live plan gave only
+        ``sum_primes(limit)``, so no entry could run and the answer was
+        empty. Author runs the delivered script: a live plan gave three
+        helpers, and the guard called only the zero-arg data maker, so
+        the run did nothing the user asked for.
 
         Args:
-            none (reads ``self.echo_result`` and the planned methods).
+            none (reads ``self.run`` and the planned methods).
 
         Returns:
-            None. The store gains one method when the guard is needed.
+            None. The store gains one method when the entry is needed.
         """
-        if not self.echo_result:
+        if self.run.add_main:
+            if "main" not in self.store.names():
+                self.store.add(*AUTHOR_ENTRY)
+            return
+        if not self.run.echo_result:
             return
         if any(gates.zero_arg_callable(m.args) for m in self.store.methods):
             return
@@ -452,7 +486,7 @@ class CodeVertical:
         """Free: execute the finished module; unlock what the blame names.
 
         Runs trusted examples and the script entry's smoke call via the
-        runner, in ``run_cwd``.
+        runner, in ``run.cwd`` (a temp folder when None).
         Every real failure unlocks its blamed method (round- and
         per-method-capped); with no budget left the run is report-only.
         A clean run latches ``_run_clean`` so the phase never re-executes.
@@ -464,8 +498,9 @@ class CodeVertical:
             return
         module = self.store.render_module()
         checks = runner.collect_checks(self.store.methods,
-                                       self._script_entry(), self.echo_result)
-        self.run_results = runner.run_checks(module, checks, self.run_cwd,
+                                       self._script_entry(),
+                                       self.run.echo_result)
+        self.run_results = runner.run_checks(module, checks, self.run.cwd,
                                              interpreter=self._interpreter())
         self._run_attempted = True
         failed = runner.failures(self.run_results)
@@ -483,16 +518,17 @@ class CodeVertical:
     def _interpreter(self) -> str | None:
         """The interpreter for the runner checks.
 
-        _run_module_checks calls this. With ``run_cwd`` the module is the
-        user's compute script, so it runs under the project interpreter
-        (contract C1); else the harness interpreter is used.
+        _run_module_checks calls this. With ``run.project`` set, the module
+        is the user's script, so it runs under the project interpreter
+        (contract C1) and finds the project's packages; else the harness
+        interpreter is used.
 
         Returns:
             str | None: project python path, or None for sys.executable.
         """
-        if self.run_cwd is None:
+        if self.run.project is None:
             return None
-        return sandbox.project_python(Path(self.run_cwd))
+        return sandbox.project_python(Path(self.run.project))
 
     def _unlock(self, name: str) -> bool:
         """Reopen a finished method for one more implement cycle.
@@ -680,7 +716,7 @@ if __name__ == "__main__":
     assert two_outcome["methods"][0]["verified"], two_outcome["methods"]
 
     echo = CodeVertical("compute the answer", gen_tests=False,
-                        echo_result=True)
+                        run=RunSetup(echo_result=True))
     echo_policy = Policy(_demo_backend(["main(): the answer", "return 6 * 7"]),
                          PolicyConfig(ModelSpec("m", FAMILY_CHATML)))
     echo_outcome = run_episode(echo, echo_policy, max_steps=20)
@@ -691,6 +727,10 @@ if __name__ == "__main__":
     entry = CodeVertical("Write triple(n) that multiplies n by three")
     entry._apply_plan(Decision("plan", [], "", valid=False))  # empty plan
     assert "triple" in entry.store.names(), entry.store.names()
+    author = CodeVertical("Write triple(n) that multiplies n by three",
+                          run=RunSetup(add_main=True))
+    author._apply_plan(Decision("plan", [], "", valid=False))
+    assert author.store.names() == ["triple", "main"], author.store.names()
     prose = CodeVertical("process the data (fast) please")     # parenthetical
     prose._apply_plan(Decision("plan", [], "", valid=False))
     assert prose.store.names() == ["main"], prose.store.names()  # no 'data'

@@ -76,6 +76,14 @@ class DecisionRowTest(unittest.TestCase):
                                           enabled=False)
         self.assertIn("—", line)
 
+    def test_code_plan_shows_the_planned_function_names(self):
+        from types import SimpleNamespace
+        plan = [SimpleNamespace(name="load"), SimpleNamespace(name="main")]
+        line = progress.build_decision_row(
+            {"node": "plan", "tag": "plan", "value": plan, "valid": True},
+            enabled=False)
+        self.assertIn("load, main", line)
+
     def test_resolved_picks_follow_under_the_row(self):
         event = {"node": "pick_many", "value": [2, 5], "valid": True,
                  "resolved": ["France has 68m people.", "Paris is big."]}

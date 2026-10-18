@@ -9,7 +9,7 @@ import unittest
 
 from threetoks.backend.base import FAMILY_CHATML, GenResult, ModelSpec
 from threetoks.code import runner
-from threetoks.code.vertical import CodeVertical
+from threetoks.code.vertical import CodeVertical, RunSetup
 from threetoks.engine import run_episode
 from threetoks.policy import Policy, PolicyConfig
 from threetoks.tui import OUTPUT_MAX_LINES, render_result
@@ -77,7 +77,7 @@ class VerticalOutputTest(unittest.TestCase):
     def test_echo_result_shows_the_returned_value(self):
         backend = QueueBackend(["main(): the answer", "return 6 * 7"])
         vertical = CodeVertical("compute the answer", gen_tests=False,
-                                echo_result=True)
+                                run=RunSetup(echo_result=True))
         policy = Policy(backend, PolicyConfig(ModelSpec("m", FAMILY_CHATML)))
         outcome = run_episode(vertical, policy, max_steps=20)
         self.assertEqual(outcome["output"], "42\n")
@@ -97,12 +97,36 @@ class VerticalOutputTest(unittest.TestCase):
                                 "return sum(range(limit))",
                                 "return sum_below(10)"])
         vertical = CodeVertical("compute the sum of numbers below 10",
-                                gen_tests=False, echo_result=True)
+                                gen_tests=False,
+                                run=RunSetup(echo_result=True))
         policy = Policy(backend, PolicyConfig(ModelSpec("m", FAMILY_CHATML)))
         outcome = run_episode(vertical, policy, max_steps=20)
         self.assertEqual([m["name"] for m in outcome["methods"]],
                          ["sum_below", "main"])
         self.assertEqual(outcome["output"], "45\n")
+
+    def test_author_run_adds_main_when_the_plan_has_none(self):
+        # Live plan for "save a fake png plot": three helpers, and the
+        # guard called only the zero-arg data maker, so nothing was saved.
+        plan = "make_data(): random points\n2. save(data): write them"
+        backend = QueueBackend([plan, "return [1, 2]", "print(len(data))",
+                                "save(make_data())"])
+        vertical = CodeVertical("save the data", gen_tests=False,
+                                run=RunSetup(add_main=True))
+        policy = Policy(backend, PolicyConfig(ModelSpec("m", FAMILY_CHATML)))
+        outcome = run_episode(vertical, policy, max_steps=20)
+        self.assertEqual([m["name"] for m in outcome["methods"]],
+                         ["make_data", "save", "main"])
+        self.assertEqual(outcome["entry"], "main")
+        self.assertEqual(outcome["output"], "2\n")
+
+    def test_author_run_keeps_a_planned_main(self):
+        backend = QueueBackend(["main(): say hi", "print('hi')"])
+        vertical = CodeVertical("say hi", gen_tests=False,
+                                run=RunSetup(add_main=True))
+        policy = Policy(backend, PolicyConfig(ModelSpec("m", FAMILY_CHATML)))
+        outcome = run_episode(vertical, policy, max_steps=20)
+        self.assertEqual([m["name"] for m in outcome["methods"]], ["main"])
 
 
 class PanelOutputTest(unittest.TestCase):

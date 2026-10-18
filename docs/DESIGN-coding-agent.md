@@ -421,8 +421,9 @@ mutate anything (navigate) or where no choice exists.
   `[y/N]`), refuses when the file changed since it was read, and keeps
   line endings, BOM, and coding cookie (`encoding.encode_like`).
 - **Compute** runs once, in `files_root`, under the project interpreter;
-  the answer is the entry's printed or returned value (`echo_result`). A
-  plan with no zero-argument entry gets a `main()` appended.
+  the answer is the entry's printed or returned value
+  (`RunSetup.echo_result`). A plan with no zero-argument entry gets a
+  `main()` appended.
 
 Live after the change (same qwen3.6:27b corpus probe as the review; the
 corpus now carries one repo test covering the planted bug):
@@ -506,3 +507,68 @@ and `is_palindrome` still passes its gates on both models. Not changed:
 the edit vertical's `spans.body_prefill` also ends with the body indent
 (no empty answers seen there yet), and `TestNode`'s prefill ends with a
 space.
+
+## 12. Run what it writes, and a shell mode (2026-10-18)
+
+Report: "save a fake png plot for testing in python" delivered three
+helpers and a `__main__` guard that called only `generate_fake_data()`.
+Nothing ran in the user's folder and no PNG was saved; the runner's
+smoke call had run in a temp folder, and its empty output was the only
+trace. The user asked that written code really runs, and that the code
+agent can use shell commands (sandboxing out of scope for now).
+
+- **`RunSetup`** (`code/vertical.py`) replaces the `run_cwd` /
+  `echo_result` arguments: `cwd` (check folder, temp when None),
+  `project` (use that project's interpreter), `echo_result`, and
+  `add_main`. Author uses `RunSetup(project=root, add_main=True)`:
+  checks stay side-effect-free in a temp folder but import the project's
+  packages; compute uses `RunSetup(cwd=root, project=root,
+  echo_result=True)` as before.
+- **Author always gets an entry that does the task.** `add_main` appends
+  `main()` ("do what the task asks when the script runs: call the
+  functions above and print what the user should see") when the plan has
+  no `main`, so the guard no longer calls a lone helper.
+- **The delivered script runs once for real** (`code/execute.py`
+  `run_script`): in `files_root`, under `sandbox.project_python`, 60 s
+  limit, inside a `run the script` span. The answer is the script plus a
+  report: interpreter, folder, exit code, time, stdout and stderr tails
+  (30 lines each). A failed run sets `judged_good` False (panel
+  UNVERIFIED, not remembered). `sandbox.RunResult` now carries
+  `exit_code`.
+- **Shell mode** (`code/shell.py`, fifth router mode). One ShortTextNode
+  (`COMMAND:` prefill, tag `command`) sees SYSTEM, FOLDER, PYTHON and the
+  folder entries. The model writes `PYTHON` for the project interpreter;
+  `with_project_python` swaps it in (also a first word `python`/`python3`,
+  and `pip`/`pip3` → `<python> -m pip`) before the user sees the command.
+  `Services.confirm_command` asks `[y/N]` (TUI `make_confirm_command`); no
+  callback or no "y" means nothing runs. The command runs with the user's
+  shell and full environment, no input, 120 s limit, in a
+  `run the command` span.
+
+Routing, live on qwen3.5:4b (E7 benchmark plus 15 new cases;
+`/tmp/3toks_shell/probe_modes.py`, one seed):
+
+| Label | Before (4 modes) | After (5 modes) |
+|---|---|---|
+| navigate | 18/19 | 18/19 |
+| edit | 15/17 | 17/17 |
+| compute | 16/16 | 16/16 |
+| author | 18/19 | 19/19 |
+| shell | 0/13 | 11/13 |
+
+The two shell misses: "check which python version is installed"
+(compute) and "use the shell to count the lines of every .py file"
+(navigate). The top-level router (`probe_router.py`, 56 cases × 2
+seeds, 8 of them shell or author requests) stayed at 108/112 with the
+new code description ("write, run or fix Python code, run shell
+commands, or explain the code in this project"); the miss on "check
+which python version is installed" (routed to web) is the same before
+and after. Command proposals for 11 requests (`probe_commands.py`) were
+all usable after the `PYTHON` rule: `PYTHON -m pip install pillow`,
+`PYTHON -m pytest`, `git status`, `mv old.log archive/`, …
+
+Known limits: the delivered script runs on stdin, so `__file__` is not
+set; a missing package shows as `ModuleNotFoundError` in the report and
+the user installs it with a shell request; author checks still run
+during repair rounds, so a script with side effects runs more than once
+in the temp folder (never in `files_root`).
