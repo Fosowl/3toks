@@ -269,6 +269,49 @@ class SearchBreakerTest(unittest.TestCase):
         self.assertNotIn("search_unavailable", result)
 
 
+class ResearchSpanTest(unittest.TestCase):
+    """Each round, judge panel and requery is one span for the TUI tree."""
+
+    class _Vertical:
+        def __init__(self, task, *args, **kwargs):
+            self.episode = Episode("S", task)
+            self.steps_left = 0
+            self.notes = args[2]
+            self.notes.add("some evidence", "http://x", 1)
+
+        def next_node(self):
+            return None
+
+        def result(self):
+            return {"answer": "a", "notes": "[1] some evidence"}
+
+    def test_spans_carry_the_verdict_and_the_next_query(self):
+        from unittest import mock
+
+        import threetoks.research as research_module
+        from threetoks.trace import Tracer
+        verdicts = iter([False, True])
+        events: list[dict] = []
+        policy = make_policy([])
+        policy.tracer = Tracer(None, on_event=events.append)
+        with mock.patch.multiple(
+                research_module, WebResearchVertical=self._Vertical,
+                judge_answer=lambda t, r, p: next(verdicts),
+                update_belief=lambda t, b, n, p: b,
+                propose_query=lambda t, tr, p, b=None, **kw: "next query"):
+            deep_research("q", Services(provider=None, fetch_page=None,
+                                        max_research_rounds=2), policy)
+        closes = [(e["label"], e["result"]) for e in events
+                  if e.get("span") == "close"]
+        self.assertEqual(closes, [
+            ("round 1 · search and read", None),
+            ("check the answer", "rejected"),
+            ("choose the next search", "next query"),
+            ("round 2 · search and read", None),
+            ("check the answer", "accepted")])
+
+
+
 class BeliefRequeryTest(unittest.TestCase):
     def test_written_paraphrase_falls_back_to_a_strategy(self):
         query = propose_query("find Fosowl", ["Fosowl project details"],
@@ -567,14 +610,3 @@ class ResolvedPickTraceTest(unittest.TestCase):
         decision = policy.decide(Episode("S", "t"), node)
         self.assertEqual(decision.value, [2])
         self.assertEqual(events[0]["resolved"], ["beta"])
-
-    def test_ticker_shows_resolved_text(self):
-        from threetoks.tui import build_ticker_line
-        line = build_ticker_line({"node": "pick_many", "value": [2, 5],
-                                  "valid": True, "resolved":
-                                  ["France has 68m people.", "Paris is big."],
-                                  "out_tokens": 5, "wall_s": 0.4},
-                                 enabled=False)
-        self.assertIn("France has 68m people.", line)
-        self.assertIn("Paris is big.", line)  # every pick gets its own line
-        self.assertEqual(len(line.splitlines()), 3)

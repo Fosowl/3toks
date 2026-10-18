@@ -16,10 +16,11 @@ again. Caps on steps and on replans keep a confused model from looping.
 """
 from dataclasses import asdict
 
-from threetoks.agents.base import AgentSpec
+from threetoks.agents.base import AgentSpec, outcome_status
 from threetoks.agents.router import route
 from threetoks.nodes import MenuNode, SequenceNode, ShortTextNode
 from threetoks.render import Episode
+from threetoks.trace import span
 from threetoks.trajectory import Step, Trajectory
 
 AGENT_NAME = "planner"
@@ -120,6 +121,7 @@ class Planner:
         It receives the trajectory and the run context.
         It pops the next step and runs its agent with the step purpose as
         the task and a policy that adds the plan context to every call.
+        The run is one "step N › agent: purpose" span on the tracer.
         It then moves the step to ``done`` with the agent answer, and
         marks the trajectory unverified when a judge rejected the result.
 
@@ -129,11 +131,13 @@ class Planner:
             policy (Policy): the decision policy, from __call__.
         """
         step = trajectory.remaining.pop(0)
-        _notify(services, f"step {len(trajectory.done) + 1} › "
-                          f"{step.agent}: {step.purpose}")
+        label = (f"step {len(trajectory.done) + 1} › "
+                 f"{step.agent}: {step.purpose}")
         step_policy = policy.with_context(trajectory.context())
-        outcome = self.by_name[step.agent].run(step.purpose, services,
-                                               step_policy)
+        with span(getattr(policy, "tracer", None), label) as finished:
+            outcome = self.by_name[step.agent].run(step.purpose, services,
+                                                   step_policy)
+            finished["result"] = outcome_status(outcome)
         step.answer = str(outcome.get("answer") or "")
         trajectory.unverified |= outcome.get("judged_good") is False
         trajectory.done.append(step)
@@ -321,7 +325,8 @@ def _result(trajectory: Trajectory) -> dict:
 def _notify(services, line: str) -> None:
     """Send one progress line to the optional ``on_progress`` callable.
 
-    The planner uses this to show plans and steps while they run.
+    The planner uses this to show the plan, plan updates, the fallback
+    route and the step cap while it runs (each step is a trace span).
     The planner calls it with the shared services and a plain line.
     It does nothing when the services have no callable.
 

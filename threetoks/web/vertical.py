@@ -571,7 +571,7 @@ class WebResearchVertical:
             result: the search result or link that was opened (``.url``,
                 ``.title``).
             log_line (str): the session line shown to the model.
-            reason (str): the failure reason for the ticker trace.
+            reason (str): the failure reason for the progress-tree trace.
         """
         self.pages_failed += 1
         self.episode.log_session(log_line)
@@ -599,7 +599,7 @@ class WebResearchVertical:
                         "check; skipping that site", reason)
 
     def _trace_fetch_failure(self, result, reason: str) -> None:
-        """One ticker-visible trace event per failed page open."""
+        """One trace event per failed page open, shown in the progress tree."""
         if self.tracer is None:
             return
         self.tracer.record({

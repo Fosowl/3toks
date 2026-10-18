@@ -204,9 +204,33 @@ only `agent` (`planner`), `answer` (the step answer itself for a one-step
 plan, or every step answer under a numbered `N. agent — purpose` title),
 `trajectory` (the done steps as dicts: `agent`, `purpose`, `answer`), and
 `judged_good: False` when any step result had it. Progress lines
-(`plan ›`, `step N › agent: purpose`, `plan updated ›`, `no plan › routed
-to X`, `step cap reached › …`) go to `services.on_progress`; the TUI
-prints them dimmed in the ticker.
+(`plan ›`, `plan updated ›`, `no plan › routed to X`, `step cap reached
+› …`) go to `services.on_progress`; the TUI shows them as `⌁` rows in
+the progress tree. Each step runs inside a `step N › agent: purpose`
+span, so its decisions nest under it and its end row shows its status
+(`answered`, `no answer`, or `unverified`).
+
+### Showing an agent's parts in the progress tree
+
+The TUI draws each task as a tree (`threetoks/progress.py`). Policy
+decisions are rows. A plain menu decision (a `MenuNode` without a `tag`)
+is an action: the decisions after it nest under it until the next plain
+menu decision. So give a `tag` to every menu that is a check or a
+classification (`judge`, `mode`, `replan`), and leave the menus that
+choose the agent's next step untagged. To show a larger part of your
+agent as its own branch, wrap it in a span on the policy tracer:
+
+```python
+from threetoks.trace import span
+
+with span(getattr(policy, "tracer", None), "round 1 · search and read") as outcome:
+    ...  # decisions here nest under the branch
+    outcome["result"] = "accepted"  # optional; shown on the ╰ end row
+```
+
+An exception inside the block ends the branch with the result `stopped`,
+unless the block already set a result. A `None` tracer records nothing,
+so test doubles without a tracer work.
 
 ## Hardware agents (Raspberry Pi): the light agent is a template
 

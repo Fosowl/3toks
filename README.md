@@ -295,8 +295,35 @@ The `planner` works in three parts:
 2. **Run.** Each agent does its step. Its task is only its own short task. Every model call of the step also sees the overall goal and the answers of the steps before it.
 3. **Correct.** After each step, the model says yes or no: must the next steps change? On yes, it plans the remaining steps again.
 
-A plan has 4 steps or fewer. A request runs 6 steps at most, and the plan changes 2 times at most. The ticker shows the plan and each step while they run.
+A plan has 4 steps or fewer. A request runs 6 steps at most, and the plan changes 2 times at most. The progress tree shows the plan, and each step is one branch of the tree.
 If the plan is not valid, the router picks one agent for the full request. When a plan has 2 or more steps, the final answer shows the answer of each step under its number. The planner is always the last agent in `/agents`. It is added only when 2 or more other agents are ready.
+
+### The progress tree
+
+While a request runs, the chat shows each model decision as one row of a tree:
+
+```text
+  ◆ pick an agent
+  ├ ▂ choose  web — look up facts or current informat…           2t·0.28s
+  ╰ web · 1 call · 2t · 0.3s
+  ◆ web agent
+  ├ ◆ round 1 · search and read
+  │ ├ ▂ choose  open result 5: RFI - All the news from …         2t·0.92s
+  │ │ ├ ▃ pick    24                                             3t·0.83s
+  │ │ │   · The soundtrack to France’s school protests
+  │ ├ ▂ choose  answer the task now                              2t·0.33s
+  │ │ ├ █ write   is 2025, and high school protests conti…      15t·0.51s
+  │ ╰ done · 4 calls · 22t · 6.9s
+  ├ ◆ check the answer
+  │ ├ ▂ judge   bad — vague, off-topic, or does not ans…         2t·0.41s
+  │ ╰ rejected · 1 call · 2t · 0.4s
+  ╰ answered · 5 calls · 24t · 7.3s
+```
+
+- A `◆` row starts one part of the request: choosing the agent, recalling past answers, the agent itself, each research round, the answer check, the choice of the next search, and each planner step.
+- A `╰` row ends that part. It gives the result (the agent, the verdict, the new search), the number of model calls, the tokens, and the time.
+- A `choose` row is an action that the model picked from a menu. The rows under it are the decisions that this action caused, for example the sentences the model picked from an opened page.
+- The bar at the start of a row is the token cost of the decision (`▁` = 1 token, `█` = 8 or more). Its color is the speed: green is fast, amber is steady, pink is slow.
 
 ### Chat commands
 
@@ -475,7 +502,7 @@ A local SearXNG (see `infra/searxng/`) helps, but it does not remove the problem
 When search fails completely, ThreeToks says so. It does not make up an answer:
 
 - If every search hop is blocked by a bot wall, the run ends with a **"search unavailable"** answer.
-- If every page failed to open, the run ends with **"could not open any web page"**. Each failed page also shows as a `fetch` line in the ticker, with the reason. The command-line tool exits with a non-zero code. ThreeToks does not write an answer from an empty note store.
+- If every page failed to open, the run ends with **"could not open any web page"**. Each failed page also shows as a `fetch` row in the progress tree, with the reason. The command-line tool exits with a non-zero code. ThreeToks does not write an answer from an empty note store.
 
 ## Under the hood
 

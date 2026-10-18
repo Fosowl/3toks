@@ -6,6 +6,7 @@ from threetoks.agents import planner
 from threetoks.agents.base import AgentSpec
 from threetoks.backend.base import FAMILY_CHATML, GenResult, ModelSpec
 from threetoks.policy import Policy, PolicyConfig
+from threetoks.trace import Tracer
 
 
 class ScriptedBackend:
@@ -125,13 +126,28 @@ class FollowTest(unittest.TestCase):
         _, calls = run_planner(backend)
         self.assertEqual(calls[0][1], "print the population of France")
 
-    def test_progress_lines_show_the_plan_and_each_step(self):
+    def test_progress_lines_show_the_plan(self):
         lines: list[str] = []
         services = SimpleNamespace(on_progress=lines.append)
         run_planner(ScriptedBackend(plans=["2,3"]), services=services)
         self.assertEqual(lines[0], "plan ›")
         self.assertIn("  1. web — do it", lines)
-        self.assertIn("step 2 › code: do it", lines)
+
+    def test_each_step_runs_in_its_own_span_with_its_status(self):
+        backend = ScriptedBackend(plans=["2,3"])
+        events: list[dict] = []
+        policy = Policy(backend, PolicyConfig(ModelSpec("m", FAMILY_CHATML)),
+                        Tracer(None, on_event=events.append))
+        specs = [recording_agent(name, []) for name in ("casual", "web",
+                                                        "code")]
+        planner.make_spec(specs).run("goal", None, policy)
+        edges = [(e["span"], e["label"]) for e in events if "span" in e]
+        self.assertEqual(edges, [("open", "step 1 › web: do it"),
+                                 ("close", "step 1 › web: do it"),
+                                 ("open", "step 2 › code: do it"),
+                                 ("close", "step 2 › code: do it")])
+        closes = [e["result"] for e in events if e.get("span") == "close"]
+        self.assertEqual(closes, ["answered", "answered"])
 
 
 class CorrectTest(unittest.TestCase):

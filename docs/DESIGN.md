@@ -221,13 +221,17 @@ around a judged multi-round research loop, and added an interactive TUI.
 **What shipped:**
 
 - **Interactive TUI** (`threetoks/tui.py`, `python3 -m threetoks`): a REPL
-  that streams every decision live as a ticker line (node kind, chosen
-  value, tokens, latency) so the model's ~1-token-per-step behavior is
-  visible as it happens, not just in a trace file afterward. Slash
+  that streams every decision live as a row of a progress tree
+  (`threetoks/progress.py`: node kind, chosen value, tokens, latency).
+  Trace spans (`threetoks.trace.span`) open branches for routing, recall,
+  the agent, each research round, the judge panel and each planner step;
+  a plain menu choice nests the decisions it caused. The model's
+  ~1-token-per-step behavior is visible as it happens, not just in a
+  trace file afterward. Slash
   commands: `/help`, `/agents`, `/deep N`, `/browser on|off`, `/model NAME`,
   `/quit`. Pure formatting/dispatch functions are separated from the input
   loop so the TUI is unit-testable without an LLM or network
-  (`tests/test_tui.py`).
+  (`tests/test_tui.py`, `tests/test_progress.py`).
 - **Pluggable agents** (`threetoks/agents/`): an `AgentSpec` contract
   (`name`, `description`, `run(task, services, policy) -> dict`), a
   one-token router (`route()`, an early-stop vote over option orders:

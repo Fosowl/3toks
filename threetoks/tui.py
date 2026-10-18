@@ -1,10 +1,9 @@
 """Neon-dawn cyberpunk terminal UI for the ThreeToks agent mesh.
 
 The killer view: the agent makes ~1-token menu decisions several times a
-second, and this TUI streams each one live as a ticker line, so the user
-literally watches the model think. Each ticker line carries a tiny token
-bar (▁▂▃…) whose height is the decision's token cost and whose color is
-its speed — the frugality of the mesh made visible.
+second, and this TUI streams each one live as a row of a progress tree
+(:mod:`threetoks.progress`), so the user watches the model think: which
+part of the task runs, which action it chose, and what each part cost.
 
 One visual identity holds it together: a cyan → lavender → hot-pink
 gradient ramp on hairline rules and the vertical spine of result panels,
@@ -15,213 +14,52 @@ decisions and answers carry color.
 Rendering is stdlib-only raw ANSI; every escape sequence hides behind a
 small helper (:func:`fg`, :func:`dim`, :func:`gradient`) so there is no
 inline escape soup. ``NO_COLOR`` and non-tty output fall back to plain
-text. Pure formatting/dispatch functions (:func:`build_ticker_line`,
-:func:`render_result`, :func:`handle_command`) are kept free of the input
-loop so they can be unit-tested offline without an LLM or a network.
+text. Pure formatting/dispatch functions (:func:`render_result`,
+:func:`handle_command`) are kept free of the input loop so they can be
+unit-tested offline without an LLM or a network.
 """
 import textwrap
 import time
+from typing import TYPE_CHECKING
 
 from threetoks.banner import build_banner
 from threetoks.live_config import sync_config
-from threetoks.session import (ReplState, build_state, close_fetcher,
-                               start_voice, stop_voice, swap_model,
-                               switch_fetcher)
-from threetoks.theme import (CYAN, VIOLET, PINK, GREEN, AMBER, GRAY, GRAY_LIGHT, WHITE, RAMP, PANEL_WIDTH, SPINE, NODE, ZAP, CHEVRON, NOTE_BULLET, CROSS, color_enabled, dim, fg, gradient, hairline, ramp_at)
+from threetoks.progress import DEMO_EVENTS, ProgressTree, as_number
+from threetoks.session import (
+    ReplState,
+    build_state,
+    close_fetcher,
+    start_voice,
+    stop_voice,
+    swap_model,
+    switch_fetcher,
+)
+from threetoks.theme import (
+    AMBER,
+    CHEVRON,
+    CROSS,
+    CYAN,
+    GRAY_LIGHT,
+    GREEN,
+    NOTE_BULLET,
+    PANEL_WIDTH,
+    PINK,
+    SPINE,
+    VIOLET,
+    WHITE,
+    ZAP,
+    color_enabled,
+    dim,
+    fg,
+    gradient,
+    ramp_at,
+)
+from threetoks.trace import span
 
-TOKEN_BARS = "▁▂▃▄▅▆▇█"     # ticker token-cost bar, 1..8+ tokens
+if TYPE_CHECKING:  # the agent registry loads lazily at run time
+    from threetoks.agents.base import AgentSpec
 
-# --- misc constants ------------------------------------------------------
-STAT_COLUMN = 56            # ticker column where the trailing stats start
-FAST_S, STEADY_S = 0.4, 1.2 # decision-speed thresholds for bar color
-SHORT_TEXT_CLIP = 40
-PICKED_LINE_CLIP = 70
-QUESTION_CLIP = 48
-RAW_CLIP = 120              # /debug: raw completion clipped to this
-DEBUG_PROMPT_HEAD = 80      # /debug: prompt head shown before the seam
-DEBUG_PROMPT_TAIL = 220     # /debug: prompt tail shown after the seam
-DEBUG_RESULT_CLIP = 120     # /debug: result text clipped to this
-UNDER_INDENT = " " * 12     # column where a ticker line's value starts
 SIGN_OFF = "⌁ mesh offline — tokens saved, see you"
-_KIND_LABELS = {"menu": "menu", "pick_many": "pick", "short_text": "text",
-                "sequence": "plan", "fetch": "fetch"}
-
-
-def build_debug_tokens_line(event: dict, enabled: bool = True) -> str:
-    """One dim line showing the full prompt and result tokens for a model call.
-
-    Printed for every LLM request while ``/debug`` is on, aligned under the
-    ticker's value column. Menu prompts carry boilerplate (family template,
-    system block, few-shots) at the head and the decision inputs (user
-    request, ACTIONS menu, prefill) at the tail, so the prompt is shown as
-    head + tail with the middle elided; ``/debug full`` prints everything.
-    """
-    prompt = _clip_repr_ends(event.get("prompt_text"),
-                             DEBUG_PROMPT_HEAD, DEBUG_PROMPT_TAIL)
-    result = _clip_repr(event.get("result_text"), DEBUG_RESULT_CLIP)
-    pt = _num(event.get("prompt_tokens"), int)
-    ot = _num(event.get("out_tokens"), int)
-    reason = event.get("done_reason") or "?"
-    return dim(f"{UNDER_INDENT}· in {prompt} → out {result}"
-               f" · {pt}pt/{ot}ot · {reason}", enabled)
-
-
-def _clip(text: str, limit: int) -> str:
-    """Collapse to one line and clip to ``limit`` chars with an ellipsis."""
-    flat = " ".join(str(text).split())
-    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
-
-
-def _compress_value(event: dict) -> str:
-    """Human-readable, compressed form of a decision's chosen value."""
-    kind = event.get("node")
-    value = event.get("value")
-    if not event.get("valid", False) or value is None:
-        return "—"  # em dash for no/invalid decision
-    if kind in ("pick_many", "sequence"):
-        return ",".join(str(index) for index in value) or "—"
-    if kind == "short_text":
-        return _clip(value, SHORT_TEXT_CLIP)
-    return _clip(value, SHORT_TEXT_CLIP)
-
-
-def _resolved_lines(event: dict, enabled: bool) -> list[str]:
-    """One dim line per picked sentence, printed under a pick event."""
-    return [dim(f"{UNDER_INDENT}· {_clip(text, PICKED_LINE_CLIP)}", enabled)
-            for text in event.get("resolved") or []]
-
-
-def _num(value, cast):
-    """Coerce a trace/result value to a number; 0 on anything malformed."""
-    try:
-        return cast(value or 0)
-    except (TypeError, ValueError):
-        return cast(0)
-
-
-def _token_bar(tokens: int) -> str:
-    """One glyph whose height encodes the decision's token cost."""
-    if tokens <= 0:
-        return "·"
-    return TOKEN_BARS[min(tokens, len(TOKEN_BARS)) - 1]
-
-
-def _pace_color(wall_s: float) -> int:
-    """Bar color by decision speed: green fast, amber steady, pink slow."""
-    if wall_s < FAST_S:
-        return GREEN
-    return AMBER if wall_s < STEADY_S else PINK
-
-
-def build_ticker_line(event: dict, enabled: bool = True) -> str:
-    """One ticker line for a streamed decision event.
-
-    A speed-colored token bar leads, then the dim node kind, the chosen
-    value in cyan, and a column-aligned dim stat, e.g.
-    ``  ▂ menu    open result 2                    2t·0.31s``.
-    Tolerates missing optional keys from the trace event.
-    """
-    kind = event.get("tag") or _KIND_LABELS.get(event.get("node"),
-                                                str(event.get("node", "?")))
-    value = _compress_value(event)
-    tokens = _num(event.get("out_tokens"), int)
-    wall = _num(event.get("wall_s"), float)
-    plain_width = len(f"  {_token_bar(tokens)} {kind:<7} {value}")
-    pad = " " * max(2, STAT_COLUMN - plain_width)
-    line = ("  " + fg(_pace_color(wall), _token_bar(tokens), enabled) + " "
-            + dim(f"{kind:<7}", enabled) + " "
-            + fg(CYAN, value, enabled) + pad
-            + dim(f"{tokens}t·{wall:.2f}s", enabled))
-    return "\n".join([line] + _resolved_lines(event, enabled))
-
-
-def _clip_repr(text, limit: int) -> str:
-    """``repr`` of ``text``, clipped to ``limit`` chars with an ellipsis.
-
-    The quotes make an empty or whitespace-only completion visible (``''``,
-    ``'\\n'``) where a bare string would look like a rendering bug; the
-    ellipsis sits outside them so it never reads as characters the model
-    actually emitted.
-    """
-    raw = str(text or "")
-    if len(raw) <= limit:
-        return repr(raw)
-    return repr(raw[:limit]) + "…"
-
-
-def _clip_repr_ends(text, head: int, tail: int) -> str:
-    """``repr`` of ``text`` with the middle elided: head, ``…``, tail, ``…``.
-
-    Menu prompts carry their identity at the head (family template, system
-    block, few-shots) and their decision inputs at the tail (user request,
-    ACTIONS menu, prefill); a head-only clip showed nothing but boilerplate,
-    which is exactly the part you do not need when debugging a misroute.
-    Short prompts pass through as a plain ``repr``.
-    """
-    raw = str(text or "")
-    if len(raw) <= head + tail:
-        return repr(raw)
-    return repr(raw[:head]) + "…" + repr(raw[-tail:]) + "…"
-
-
-def build_debug_line(event: dict, enabled: bool = True) -> str:
-    """One dim line under the ticker showing the model's RAW answer.
-
-    Printed for every decision while ``/debug`` is on, aligned under the
-    ticker's value column like a resolved pick. It exists to make a ``—``
-    (unparseable) decision explain itself: ``done: length`` means the
-    node's token cap ended the completion before the model got to its
-    digit — the failure mode of a chat transport, where the ``ANSWER:``
-    prefill is only a hint and a chatty model spends the cap on preamble.
-    ``attempt`` is 1-based, so it counts up to the retry ladder's length.
-    An empty completion at ``done: stop`` gets its own hint: the model's
-    first token already hit a stop (its end-of-turn token or the node's
-    newline stop) — usually a judgment that nothing fits, not a crash.
-    """
-    raw = _clip_repr(event.get("raw_text"), RAW_CLIP)
-    reason = event.get("done_reason") or "?"
-    attempt = _num(event.get("attempt"), int) + 1
-    line = (f"{UNDER_INDENT}· raw {raw} · done: {reason}"
-            f" · attempt {attempt}")
-    if reason == "stop" and not str(event.get("raw_text") or "").strip():
-        # A stop hit on the very first token: end-of-turn (nothing looked
-        # worth answering — often off-topic retrieval) or the node's own
-        # newline stop. Not the cap (that reads ``length``), not a crash.
-        line += " — empty answer: the model stopped before answering"
-    return dim(line, enabled)
-
-
-def _dump_lines(text: str, enabled: bool) -> list[str]:
-    """Each line of ``text`` verbatim, as one dim debug-dump row.
-
-    Nothing is clipped or wrapped, so a dump can be pasted into a bug
-    report exactly as the model saw it.
-    """
-    return [dim(f"{UNDER_INDENT}· {row}", enabled)
-            for row in (text.splitlines() or [""])]
-
-
-def build_debug_full_lines(event: dict, enabled: bool = True) -> list[str]:
-    """The complete prompt and result of one model call (``/debug full``).
-
-    For reading exactly what a misroute saw: the system block (chat
-    transports only — a raw template embeds it in ``prompt_text``), every
-    prompt line, then the unclipped completion with its token counts.
-    """
-    lines = []
-    system = str(event.get("system_text") or "")
-    if system:
-        lines.append(dim(f"{UNDER_INDENT}· system:", enabled))
-        lines.extend(_dump_lines(system, enabled))
-    lines.append(dim(f"{UNDER_INDENT}· prompt:", enabled))
-    lines.extend(_dump_lines(str(event.get("prompt_text") or ""), enabled))
-    stats = (f"{_num(event.get('prompt_tokens'), int)}pt/"
-             f"{_num(event.get('out_tokens'), int)}ot · "
-             f"{event.get('done_reason') or '?'}")
-    lines.append(dim(f"{UNDER_INDENT}· out "
-                     f"{str(event.get('result_text') or '')!r} · {stats}",
-                     enabled))
-    return lines
 
 
 def _wrap(text: str, width: int, indent: str = "") -> list[str]:
@@ -230,7 +68,7 @@ def _wrap(text: str, width: int, indent: str = "") -> list[str]:
                          subsequent_indent=indent) or [""]
 
 
-def _spined(rows: list[str], enabled: bool, color: int = None) -> list[str]:
+def _spined(rows: list[str], enabled: bool, color: int | None = None) -> list[str]:
     """Prefix each row with a ▍ spine, gradient top→bottom unless fixed.
 
     The spine is the panel's only frame: a thin neon edge stepping through
@@ -247,7 +85,7 @@ def _stats_line(result: dict, enabled: bool) -> str:
     """Dim ``N decisions · T tok · S.s`` line, rounds appended if present."""
     parts = [f"{result.get('decisions', 0)} decisions",
              f"{result.get('tokens', 0)} tok",
-             f"{_num(result.get('seconds'), float):.1f}s"]
+             f"{as_number(result.get('seconds'), float):.1f}s"]
     if result.get("rounds") is not None:
         parts.append(f"{result['rounds']} rounds")
     return dim(" · ".join(parts), enabled)
@@ -341,20 +179,20 @@ def render_task_report(stats: dict, enabled: bool = True) -> str:
     call) made explicit — plus a retry count when any attempt needed a
     reshuffle. A task answered without any model call reports one line.
     """
-    seconds = _num(stats.get("seconds"), float)
-    calls = _num(stats.get("calls"), int)
-    model_s = _num(stats.get("model_seconds"), float)
+    seconds = as_number(stats.get("seconds"), float)
+    calls = as_number(stats.get("calls"), int)
+    model_s = as_number(stats.get("model_seconds"), float)
     head = f"  {ZAP} task report {CHEVRON} {seconds:.1f}s"
     if model_s and seconds:
         share = min(100, round(100 * model_s / seconds))
         head += f" · model {model_s:.1f}s ({share}%)"
     if not calls:
         return dim(head + " · no model calls", enabled)
-    tokens = _num(stats.get("tokens"), int)
+    tokens = as_number(stats.get("tokens"), int)
     parts = [f"{calls} calls", f"{tokens} tok",
              f"avg {tokens / calls:.1f} tok/call",
              f"{(model_s or seconds) / calls:.2f}s/call"]
-    retries = _num(stats.get("retries"), int)
+    retries = as_number(stats.get("retries"), int)
     if retries:
         parts.append(f"{retries} retries")
     return "\n".join((dim(head, enabled),
@@ -543,7 +381,7 @@ _DEBUG_ARGS = ("", "on", "off", "full")  # accepted /debug arguments
 
 
 def _cmd_debug(state: ReplState, arg: str) -> str:
-    """Toggle the raw-answer and token-dump lines under every ticker decision.
+    """Toggle the raw-answer and token-dump lines under every tree decision.
 
     Distinct from ``/voice debug``, which traces microphone transcripts:
     this one shows what the model actually completed, so a decision that
@@ -606,87 +444,78 @@ def _collect_result(outcome: dict, decisions: int, tokens: int,
     return merged
 
 
-class _TickerCounter:
-    """Streams ticker lines and tallies decisions/tokens as events arrive."""
-
-    def __init__(self, state: ReplState, sink):
-        """Store the REPL state (for color) and an output callable."""
-        self.state = state
-        self.sink = sink
-        self.decisions = 0
-        self.tokens = 0
-        self.model_seconds = 0.0
-        self.retries = 0
-
-    def __call__(self, event: dict) -> None:
-        """Trace ``on_event`` hook: print one ticker line, update tallies.
-
-        With ``/debug`` on, each ticker line is followed by the raw
-        completion it was parsed from, and a token-level dump of the
-        full prompt and result for every model call; ``/debug full``
-        prints the whole prompt of every call instead of the summary.
-        """
-        if event.get("debug"):
-            if self.state.debug:
-                if getattr(self.state, "debug_full", False):
-                    for line in build_debug_full_lines(event,
-                                                       self.state.enabled):
-                        self.sink(line)
-                else:
-                    self.sink(build_debug_tokens_line(event,
-                                                      self.state.enabled))
-            return
-        self.decisions += 1
-        self.tokens += int(event.get("out_tokens", 0) or 0)
-        self.model_seconds += _num(event.get("wall_s"), float)
-        if _num(event.get("attempt"), int) > 0:
-            self.retries += 1
-        self.sink(build_ticker_line(event, self.state.enabled))
-        if self.state.debug:
-            self.sink(build_debug_line(event, self.state.enabled))
-
-    def stats(self, seconds: float) -> dict:
-        """Tallies plus the task wall time, ready for the task report."""
-        return {"seconds": seconds, "calls": self.decisions,
-                "tokens": self.tokens, "model_seconds": self.model_seconds,
-                "retries": self.retries}
-
-
 def _run_task(state: ReplState, task: str, route, sink) -> None:
-    """Route, recall context, run the agent, remember, render the panel."""
-    from threetoks.agents.router import route as route_fn
-    router = route or route_fn
-    counter = _TickerCounter(state, sink)
-    state.policy.tracer.on_event = counter
-    state.services.on_progress = lambda line: sink(
-        dim(f"  {ZAP} {line}", state.enabled))
+    """Route, recall context, run the agent, remember, render the panel.
+
+    The progress tree gets every trace event and agent progress line, so
+    the task streams as a tree; the panel and task report follow it.
+    """
+    tree = ProgressTree(state, sink)
+    state.policy.tracer.on_event = tree
+    state.services.on_progress = tree.note
     start = time.time()  # the task includes routing and recall
-    spec = router(task, state.specs, state.policy)
-    sink(dim(f"  {ZAP} routed {CHEVRON} ", state.enabled)
-         + fg(VIOLET, spec.name, state.enabled))
-    _recall_context(state, task, sink)
-    outcome = spec.run(task, state.services, state.policy)
+    spec, outcome = _route_and_run(state, task, route)
     elapsed = time.time() - start
     _remember(state, spec.name, task, outcome)
-    result = _collect_result(outcome, counter.decisions, counter.tokens,
+    stats = tree.stats(elapsed)
+    result = _collect_result(outcome, stats["calls"], stats["tokens"],
                              elapsed)
     sink(render_result(result, state.enabled))
-    sink(render_task_report(counter.stats(elapsed), state.enabled))
+    sink(render_task_report(stats, state.enabled))
     if state.voice is not None:  # speak AFTER the panel so text never lags
         state.voice.speak(str(result.get("answer") or ""))
 
 
-def _recall_context(state: ReplState, task: str, sink) -> None:
-    """Selector step: pick relevant past memories into ``services.recalled``."""
+def _route_and_run(state: ReplState, task: str,
+                   route) -> "tuple[AgentSpec, dict]":
+    """Pick the agent, recall memories and run the agent, each in a span.
+
+    _run_task calls this with the REPL state and the user request.
+    Each part is one top-level branch of the progress tree; the branch
+    end row shows the chosen agent, the memory count, or the status.
+
+    Args:
+        state (ReplState): the REPL state; its policy tracer gets spans.
+        task (str): the user request, from the input line.
+        route (callable | None): a router override from tests; None
+            uses threetoks.agents.router.route.
+
+    Returns:
+        tuple[AgentSpec, dict]: the chosen agent and its result.
+    """
+    from threetoks.agents.base import outcome_status
+    from threetoks.agents.router import route as route_fn
+    tracer = state.policy.tracer
+    with span(tracer, "pick an agent") as picked:
+        spec = (route or route_fn)(task, state.specs, state.policy)
+        picked["result"] = spec.name
+    _recall_context(state, task)
+    with span(tracer, f"{spec.name} agent") as finished:
+        outcome = spec.run(task, state.services, state.policy)
+        finished["result"] = outcome_status(outcome)
+    return spec, outcome
+
+
+def _recall_context(state: ReplState, task: str) -> None:
+    """Put the past answers that fit this request into the services.
+
+    _route_and_run calls this after routing, before the agent runs.
+    It does nothing without a memory store. Otherwise the model picks
+    the relevant memories inside a "recall past answers" span, and the
+    picks go to ``services.recalled`` for the agent.
+
+    Args:
+        state (ReplState): the REPL state, with memory, policy, services.
+        task (str): the user request, from the input line.
+    """
     from threetoks.memory import select_memories
     if state.memory is None:
         return
-    recalled = select_memories(task, state.memory, state.policy)
+    with span(state.policy.tracer, "recall past answers") as found:
+        recalled = select_memories(task, state.memory, state.policy)
+        found["result"] = (f"{len(recalled)} relevant" if recalled
+                           else "none relevant")
     state.services.recalled = recalled
-    if recalled:
-        preview = "; ".join(entry["query"][:40] for entry in recalled)
-        sink(dim(f"  {ZAP} recalled {len(recalled)} {CHEVRON} {preview}",
-                 state.enabled))
 
 
 def _remember(state: ReplState, agent: str, task: str, outcome: dict) -> None:
@@ -913,7 +742,7 @@ def repl(state: ReplState, read_input=input, sink=print) -> None:
             _dispatch(state, line.strip(), sink)
 
 
-def main(model: str = None) -> None:
+def main(model: str | None = None) -> None:
     """Onboard on a configless first run, print the banner, run the REPL."""
     from threetoks.config import find_config_path
     from threetoks.config_ui import first_start
@@ -937,46 +766,16 @@ def main(model: str = None) -> None:
             state.memory.dump(state.config.memory.path)
 
 
-# Demo ticker events; the last one is a decision truncated by the node's
-# token cap, the failure /debug exists to explain.
-_DEMO_EVENTS = (
-    {"node": "menu", "value": "open result 2: Anthropic pricing",
-     "valid": True, "out_tokens": 2, "wall_s": 0.31},
-    {"node": "pick_many", "value": [3, 7], "valid": True, "resolved":
-     ["Opus pricing was updated in June.", "Input tokens cost $15/M."],
-     "out_tokens": 5, "wall_s": 0.62},
-    {"tag": "curate", "node": "menu", "value": "keep note 3",
-     "valid": True, "out_tokens": 1, "wall_s": 0.18},
-    {"node": "short_text", "value": "anthropic api price per token",
-     "valid": True, "out_tokens": 8, "wall_s": 1.55},
-    {"node": "menu", "valid": False, "out_tokens": 3, "wall_s": 0.22,
-     "attempt": 2, "done_reason": "length",
-     "raw_text": "Okay, so the user is asking me to"},
-)
-
-
 def _demo() -> None:
     """Non-interactive render of every TUI piece for eyeballing."""
+    from types import SimpleNamespace
     enabled = color_enabled()
     print(build_banner("qwen3.5:2b", 2, enabled))
     print()
-    for event in _DEMO_EVENTS:
-        print(build_ticker_line(event, enabled))
-    print(build_debug_line(_DEMO_EVENTS[-1], enabled))  # as /debug on shows it
-    print(build_debug_tokens_line(                     # token-level dump line
-        {"debug": True,
-         "prompt_text": "<|im_start|>system\nYou are a menu selector "
-                        "controlling a research agent. When shown a numbered "
-                        "list of actions, reply with exactly one digit.\n\n"
-                        "Request: do a web search for forecast on the economy "
-                        "of japan\n\nWhich agent should handle this request?"
-                        "\nACTIONS:\n1 = casual — chat and small talk\n"
-                        "2 = code — write or debug Python code\n"
-                        "3 = web — look up facts on the internet\n\nANSWER:",
-         "result_text": " 3", "prompt_tokens": 752, "out_tokens": 3,
-         "done_reason": "stop"}, enabled))
-    print(dim(f"  {ZAP} routed {CHEVRON} ", enabled)
-          + fg(VIOLET, "web", enabled))
+    flags = SimpleNamespace(enabled=enabled, debug=False, debug_full=False)
+    tree = ProgressTree(flags, print)
+    for event in DEMO_EVENTS:
+        tree(event)
     print()
     result = {"agent": "web", "answer": "Claude Opus costs $15 per million "
               "input tokens.", "notes": "[1] Opus pricing page\n[2] docs",

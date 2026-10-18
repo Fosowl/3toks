@@ -257,6 +257,7 @@ def route_mode(request: str, policy: Policy) -> tuple[str, str]:
     episode = Episode(CODE_ROUTER_PREFIX, request)
     node = MenuNode("Which mode does this coding request need?",
                     [OPTION_TEXT[mode] for mode in MODES], escape=False)
+    node.tag = "mode"  # a classification, not an action
     decision = policy.decide(episode, node)
     chosen = next((mode for mode in MODES
                    if decision.valid and decision.value == OPTION_TEXT[mode]),

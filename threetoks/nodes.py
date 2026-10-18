@@ -42,6 +42,12 @@ class MenuNode:
     option in the LAST position, not as "0": E1/E4 showed tiny models
     almost never emit 0 for a menu (out-of-distribution), which made the
     escape blind. Digit 0 is always an invalid parse.
+
+    An optional ``tag`` attribute (e.g. ``node.tag = "judge"``) names the
+    node in traces and in the TUI progress tree. It also changes the tree
+    shape: a menu WITHOUT a tag is an action, and the decisions after it
+    nest under it (see :mod:`threetoks.progress`). Tag every menu that
+    is a check or a classification, not a step the agent takes.
     """
 
     kind = "menu"

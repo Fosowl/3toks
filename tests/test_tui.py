@@ -1,16 +1,16 @@
 """Offline tests for the TUI: no LLM, no network.
 
-Covers ticker-line formatting from fake events, NO_COLOR stripping, slash
-command dispatch with injected specs and a scripted input function, and
+Covers NO_COLOR stripping, slash command dispatch with injected specs and
+a scripted input function, the task run streaming its progress tree, and
 result-panel rendering with missing optional keys.
 """
 import unittest
 from dataclasses import dataclass, replace
 from unittest import mock
 
-from threetoks import session, tui
+from threetoks import session, theme, tui
 from threetoks.config import BrowserConfig, LlmConfig
-
+from threetoks.trace import Tracer
 
 _NO_TTY = mock.patch("threetoks.keys.is_interactive", return_value=False)
 
@@ -75,307 +75,7 @@ def make_state(**overrides):
     return state
 
 
-class TickerFormatTest(unittest.TestCase):
-    def test_menu_event_shows_kind_value_and_stats(self):
-        event = {"node": "menu", "value": "open result 2",
-                 "valid": True, "out_tokens": 2, "wall_s": 0.31}
-        line = tui.build_ticker_line(event, enabled=False)
-        self.assertIn("menu", line)
-        self.assertIn("open result 2", line)
-        self.assertIn("2t·0.31s", line)
-
-    def test_stats_column_aligns_across_events(self):
-        short = {"node": "menu", "value": "go", "valid": True,
-                 "out_tokens": 2, "wall_s": 0.1}
-        longer = {"node": "menu", "value": "open result 2: pricing",
-                  "valid": True, "out_tokens": 3, "wall_s": 0.2}
-        col = tui.build_ticker_line(short, enabled=False).index("2t·")
-        self.assertEqual(col,
-                         tui.build_ticker_line(longer,
-                                               enabled=False).index("3t·"))
-
-    def test_token_bar_grows_with_cost_and_saturates(self):
-        self.assertEqual(tui._token_bar(0), "·")
-        self.assertEqual(tui._token_bar(1), tui.TOKEN_BARS[0])
-        self.assertEqual(tui._token_bar(3), tui.TOKEN_BARS[2])
-        self.assertEqual(tui._token_bar(99), tui.TOKEN_BARS[-1])
-
-    def test_pace_color_maps_speed_to_green_amber_pink(self):
-        self.assertEqual(tui._pace_color(0.1), tui.GREEN)
-        self.assertEqual(tui._pace_color(0.8), tui.AMBER)
-        self.assertEqual(tui._pace_color(2.5), tui.PINK)
-
-    def test_malformed_numeric_fields_do_not_crash(self):
-        event = {"node": "menu", "value": "x", "valid": True,
-                 "out_tokens": "abc", "wall_s": None}
-        self.assertIn("0t·0.00s", tui.build_ticker_line(event, enabled=False))
-
-    def test_pick_many_shows_indices(self):
-        event = {"node": "pick_many", "value": [3, 7], "valid": True,
-                 "out_tokens": 5, "wall_s": 0.4}
-        self.assertIn("3,7", tui.build_ticker_line(event, enabled=False))
-
-    def test_plan_sequence_shows_ordered_agent_numbers(self):
-        event = {"node": "sequence", "value": [2, 3, 2], "valid": True}
-        line = tui.build_ticker_line(event, enabled=False)
-        self.assertIn("plan", line)
-        self.assertIn("2,3,2", line)
-
-    def test_short_text_clips_to_forty_chars(self):
-        long_value = "a" * 80
-        event = {"node": "short_text", "value": long_value, "valid": True}
-        line = tui.build_ticker_line(event, enabled=False)
-        self.assertIn("…", line)
-        self.assertNotIn("a" * 60, line)
-
-    def test_invalid_event_renders_dash_without_crashing(self):
-        line = tui.build_ticker_line({"node": "menu", "valid": False},
-                                     enabled=False)
-        self.assertIn("menu", line)
-        self.assertIn("—", line)
-
-
-class DebugLineTest(unittest.TestCase):
-    """The /debug line that makes an unparseable decision explain itself."""
-
-    def _event(self, **overrides):
-        event = {"node": "menu", "valid": False, "raw_text": "",
-                 "done_reason": "length", "attempt": 0}
-        return {**event, **overrides}
-
-    def test_empty_completion_is_visible_as_quotes(self):
-        # The user's failure shape: the cap was spent before any digit.
-        line = tui.build_debug_line(self._event(), enabled=False)
-        self.assertIn("''", line)
-
-    def test_shows_done_reason_and_one_based_attempt(self):
-        line = tui.build_debug_line(self._event(attempt=2), enabled=False)
-        self.assertIn("length", line)
-        self.assertIn("attempt 3", line)
-
-    def test_raw_text_is_shown_and_stays_one_line(self):
-        line = tui.build_debug_line(
-            self._event(raw_text="Sure!\nLet me"), enabled=False)
-        self.assertIn("Sure!", line)
-        self.assertIn("\\n", line)  # repr keeps the newline visible
-        self.assertEqual(len(line.splitlines()), 1)
-
-    def test_long_raw_text_is_clipped_with_an_ellipsis(self):
-        line = tui.build_debug_line(self._event(raw_text="z" * 400),
-                                    enabled=False)
-        self.assertIn("…", line)
-        self.assertNotIn("z" * (tui.RAW_CLIP + 1), line)
-
-    def test_empty_stop_completion_gets_a_hint(self):
-        # raw '' + done: stop = the first generated token was already a
-        # stop token (end-of-turn or the newline stop), not the token cap.
-        line = tui.build_debug_line(
-            self._event(raw_text="", done_reason="stop"), enabled=False)
-        self.assertIn("stopped before answering", line)
-
-    def test_empty_length_completion_gets_no_hint(self):
-        # done: length already names its own cause (the token cap).
-        line = tui.build_debug_line(self._event(), enabled=False)
-        self.assertNotIn("stopped before answering", line)
-
-    def test_no_escape_when_disabled(self):
-        self.assertNotIn("\x1b",
-                         tui.build_debug_line(self._event(), enabled=False))
-
-    def test_missing_keys_do_not_crash(self):
-        line = tui.build_debug_line({}, enabled=False)
-        self.assertIn("''", line)
-        self.assertIn("attempt 1", line)
-
-
-class TickerCounterDebugTest(unittest.TestCase):
-    """The extra raw line is printed only while /debug is on."""
-
-    def _emit(self, debug: bool) -> list:
-        state = make_state(enabled=False)
-        state.debug = debug
-        printed = []
-        counter = tui._TickerCounter(state, printed.append)
-        counter({"node": "menu", "valid": False, "out_tokens": 3,
-                 "wall_s": 0.2, "attempt": 0, "done_reason": "length",
-                 "raw_text": "Okay, the user wants"})
-        return printed
-
-    def test_debug_off_prints_only_the_ticker_line(self):
-        printed = self._emit(debug=False)
-        self.assertEqual(len(printed), 1)
-        self.assertNotIn("length", printed[0])
-
-    def test_debug_on_appends_the_raw_answer_line(self):
-        printed = self._emit(debug=True)
-        self.assertEqual(len(printed), 2)
-        self.assertIn("—", printed[0])        # the decision that failed
-        self.assertIn("length", printed[1])   # ... and why it failed
-        self.assertIn("Okay, the user wants", printed[1])
-
-    def test_tallies_are_unaffected_by_debug(self):
-        state = make_state(enabled=False)
-        state.debug = True
-        counter = tui._TickerCounter(state, lambda _line: None)
-        counter({"node": "menu", "valid": True, "out_tokens": 2,
-                 "wall_s": 0.1, "attempt": 0})
-        self.assertEqual((counter.decisions, counter.tokens), (1, 2))
-
-
-class DebugTokensLineTest(unittest.TestCase):
-    """The token-level dump line under every LLM call while /debug is on."""
-
-    def _event(self, **overrides):
-        event = {"debug": True,
-                 "prompt_text": "Pick one\n1 = go\nReply with ONE digit.",
-                 "result_text": " 1",
-                 "prompt_tokens": 42, "out_tokens": 2,
-                 "done_reason": "stop"}
-        return {**event, **overrides}
-
-    def test_shows_prompt_result_and_token_counts(self):
-        line = tui.build_debug_tokens_line(self._event(), enabled=False)
-        self.assertIn("Pick one", line)
-        self.assertIn("' 1'", line)
-        self.assertIn("42pt/2ot", line)
-        self.assertIn("stop", line)
-
-    def test_clips_long_prompt_and_result(self):
-        line = tui.build_debug_tokens_line(
-            self._event(prompt_text="x" * 500, result_text="y" * 300),
-            enabled=False)
-        self.assertIn("…", line)
-        self.assertNotIn("x" * (tui.DEBUG_PROMPT_HEAD
-                                + tui.DEBUG_PROMPT_TAIL + 1), line)
-        self.assertNotIn("y" * (tui.DEBUG_RESULT_CLIP + 1), line)
-
-    def test_long_prompt_shows_the_tail_not_just_the_head(self):
-        # The routing-debug failure shape: a head-only clip showed nothing
-        # but the system block; the request and menu live at the tail.
-        tail = ("Request: do a web search for forecast on the economy of "
-                "japan\n\nWhich agent should handle this request?\n"
-                "ACTIONS:\n2 = code — write or debug Python code\n\n"
-                "ANSWER:")
-        prompt = "<|im_start|>system\nbe terse\n" + "pad " * 100 + "\n" + tail
-        line = tui.build_debug_tokens_line(
-            self._event(prompt_text=prompt), enabled=False)
-        self.assertIn("economy of japan", line)
-        self.assertIn("ANSWER:", line)
-        self.assertIn("<|im_start|>system", line)  # head still identifies it
-
-    def test_short_prompt_stays_a_single_plain_repr(self):
-        line = tui.build_debug_tokens_line(self._event(), enabled=False)
-        self.assertEqual(line.count("…"), 0)
-
-    def test_no_escape_when_disabled(self):
-        self.assertNotIn(
-            "\x1b", tui.build_debug_tokens_line(self._event(), enabled=False))
-
-    def test_missing_keys_do_not_crash(self):
-        line = tui.build_debug_tokens_line({}, enabled=False)
-        self.assertIn("''", line)
-        self.assertIn("0pt/0ot", line)
-
-
-class TickerCounterDebugTokensTest(unittest.TestCase):
-    """Debug events are printed when /debug is on, skipped when off."""
-
-    def _emit(self, debug: bool) -> list:
-        state = make_state(enabled=False)
-        state.debug = debug
-        printed = []
-        counter = tui._TickerCounter(state, printed.append)
-        counter({"debug": True, "prompt_text": "hi", "result_text": "yo",
-                 "prompt_tokens": 5, "out_tokens": 1, "done_reason": "stop"})
-        return printed
-
-    def test_debug_tokens_off_prints_nothing(self):
-        self.assertEqual(self._emit(debug=False), [])
-
-    def test_debug_tokens_on_prints_the_dump_line(self):
-        printed = self._emit(debug=True)
-        self.assertEqual(len(printed), 1)
-        self.assertIn("hi", printed[0])
-        self.assertIn("yo", printed[0])
-        self.assertIn("5pt/1ot", printed[0])
-
-
-class TickerCounterDebugFullTest(unittest.TestCase):
-    """/debug full streams the whole prompt of every model call."""
-
-    def _emit(self):
-        state = make_state(enabled=False)
-        state.debug = True
-        state.debug_full = True
-        printed = []
-        counter = tui._TickerCounter(state, printed.append)
-        counter({"debug": True, "system_text": "be terse",
-                 "prompt_text": "Request: hi\nACTIONS:\n1 = a\n2 = b\n\n"
-                                "ANSWER:",
-                 "result_text": " 1", "prompt_tokens": 5, "out_tokens": 1,
-                 "done_reason": "stop"})
-        return printed
-
-    def test_every_prompt_line_is_streamed_unclipped(self):
-        printed = self._emit()
-        joined = "\n".join(printed)
-        self.assertIn("· system:", joined)
-        self.assertIn("be terse", joined)
-        self.assertIn("Request: hi", joined)
-        self.assertIn("ANSWER:", joined)
-        self.assertIn("5pt/1ot", joined)
-
-    def test_long_lines_are_not_clipped(self):
-        state = make_state(enabled=False)
-        state.debug = True
-        state.debug_full = True
-        printed = []
-        counter = tui._TickerCounter(state, printed.append)
-        counter({"debug": True, "prompt_text": "x" * 5000,
-                 "result_text": "", "prompt_tokens": 1, "out_tokens": 0,
-                 "done_reason": "stop"})
-        self.assertTrue(any("x" * 5000 in line for line in printed))
-
-
-class DebugFullLinesTest(unittest.TestCase):
-    """The /debug full dump: complete prompt and result, nothing clipped."""
-
-    def _event(self, **overrides):
-        event = {"debug": True, "system_text": "be terse",
-                 "prompt_text": "Request: hi\nACTIONS:\n1 = a\n2 = b",
-                 "result_text": " 1", "prompt_tokens": 9, "out_tokens": 2,
-                 "done_reason": "stop"}
-        return {**event, **overrides}
-
-    def test_shows_system_prompt_and_result_with_counts(self):
-        joined = "\n".join(tui.build_debug_full_lines(self._event(),
-                                                      enabled=False))
-        self.assertIn("system:", joined)
-        self.assertIn("be terse", joined)
-        self.assertIn("2 = b", joined)
-        self.assertIn("' 1'", joined)
-        self.assertIn("9pt/2ot", joined)
-        self.assertIn("stop", joined)
-
-    def test_raw_template_prompt_needs_no_system_block(self):
-        # Raw mode embeds the system block in the template already.
-        joined = "\n".join(tui.build_debug_full_lines(
-            self._event(system_text=""), enabled=False))
-        self.assertNotIn("system:", joined)
-        self.assertIn("Request: hi", joined)
-
-    def test_missing_keys_do_not_crash(self):
-        lines = tui.build_debug_full_lines({}, enabled=False)
-        self.assertTrue(lines)
-        self.assertNotIn("\x1b", "\n".join(lines))
-
-
 class NoColorTest(unittest.TestCase):
-    def test_ticker_has_no_escape_when_disabled(self):
-        event = {"node": "menu", "value": "x", "valid": True,
-                 "out_tokens": 1, "wall_s": 0.1}
-        self.assertNotIn("\x1b", tui.build_ticker_line(event, enabled=False))
-
     def test_panel_and_banner_have_no_escape_when_disabled(self):
         panel = tui.render_result({"agent": "web", "answer": "hi"},
                                   enabled=False)
@@ -397,14 +97,14 @@ class GradientTest(unittest.TestCase):
         self.assertEqual(tui.gradient("ThreeToks", enabled=False), "ThreeToks")
 
     def test_enabled_gradient_spans_the_ramp(self):
-        colored = tui.gradient("ThreeToks", enabled=True)
-        self.assertIn(f"38;5;{tui.RAMP[0]}m", colored)   # starts cyan
-        self.assertIn(f"38;5;{tui.RAMP[-1]}m", colored)  # ends pink
+        colored = theme.gradient("ThreeToks", enabled=True)
+        self.assertIn(f"38;5;{theme.RAMP[0]}m", colored)   # starts cyan
+        self.assertIn(f"38;5;{theme.RAMP[-1]}m", colored)  # ends pink
 
     def test_hairline_is_panel_width_with_one_node(self):
-        line = tui.hairline(6, enabled=False)
-        self.assertEqual(len(line), tui.PANEL_WIDTH)
-        self.assertEqual(line.count(tui.NODE), 1)
+        line = theme.hairline(6, enabled=False)
+        self.assertEqual(len(line), theme.PANEL_WIDTH)
+        self.assertEqual(line.count(theme.NODE), 1)
 
 
 class ResultPanelTest(unittest.TestCase):
@@ -811,20 +511,17 @@ class ReplLoopTest(unittest.TestCase):
         tui.repl(state, read_input=raise_eof, sink=printed.append)
         self.assertTrue(any("mesh offline" in line for line in printed))
 
-    def test_run_task_streams_ticker_and_panel(self):
+    def test_run_task_streams_a_tree_and_panel(self):
         state = make_state(enabled=False)
         events = [{"node": "menu", "value": "go", "valid": True,
                    "out_tokens": 2, "wall_s": 0.1}]
 
-        class TracerStub:
-            on_event = None
-
         class PolicyStub:
-            tracer = TracerStub()
+            tracer = Tracer(None)
 
         def run(task, services, policy):
             for event in events:
-                policy.tracer.on_event(event)
+                policy.tracer.record(event)
             return {"agent": "web", "answer": "done"}
 
         def route(task, specs, policy):
@@ -833,15 +530,35 @@ class ReplLoopTest(unittest.TestCase):
         state.policy = PolicyStub()
         printed = []
         tui._run_task(state, "hi", route, printed.append)
-        joined = "\n".join(printed)
-        self.assertIn("go", joined)       # ticker line for the event
-        self.assertIn("done", joined)     # answer in the panel
-        self.assertIn("1 decisions", joined)
+        self.assertEqual(printed[0], "  ◆ pick an agent")
+        self.assertTrue(printed[1].startswith("  ╰ web · 0 calls · 0t"))
+        self.assertEqual(printed[2], "  ◆ web agent")
+        self.assertIn("go", printed[3])          # the decision row
+        self.assertTrue(printed[4].startswith("  ╰ answered · 1 call"))
+        self.assertIn("done", printed[5])        # answer in the panel
+        self.assertIn("1 decisions", printed[5])
+
+    def test_run_task_ends_the_branch_when_the_agent_fails(self):
+        state = make_state(enabled=False)
+
+        class PolicyStub:
+            tracer = Tracer(None)
+
+        def run(task, services, policy):
+            raise RuntimeError("ollama down")
+
+        state.policy = PolicyStub()
+        printed = []
+        with self.assertRaises(RuntimeError):
+            tui._run_task(state, "hi",
+                          lambda *_: FakeSpecWithRun("web", "r", run),
+                          printed.append)
+        self.assertTrue(printed[-1].startswith("  ╰ stopped"), printed)
 
 
 @dataclass
 class FakeSpecWithRun:
-    """A spec whose run function drives the ticker in the loop test."""
+    """A spec whose run function drives the progress tree in the loop test."""
     name: str
     description: str
     run: object

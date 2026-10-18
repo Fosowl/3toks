@@ -16,12 +16,17 @@ from threetoks.nodes import MenuNode, PickManyNode, ShortTextNode
 from threetoks.policy import Policy
 from threetoks.render import Episode
 from threetoks.services import Services
+from threetoks.trace import span
 from threetoks.web.notes import NoteStore
-from threetoks.web.target import (QUERY_TEMPERATURE, TargetBelief,
-                                 normalize_query, strategy_queries,
-                                 too_similar, update_belief)
-from threetoks.web.vertical import (SEARCH_UNAVAILABLE_ANSWER,
-                                    WebResearchVertical)
+from threetoks.web.target import (
+    QUERY_TEMPERATURE,
+    TargetBelief,
+    normalize_query,
+    strategy_queries,
+    too_similar,
+    update_belief,
+)
+from threetoks.web.vertical import SEARCH_UNAVAILABLE_ANSWER, WebResearchVertical
 
 JUDGE_PREFIX = ("You strictly judge research answers. Vague answers, "
                 "meta-text about pages, or answers that dodge the "
@@ -299,6 +304,7 @@ def deep_research(task: str, services: Services, policy: Policy) -> dict:
     query = task
     result: dict = {"answer": None}
     total_rounds = max(1, services.max_research_rounds)
+    tracer = getattr(policy, "tracer", None)
     for round_number in range(1, total_rounds + 1):
         tried.append(query)
         prior = tried[:-1]  # queries earlier rounds already burned
@@ -306,16 +312,15 @@ def deep_research(task: str, services: Services, policy: Policy) -> dict:
             recall_line, belief.line(),
             f"QUERIES ALREADY TRIED (do not repeat): {', '.join(prior)}"
             if prior else None) if line)
-        vertical = WebResearchVertical(task, services.provider,
-                                       services.fetch_page, notes,
-                                       initial_query=query,
-                                       context_lines=context,
-                                       seen_urls=seen_urls,
-                                       tried_queries=executed,
-                                       blocked_hosts=services.blocked_hosts)
-        vertical.tracer = getattr(policy, "tracer", None)  # fetch failures
-        result = run_episode(vertical, policy,
-                             max_steps=max(1, services.max_research_steps))
+        with span(tracer, f"round {round_number} · search and read"):
+            vertical = WebResearchVertical(
+                task, services.provider, services.fetch_page, notes,
+                initial_query=query, context_lines=context,
+                seen_urls=seen_urls, tried_queries=executed,
+                blocked_hosts=services.blocked_hosts)
+            vertical.tracer = tracer  # fetch failures
+            result = run_episode(vertical, policy,
+                                 max_steps=max(1, services.max_research_steps))
         notes = vertical.notes  # adopt curation pruning across rounds
         result["rounds"] = round_number
         result["queries"] = list(tried)
@@ -333,17 +338,40 @@ def deep_research(task: str, services: Services, policy: Policy) -> dict:
             result["judged_good"] = False
             result["target"] = _target_summary(belief)
             return result
-        if judge_answer(task, result, policy):
+        if _is_answer_accepted(task, result, policy):
             result["judged_good"] = True
             result["target"] = _target_summary(belief)
             return result
-        if round_number < total_rounds:
+        if round_number == total_rounds:
+            break  # the last round needs no next search
+        with span(tracer, "choose the next search") as chosen:
             belief = update_belief(task, belief, notes, policy)
             query = propose_query(task, tried, policy, belief,
                                   banned=executed)
+            chosen["result"] = query
     result["judged_good"] = False
     result["target"] = _target_summary(belief)
     return result
+
+
+def _is_answer_accepted(task: str, result: dict, policy: Policy) -> bool:
+    """Ask the judge panel about one round inside a "check the answer" span.
+
+    deep_research calls this after each round, so the TUI tree shows
+    the judge votes in their own branch with the verdict at the end.
+
+    Args:
+        task (str): the user request, from deep_research.
+        result (dict): the round result with "answer" and "notes".
+        policy (Policy): the decision policy; its tracer gets the span.
+
+    Returns:
+        bool: True when the panel accepts the answer.
+    """
+    with span(getattr(policy, "tracer", None), "check the answer") as verdict:
+        accepted = judge_answer(task, result, policy)
+        verdict["result"] = "accepted" if accepted else "rejected"
+    return accepted
 
 
 def _search_layer_down(services: Services) -> bool:

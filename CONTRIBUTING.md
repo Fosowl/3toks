@@ -126,9 +126,10 @@ spike under `spikes/` first and cite the numbers in your PR:
 
 Open an issue with: what you ran, what you expected, what happened, and
 (if relevant) a `--trace out.jsonl` capture from `threetoks.cli` — the
-trace records every decision node, option set, and model output, which is
-usually enough to diagnose a policy/prompt problem without reproducing it
-live.
+trace records every decision node, option set, and model output, plus
+`span` open/close rows that name each part of the task (rows without a
+`node` key), which is usually enough to diagnose a policy/prompt problem
+without reproducing it live.
 
 ## Security issues
 
