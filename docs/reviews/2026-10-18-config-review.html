@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Config review and live apply — 2026-10-18</title>
+<style>
+body { font: 15px/1.6 system-ui, sans-serif; max-width: 860px; margin: 2em auto; padding: 0 1em; color: #1d2733; }
+h1, h2 { color: #0b4f6c; }
+table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+th, td { border: 1px solid #c9d6df; padding: 6px 8px; text-align: left; vertical-align: top; }
+th { background: #eef4f8; }
+code { background: #f3f6f8; padding: 0 3px; }
+.ok { color: #1b7a3d; font-weight: 600; }
+.warn { color: #9a6200; font-weight: 600; }
+p { margin: 0.6em 0; }
+</style>
+</head>
+<body>
+<h1>Config review and live apply</h1>
+<p><b>Harbormaster here, I report that</b> every setting now works in the running chat, with no restart.</p>
+<p>Commit: <code>547c325</code>. Tests: 1202 pass, 4 skip.</p>
+
+<h2>1. The main fix: no restart</h2>
+<p>Before: only 4 of 26 settings worked in a running chat. The rest waited for a restart or for <code>/voice on</code>.</p>
+<p>Now: the chat reads the config file again before each line you type. It applies each changed section and prints what it applied.</p>
+<p>This works for a save from <code>/config</code>, from <code>/setup</code>, from <code>threetoks config set</code>, and from an editor.</p>
+<p>If the file has an error, the chat keeps its settings and shows the error.</p>
+<p>If one part cannot start (no API key, no Chrome, no voice model), the chat keeps the old value for that part. It tries again at the next save.</p>
+<p>A model that you chose with <code>-m</code> or <code>/model</code> stays, unless you save a new <code>llm.model</code>. A <code>/deep</code> choice also stays.</p>
+<p>Ctrl-C during a slow apply does not end the chat. The rest applies at the next line.</p>
+
+<h2>2. Settings that did nothing</h2>
+<table>
+<tr><th>Setting</th><th>Problem</th><th>Fix</th></tr>
+<tr><td><code>llm.vote_k</code></td><td>Never reached the policy.</td><td>Goes into <code>PolicyConfig.vote_k</code>.</td></tr>
+<tr><td><code>search.searxng_url</code></td><td>Never read. Only the env var worked.</td><td>Used by the provider and the browser gate. The env var still overrides it.</td></tr>
+<tr><td><code>research.max_steps</code></td><td>Never read, also not by the CLI flag.</td><td>Step cap of each research round.</td></tr>
+</table>
+
+<h2>3. Each setting, checked</h2>
+<p>A throwaway script changed each of the 26 settings. It compared the live session after a save with a fresh start on the same file.</p>
+<p class="ok">26 of 26: live value = fresh-start value, and different from the default.</p>
+<p>A real TUI run also applied <code>threetoks config set</code> changes from a second terminal at the next line.</p>
+
+<h2>4. Robustness fixes (from the audit)</h2>
+<table>
+<tr><th>Problem</th><th>Now</th></tr>
+<tr><td>A non-UTF-8 file crashed every command.</td><td>The file is reported and ignored. A BOM is accepted.</td></tr>
+<tr><td>An unreadable file was silently ignored.</td><td>The error is reported.</td></tr>
+<tr><td><code>config set</code> wrote into a broken file and said "ok".</td><td>It refuses with exit 1. The screen refuses too.</td></tr>
+<tr><td>Bad values fell back to defaults with no word.</td><td>Start, reload, screen, <code>config show/get/set</code> and <code>doctor</code> name each one.</td></tr>
+<tr><td>A bad value could not be fixed with <code>config set</code> or the screen.</td><td>A save writes the default in its place.</td></tr>
+<tr><td>Out-of-range numbers (<code>vote_k = 0</code>, <code>nan</code>, <code>inf</code>) were used.</td><td>They fall back to the default, like other bad values.</td></tr>
+<tr><td>Typos like <code>[LLM]</code> or <code>votek</code> were silent.</td><td>They are named as unknown.</td></tr>
+<tr><td><code>vote_k = 3 # note</code> was a bad value.</td><td>Inline comments after a space work.</td></tr>
+<tr><td><code>~</code> was not expanded in paths.</td><td>It is expanded.</td></tr>
+<tr><td><code>config set KEY</code> without a value cleared the key.</td><td>Usage error, exit 2.</td></tr>
+<tr><td>A missing key was inserted inside a multi-line value.</td><td>It goes below the value, in order.</td></tr>
+<tr><td>Arrow steps wrote <code>0.30000000000000004</code>.</td><td>Steps are rounded.</td></tr>
+<tr><td>The <code>/setup</code> wizard dropped your comments.</td><td>It keeps them.</td></tr>
+</table>
+
+<h2>5. Code structure</h2>
+<p><code>threetoks/session.py</code>: the session state and the functions that build or switch its parts.</p>
+<p><code>threetoks/live_config.py</code>: one applier per config section. A test makes sure each section has one.</p>
+<p><code>tui.py</code> went from 1280 to 1000 lines.</p>
+<p>The "live / restart / voice on" tags on the screen are gone, because every setting is live.</p>
+
+<h2>6. Not done</h2>
+<p class="warn">A first start with piped input still runs the line wizard on the piped lines.</p>
+<p class="warn">A <code>./config.ini</code> from another tool in the current folder still shadows your user file. This is the documented load order.</p>
+<p class="warn"><code>tui.py</code> is at the 1000-line limit. The next feature there needs a split (for example the ticker renderers).</p>
+</body>
+</html>
