@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/banner.svg" alt="ThreeToks. A neon flying fish leaps out of a night sea in front of a striped sun. Text: Small choices. Deep research." width="100%">
+  <img src="docs/assets/3toks_LOGO.png" alt="ThreeToks Logo" width="100%">
 </p>
 
 <p align="center">
