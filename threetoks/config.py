@@ -80,8 +80,9 @@ class LlmConfig:
     recommended). ``api_base`` overrides the provider's default URL.
     ``send_seed`` = false stops chat requests from carrying a sampling
     seed, for OpenAI-shaped servers that reject the parameter.
-    ``disable_think`` = true pre-closes the reasoning block in raw-mode
-    ChatML prompts; thinking Qwen models answer empty without it.
+    ``disable_think`` = true pre-closes raw-mode ChatML reasoning blocks
+    and sends ``reasoning_effort: "none"`` to OpenAI-compatible servers.
+    The chat parameter requires server and model support.
     """
 
     model: str = DEFAULT_MODEL
@@ -417,8 +418,9 @@ _INI_TEMPLATE = """\
 # api_base overrides the provider's default URL (required for custom).
 # send_seed = false omits the sampling seed from chat requests, for
 # OpenAI-shaped servers that reject the parameter (e.g. colibri).
-# disable_think = true starts each raw-mode (ollama) ChatML answer with an
-# empty <think></think> block; thinking Qwen models answer empty without it.
+# disable_think = true pre-closes raw-mode (ollama) ChatML reasoning blocks
+# and sends reasoning_effort = "none" in OpenAI-compatible chat requests.
+# Set false for chat servers or models that reject that parameter.
 model = {model}
 host = {host}
 provider = {provider}
