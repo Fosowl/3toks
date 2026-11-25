@@ -93,6 +93,22 @@ class MakeBackendTest(unittest.TestCase):
             llm.send_seed = False
             self.assertFalse(make_backend(llm).send_seed)
 
+    def test_disable_think_controls_chat_reasoning_effort(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            llm = _Llm("custom", api_base="http://localhost:1234/v1")
+            prompt, opts = ChatPrompt("", "pick"), GenOpts(max_tokens=3)
+            backend = make_backend(llm)
+            self.assertEqual(backend._payload("m", prompt, opts)["reasoning_effort"],
+                             "none")
+            for disabled in (False, True):
+                llm.disable_think = disabled
+                backend = make_backend(llm)
+                payload = backend._payload("m", prompt, opts)
+                if disabled:
+                    self.assertEqual(payload["reasoning_effort"], "none")
+                else:
+                    self.assertNotIn("reasoning_effort", payload)
+
     def test_custom_without_api_base_raises(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(RuntimeError, "api_base"):
@@ -117,7 +133,8 @@ class OpenAIChatBackendTest(unittest.TestCase):
                          {"role": "system", "content": "sys"})
         self.assertIn('Begin your reply with "ANSWER:"',
                       payload["messages"][1]["content"])
-        self.assertEqual(payload["max_tokens"], 3)
+        # ANSWER + colon + separator must not consume the digit's budget.
+        self.assertGreaterEqual(payload["max_tokens"], 3 + 3)
         self.assertEqual(payload["seed"], 7)
         self.assertNotIn("stop", payload)
 
@@ -129,6 +146,17 @@ class OpenAIChatBackendTest(unittest.TestCase):
         _, payload = backend.sent
         self.assertNotIn("seed", payload)
 
+    def test_no_think_disables_reasoning_effort(self):
+        backend = _CannedOpenAI("https://api.example.test/v1", api_key="k",
+                                no_think=True)
+        backend.chat("m", ChatPrompt("", "pick"), GenOpts(max_tokens=3))
+        _, payload = backend.sent
+        self.assertEqual(payload["reasoning_effort"], "none")
+        self.assertNotIn("chat_template_kwargs", payload)
+        off = _CannedOpenAI("https://api.example.test/v1", api_key="k")
+        off.chat("m", ChatPrompt("", "pick"), GenOpts(max_tokens=3))
+        self.assertNotIn("reasoning_effort", off.sent[1])
+
     def test_no_system_and_no_prefill_stay_absent(self):
         (_, payload), _ = self.chat(ChatPrompt("", "pick"),
                                     GenOpts(max_tokens=3))
@@ -136,6 +164,7 @@ class OpenAIChatBackendTest(unittest.TestCase):
         self.assertEqual(roles, ["user"])
         self.assertEqual(payload["messages"][0]["content"], "pick")
         self.assertNotIn("seed", payload)
+        self.assertEqual(payload["max_tokens"], 3)
 
     def test_stops_capped_at_four(self):
         (_, payload), _ = self.chat(ChatPrompt("", "u"),

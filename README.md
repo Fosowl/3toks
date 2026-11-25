@@ -352,7 +352,9 @@ ThreeToks is **local first**. You need no account and no API key. Nothing leaves
 |---|---|---|
 | Ollama (default) | `ollama` | raw. This is the path we measured. |
 | LM Studio | `lm-studio` | chat, at `localhost:1234` |
-| Any local server with an OpenAI-style API (llama.cpp, vLLM, [Colibri](#colibri-work-in-progress), …) | `custom`, plus `api_base` | chat |
+| Any local server with an OpenAI-style API (llama.cpp, Strata, vLLM, [Colibri](#colibri-work-in-progress), …) | `custom`, plus `api_base` | chat |
+
+See [OpenAI-style engines](#openai-style-engines) for llama.cpp, Strata, vLLM, and anything else that speaks the OpenAI chat API.
 
 ```ini
 [llm]
@@ -363,9 +365,8 @@ model = my-local-model
 
 If your local server needs a key, put it in the `LLM_API_KEY` environment variable. Otherwise you need no setup. ThreeToks has no SDK to install.
 
-**Thinking models.** `[llm] disable_think = true` is the default. It starts each raw answer with an empty `<think></think>` block.
-Thinking Qwen models need this. Without it, qwen3.8 answers every menu with nothing, and the router falls back to `casual`.
-Set it to `false` to send the plain prompt.
+**Thinking models.** `[llm] disable_think = true` is the default. It starts raw ChatML answers with an empty `<think></think>` block and sends `"reasoning_effort": "none"` in OpenAI-compatible chat requests.
+Set it to `false` to send the plain raw prompt or omit the chat parameter. Chat servers and models must support that parameter.
 
 **Debugging.** `/debug on` shows each raw answer and the reason it stopped. The reason `length` means that the node's token limit cut the reply before the model answered.
 
@@ -395,6 +396,40 @@ ThreeToks reads keys from the environment only. It never reads them from a confi
 Cloud providers use the same chat mode as the other chat providers in the table above. They work, but we do not recommend them.
 
 </details>
+
+## OpenAI-style engines
+
+llama.cpp (`llama-server`), Strata, vLLM, and anything else that speaks the OpenAI chat API plug in as the `custom` provider.
+They need no new ThreeToks code:
+
+```ini
+[llm]
+provider = custom
+api_base = http://127.0.0.1:1234/v1   ; the full URL, scheme included
+model = my-local-model                ; must match what the server serves
+```
+
+Start the engine so that it serves `POST /v1/chat/completions`, then point `api_base` at it. ThreeToks appends `/chat/completions` to `api_base`, so:
+
+- `http://127.0.0.1:1234/v1` requests `http://127.0.0.1:1234/v1/chat/completions`. Good.
+- `/v1` alone requests `/v1/chat/completions` — no host, and Python answers `ValueError: unknown url type`. `api_base` must be a full URL.
+
+Gotchas:
+
+- **`0.0.0.0` is a bind address, not a destination.** An engine that logs `ready: http://127.0.0.1:1234/v1` is reachable at exactly that URL.
+- **`ollama_host` is ignored for `custom`.** It is only used by the `ollama` provider. Same for the LM Studio port.
+- **The key, if any,** goes in the `LLM_API_KEY` environment variable. Leave it out when the engine needs no key.
+- **Thinking can exhaust the answer budget.** Menu nodes request only a few tokens. For Strata, keep `[llm] disable_think = true`: ThreeToks sends `"reasoning_effort": "none"` in each OpenAI-compatible chat request to disable thinking. Set it to false for servers or models that do not support that value; they may ignore it or reject the request.
+- **Chat prefixes need output tokens too.** Unlike raw-mode prefill, the chat API must generate the requested `ANSWER:` prefix. ThreeToks reserves extra tokens for that prefix in addition to the node's answer budget, then strips it before parsing.
+
+Launch examples (any model that fits your GPU; `--port`/`--model` names differ per engine, and `model` above must match what you serve):
+
+| Engine | Start it with | Then set |
+|---|---|---|
+| llama.cpp | `llama-server -m model.gguf --port 8080` | `api_base = http://127.0.0.1:8080/v1` |
+| Strata | `strata serve --model model.gguf --port 1234` | `api_base = http://127.0.0.1:1234/v1` |
+| vLLM | `vllm serve org/model --port 8000` | `api_base = http://127.0.0.1:8000/v1` |
+| Colibri | `coli serve --model-id glm-5.2` | see [Colibri](#colibri-work-in-progress) |
 
 ## Colibri (work in progress)
 

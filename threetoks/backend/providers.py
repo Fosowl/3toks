@@ -67,7 +67,8 @@ def make_backend(llm):
     key = _require_key(key_env, llm.provider) if key_required \
         else os.environ.get(key_env, "")
     return OpenAIChatBackend(base_url, api_key=key,
-                             send_seed=getattr(llm, "send_seed", True))
+                             send_seed=getattr(llm, "send_seed", True),
+                             no_think=getattr(llm, "disable_think", True))
 
 
 def _require_key(env_var: str, provider: str) -> str:
@@ -127,15 +128,18 @@ class OpenAIChatBackend:
     lm-studio/custom — they differ only in base URL and key env var (see
     OPENAI_COMPAT). Prefill is hinted and stripped, never native.
     ``send_seed=False`` omits the sampling seed from requests, for
-    servers that reject the parameter.
+    servers that reject the parameter. ``no_think=True`` adds
+    ``reasoning_effort: "none"``. Requires server and model support.
     """
 
     def __init__(self, base_url: str, api_key: str = "",
-                 timeout_s: int = DEFAULT_TIMEOUT_S, send_seed: bool = True):
+                 timeout_s: int = DEFAULT_TIMEOUT_S, send_seed: bool = True,
+                 no_think: bool = False):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout_s = timeout_s
         self.send_seed = send_seed
+        self.no_think = no_think
 
     def chat(self, model: str, prompt: ChatPrompt, opts: GenOpts) -> GenResult:
         """Run one chat completion and map it onto GenResult."""
@@ -161,7 +165,11 @@ class OpenAIChatBackend:
         messages.append({"role": "user",
                          "content": _openai_content(_hinted_user(prompt),
                                                     opts.images)})
-        max_tokens = opts.max_tokens
+        # Unlike raw/Anthropic prefill, the hinted prefix is generated and
+        # charged to max_tokens. Reserve conservatively one token per UTF-8
+        # byte (no server tokenizer available), plus a separating space.
+        prefix_room = len(prompt.prefill.encode("utf-8")) + 1 if prompt.prefill else 0
+        max_tokens = opts.max_tokens + prefix_room
         payload = {"model": model, "messages": messages,
                    "max_tokens": max_tokens,
                    "temperature": opts.temperature}
@@ -169,6 +177,8 @@ class OpenAIChatBackend:
             payload["stop"] = list(opts.stop[:MAX_OPENAI_STOPS])
         if opts.seed is not None and self.send_seed:
             payload["seed"] = opts.seed
+        if self.no_think:
+            payload["reasoning_effort"] = "none"
         if "openrouter.ai" in self.base_url:
             payload["include_reasoning"] = False
             payload["transforms"] = ["strip-reasoning"]

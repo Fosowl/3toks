@@ -83,7 +83,7 @@ FIELDS = (
     Field("llm", "send_seed", KIND_BOOL, "send seed",
           "Off for servers that reject the sampling seed."),
     Field("llm", "disable_think", KIND_BOOL, "disable think",
-          "Pre-close the think block. Thinking Qwen needs it on."),
+          "Pre-close raw thinking; send reasoning_effort=none in chat."),
     Field("browser", "mode", KIND_CHOICE, "fetch mode",
           "http = fast, no JavaScript. plain = real Chrome.",
           choices=BROWSER_MODES),
